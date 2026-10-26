@@ -22,7 +22,10 @@ import {
   validateRowInput,
   PRIMARY_ADMIN_EMAIL,
   emailToDocId,
+  isFictionalOrBlockedEmail,
   isValidEmailAddress,
+  resolveAuthorizedUserAccess,
+  sanitizeUsersList,
   upsertUserByEmail,
   deleteUserFromList,
 } from './scheduleLogic';
@@ -297,6 +300,57 @@ test('Email-based RBAC: add email, switch role between Editor and Admin, and del
   assert.equal(afterDelete.error, undefined);
   assert.equal(afterDelete.deleted?.email, 'staff@gmail.com');
   assert.equal(afterDelete.updated.length, 1);
+
+  // 5. Block and purge fictional @meetazzoun.org emails completely
+  assert.equal(isFictionalOrBlockedEmail('editor@meetazzoun.org'), true);
+  assert.equal(isValidEmailAddress('editor@meetazzoun.org'), false);
+  const pollutedList: UserProfile[] = [
+    ...withEditor,
+    {
+      uid: 'editor_at_meetazzoun_dot_org',
+      email: 'editor@meetazzoun.org',
+      displayName: 'حساب وهمي',
+      role: 'EDITOR',
+      allowedDays: ['saturday'],
+    },
+  ];
+  const cleaned = sanitizeUsersList(pollutedList);
+  assert.equal(
+    cleaned.some((u) => u.email.includes('meetazzoun.org')),
+    false
+  );
+
+  // 6. Strict Whitelist: Unregistered email MUST fail login & editing
+  const unregisteredAccess = resolveAuthorizedUserAccess({
+    email: 'stranger@gmail.com',
+    uid: 'uid-stranger',
+    registeredUsers: cleaned,
+  });
+  assert.equal(unregisteredAccess.authorized, false);
+  assert.equal(unregisteredAccess.role, null);
+  assert.equal(
+    canUserEditDay(unregisteredAccess.role, unregisteredAccess.allowedDays, 'saturday'),
+    false
+  );
+
+  // 7. Registered editor gets ONLY their assigned role and allowedDays
+  const editorAccess = resolveAuthorizedUserAccess({
+    email: 'staff@gmail.com',
+    uid: 'uid-staff',
+    registeredUsers: cleaned,
+  });
+  assert.equal(editorAccess.authorized, true);
+  assert.equal(editorAccess.role, 'EDITOR');
+  assert.deepEqual(editorAccess.allowedDays, ['saturday', 'sunday']);
+  assert.equal(
+    canUserEditDay(editorAccess.role, editorAccess.allowedDays, 'saturday'),
+    true
+  );
+  assert.equal(
+    canUserEditDay(editorAccess.role, editorAccess.allowedDays, 'tuesday'),
+    false
+  );
 });
+
 
 

@@ -535,9 +535,25 @@ export function buildDailySocialPostText(
 
 export const PRIMARY_ADMIN_EMAIL = 'ahmed0soliman6@gmail.com';
 
+export const BLOCKED_FICTIONAL_EMAILS = new Set([
+  'editor@meetazzoun.org',
+  'editor2@meetazzoun.org',
+  'admin@meetazzoun.org',
+]);
+
+export function isFictionalOrBlockedEmail(email?: string | null): boolean {
+  if (!email) return true;
+  const clean = email.trim().toLowerCase();
+  if (!clean) return true;
+  if (BLOCKED_FICTIONAL_EMAILS.has(clean)) return true;
+  if (clean.endsWith('@meetazzoun.org')) return true;
+  return false;
+}
+
 export function isValidEmailAddress(email: string): boolean {
   const trimmed = email.trim().toLowerCase();
   if (trimmed.length < 5 || trimmed.length > 160) return false;
+  if (isFictionalOrBlockedEmail(trimmed)) return false;
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed);
 }
 
@@ -551,6 +567,119 @@ export function emailToDocId(email: string): string {
   return (normalized || 'user_email').slice(0, 120);
 }
 
+export function sanitizeUsersList(users: UserProfile[]): UserProfile[] {
+  const allDayIds = DAYS_LIST.map((d) => d.id);
+  const byEmail = new Map<string, UserProfile>();
+
+  // Always guarantee the primary admin is present with full ADMIN access
+  byEmail.set(PRIMARY_ADMIN_EMAIL, {
+    uid: emailToDocId(PRIMARY_ADMIN_EMAIL),
+    email: PRIMARY_ADMIN_EMAIL,
+    displayName: 'مدير مجمع ميت عزون الطبي',
+    role: 'ADMIN',
+    allowedDays: allDayIds,
+  });
+
+  for (const u of users || []) {
+    if (!u || !u.email) continue;
+    const cleanEmail = u.email.trim().toLowerCase();
+    if (!isValidEmailAddress(cleanEmail)) continue;
+
+    const isPrimary = cleanEmail === PRIMARY_ADMIN_EMAIL;
+    const validRole: UserRole =
+      isPrimary || u.role === 'ADMIN' ? 'ADMIN' : 'EDITOR';
+    const validDays: DayId[] =
+      validRole === 'ADMIN'
+        ? allDayIds
+        : Array.isArray(u.allowedDays) && u.allowedDays.length > 0
+        ? u.allowedDays.filter((d) => allDayIds.includes(d))
+        : allDayIds;
+
+    const existing = byEmail.get(cleanEmail);
+    // Prefer emailToDocId for consistent lookup or keep non-placeholder uid
+    const docId =
+      existing?.uid ||
+      (u.uid && !u.uid.includes('meetazzoun') ? u.uid : emailToDocId(cleanEmail));
+
+    byEmail.set(cleanEmail, {
+      uid: docId,
+      email: cleanEmail,
+      displayName:
+        (u.displayName || existing?.displayName || cleanEmail).slice(0, 120),
+      role: validRole,
+      allowedDays: validDays,
+    });
+  }
+
+  return Array.from(byEmail.values());
+}
+
+/**
+ * Strictly resolves whether a signed-in user is registered in the permissions list.
+ * Any email NOT registered in `registeredUsers` (and not PRIMARY_ADMIN_EMAIL) is REJECTED
+ * (`authorized: false`, `role: null`, `allowedDays: []`).
+ */
+export function resolveAuthorizedUserAccess(params: {
+  email?: string | null;
+  uid?: string | null;
+  registeredUsers: UserProfile[];
+}): {
+  authorized: boolean;
+  role: UserRole | null;
+  allowedDays: DayId[];
+  matchedProfile?: UserProfile;
+} {
+  const allDayIds = DAYS_LIST.map((d) => d.id);
+  const cleanEmail = (params.email || '').trim().toLowerCase();
+  if (!cleanEmail || isFictionalOrBlockedEmail(cleanEmail)) {
+    return { authorized: false, role: null, allowedDays: [] };
+  }
+
+  if (cleanEmail === PRIMARY_ADMIN_EMAIL) {
+    const adminProfile: UserProfile = {
+      uid: params.uid || emailToDocId(PRIMARY_ADMIN_EMAIL),
+      email: PRIMARY_ADMIN_EMAIL,
+      displayName: 'مدير مجمع ميت عزون الطبي',
+      role: 'ADMIN',
+      allowedDays: allDayIds,
+    };
+    return {
+      authorized: true,
+      role: 'ADMIN',
+      allowedDays: allDayIds,
+      matchedProfile: adminProfile,
+    };
+  }
+
+  const sanitized = sanitizeUsersList(params.registeredUsers);
+  const emailDocId = emailToDocId(cleanEmail);
+  const match = sanitized.find(
+    (u) =>
+      u.email.trim().toLowerCase() === cleanEmail ||
+      u.uid === emailDocId ||
+      (params.uid && u.uid === params.uid)
+  );
+
+  if (!match) {
+    return { authorized: false, role: null, allowedDays: [] };
+  }
+
+  const role: UserRole = match.role === 'ADMIN' ? 'ADMIN' : 'EDITOR';
+  const allowedDays: DayId[] =
+    role === 'ADMIN'
+      ? allDayIds
+      : Array.isArray(match.allowedDays) && match.allowedDays.length > 0
+      ? match.allowedDays
+      : [];
+
+  return {
+    authorized: true,
+    role,
+    allowedDays,
+    matchedProfile: match,
+  };
+}
+
 export function upsertUserByEmail(
   users: UserProfile[],
   input: {
@@ -562,7 +691,7 @@ export function upsertUserByEmail(
   }
 ): UserProfile[] {
   const cleanEmail = input.email.trim().toLowerCase();
-  if (!isValidEmailAddress(cleanEmail)) return users;
+  if (!isValidEmailAddress(cleanEmail)) return sanitizeUsersList(users);
 
   const docId = input.uid?.trim() || emailToDocId(cleanEmail);
   const effectiveRole: UserRole =
@@ -570,7 +699,9 @@ export function upsertUserByEmail(
       ? 'ADMIN'
       : 'EDITOR';
   const effectiveDays: DayId[] =
-    input.allowedDays && input.allowedDays.length > 0
+    effectiveRole === 'ADMIN'
+      ? DAYS_LIST.map((d) => d.id)
+      : input.allowedDays && input.allowedDays.length > 0
       ? input.allowedDays
       : DAYS_LIST.map((d) => d.id);
 
@@ -580,13 +711,14 @@ export function upsertUserByEmail(
       ? `مدير (${cleanEmail.split('@')[0]})`
       : `محرر (${cleanEmail.split('@')[0]})`);
 
-  const existingIndex = users.findIndex(
+  const sanitized = sanitizeUsersList(users);
+  const existingIndex = sanitized.findIndex(
     (u) =>
       u.email.trim().toLowerCase() === cleanEmail || u.uid === docId
   );
 
   if (existingIndex >= 0) {
-    return users.map((u, idx) =>
+    return sanitized.map((u, idx) =>
       idx === existingIndex
         ? {
             ...u,
@@ -600,7 +732,7 @@ export function upsertUserByEmail(
   }
 
   return [
-    ...users,
+    ...sanitized,
     {
       uid: docId,
       email: cleanEmail,
@@ -615,28 +747,34 @@ export function deleteUserFromList(
   users: UserProfile[],
   targetUidOrEmail: string
 ): { updated: UserProfile[]; deleted?: UserProfile; error?: string } {
+  const sanitized = sanitizeUsersList(users);
   const cleanTarget = targetUidOrEmail.trim().toLowerCase();
-  const targetUser = users.find(
+  const targetUser = sanitized.find(
     (u) =>
       u.uid.toLowerCase() === cleanTarget ||
       u.email.trim().toLowerCase() === cleanTarget
   );
 
   if (!targetUser) {
-    return { updated: users, error: 'المستخدم غير موجود' };
+    return { updated: sanitized, error: 'المستخدم غير موجود' };
   }
 
   if (targetUser.email.trim().toLowerCase() === PRIMARY_ADMIN_EMAIL) {
     return {
-      updated: users,
+      updated: sanitized,
       error: 'لا يمكن حذف البريد الأساسي لمالك النظام (Super Admin)',
     };
   }
 
   return {
-    updated: users.filter((u) => u.uid !== targetUser.uid),
+    updated: sanitized.filter(
+      (u) =>
+        u.uid !== targetUser.uid &&
+        u.email.trim().toLowerCase() !== targetUser.email.trim().toLowerCase()
+    ),
     deleted: targetUser,
   };
 }
+
 
 

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  deleteUser,
   onAuthStateChanged,
   signInWithPopup,
   signOut,
@@ -36,6 +37,7 @@ import {
 import {
   auth,
   db,
+  defaultDb,
   googleProvider,
   handleFirestoreError,
   mirrorDeleteDocFromDefault,
@@ -67,11 +69,14 @@ import {
   deleteUserFromList,
   detectConcurrentConflict,
   emailToDocId,
+  isFictionalOrBlockedEmail,
   mergeConflictingRows,
   moveScheduleRow,
   normalizeSortOrders,
   reorderScheduleRows,
+  resolveAuthorizedUserAccess,
   sanitizeRowForFirestore,
+  sanitizeUsersList,
   updateScheduleRow,
   upsertUserByEmail,
 } from './utils/scheduleLogic';
@@ -107,7 +112,7 @@ const FALLBACK_SETTINGS: CenterSettings = {
   footerBgColor: '#1e295b',
 };
 
-const STORAGE_KEY = 'meet_azzoun_medical_schedules_v7';
+const STORAGE_KEY = 'meet_azzoun_medical_schedules_v8';
 
 const DEFAULT_USERS_LIST: UserProfile[] = [
   {
@@ -140,14 +145,18 @@ export default function App() {
   const [showCopyDayModal, setShowCopyDayModal] = useState(false);
   const [copyDayTarget, setCopyDayTarget] = useState<DayId>('sunday');
 
-  // Auth & RBAC state
+  // Auth & RBAC state — Strictly null until verified against registered emails
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [authReady, setAuthReady] = useState(false);
-  const [activeRole, setActiveRole] = useState<UserRole>('EDITOR');
-  const [allowedDays, setAllowedDays] = useState<DayId[]>(
-    DAYS_LIST.map((d) => d.id)
-  );
+  const [activeRole, setActiveRole] = useState<UserRole | null>(null);
+  const [allowedDays, setAllowedDays] = useState<DayId[]>([]);
+  const [authErrorBanner, setAuthErrorBanner] = useState<string | null>(null);
   const [usersList, setUsersList] = useState<UserProfile[]>(DEFAULT_USERS_LIST);
+  const usersListRef = useRef<UserProfile[]>(DEFAULT_USERS_LIST);
+
+  useEffect(() => {
+    usersListRef.current = usersList;
+  }, [usersList]);
 
   const [settings, setSettings] = useState<CenterSettings>(FALLBACK_SETTINGS);
   const [defaultSettings, setDefaultSettings] =
@@ -214,6 +223,14 @@ export default function App() {
     let mounted = true;
     async function loadInitialJson() {
       try {
+        // Purge legacy storage keys that might contain editor@meetazzoun.org
+        try {
+          localStorage.removeItem('meet_azzoun_medical_schedules_v7');
+          localStorage.removeItem('meet_azzoun_medical_schedules_v6');
+        } catch {
+          // Ignore
+        }
+
         const res = await fetch('/data/initial-schedules.json');
         const json = await res.json();
         if (!mounted) return;
@@ -230,7 +247,7 @@ export default function App() {
             if (cached.schedules) setSchedules(cached.schedules);
             if (cached.auditLogs) setAuditLogs(cached.auditLogs);
             if (Array.isArray(cached.usersList) && cached.usersList.length > 0) {
-              setUsersList(cached.usersList);
+              setUsersList(sanitizeUsersList(cached.usersList));
             }
             setIsLoaded(true);
             return;
@@ -281,7 +298,12 @@ export default function App() {
     try {
       localStorage.setItem(
         STORAGE_KEY,
-        JSON.stringify({ settings, schedules, auditLogs, usersList })
+        JSON.stringify({
+          settings,
+          schedules,
+          auditLogs,
+          usersList: sanitizeUsersList(usersList),
+        })
       );
     } catch {
       // Ignore storage quota errors
@@ -293,11 +315,19 @@ export default function App() {
     currentUserOverride?: FirebaseUser | null
   ) => {
     const activeUser = currentUserOverride ?? firebaseUser ?? auth.currentUser;
-    const uid = activeUser?.uid || 'admin-seed';
-    const userEmail = activeUser?.email || PRIMARY_ADMIN_EMAIL;
-    const userName = activeUser?.displayName || 'مدير مجمع ميت عزون الطبي';
+    if (!activeUser || !activeUser.email) return;
+
+    const uid = activeUser.uid;
+    const userEmail = activeUser.email.trim().toLowerCase();
+    const userName = activeUser.displayName || 'مدير مجمع ميت عزون الطبي';
 
     setSaveStatus('saving');
+
+    // Remove any legacy fictional email from Firestore immediately
+    mirrorDeleteDocFromDefault('users', 'editor_at_meetazzoun_dot_org');
+    void deleteDoc(doc(db, 'users', 'editor_at_meetazzoun_dot_org')).catch(
+      () => {}
+    );
 
     // 1. Save Center Settings
     const settingsPayload = {
@@ -307,12 +337,10 @@ export default function App() {
       updatedAt: serverTimestamp(),
     };
     await mirrorSetDocToDefault('settings', 'center', settingsPayload);
-    if (activeUser) {
-      try {
-        await setDoc(doc(db, 'settings', 'center'), settingsPayload);
-      } catch {
-        // Non-blocking if user lacks admin role
-      }
+    try {
+      await setDoc(doc(db, 'settings', 'center'), settingsPayload);
+    } catch {
+      // Non-blocking if user lacks admin role
     }
 
     // 2. Save all 7 Daily Schedules for instant persistence
@@ -345,149 +373,241 @@ export default function App() {
       };
 
       await mirrorSetDocToDefault('schedules', day.id, dayPayload);
-      if (activeUser) {
-        try {
-          await setDoc(doc(db, 'schedules', day.id), dayPayload);
-        } catch {
-          // Non-blocking
-        }
+      try {
+        await setDoc(doc(db, 'schedules', day.id), dayPayload);
+      } catch {
+        // Non-blocking
       }
     }
 
-    // 3. Save Users / Email Permissions List
-    for (const u of usersList) {
+    // 3. Save Sanitized Users / Email Permissions List
+    const cleanUsers = sanitizeUsersList(usersListRef.current);
+    for (const u of cleanUsers) {
       const docId = u.uid || emailToDocId(u.email);
       const userPayload = {
         uid: docId,
         email: u.email.trim().toLowerCase(),
         displayName: (u.displayName || u.email).slice(0, 120),
-        role: u.role,
+        role: u.role === 'ADMIN' ? 'ADMIN' : 'EDITOR',
         allowedDays: u.allowedDays || DAYS_LIST.map((d) => d.id),
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       };
       await mirrorSetDocToDefault('users', docId, userPayload);
-      if (activeUser) {
-        try {
-          await setDoc(doc(db, 'users', docId), userPayload);
-        } catch {
-          // Non-blocking
-        }
+      try {
+        await setDoc(doc(db, 'users', docId), userPayload);
+      } catch {
+        // Non-blocking
       }
     }
 
     setSaveStatus('saved');
   };
 
-  // 2. Firebase Authentication listener & Email-Based Role Resolution
+  // 2. Strict Whitelist Firebase Authentication listener & Email-Based Role Resolution
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
-      setFirebaseUser(user);
-      setAuthReady(true);
+      if (!user || !user.email) {
+        setFirebaseUser(null);
+        setActiveRole(null);
+        setAllowedDays([]);
+        setIsSidebarOpen(false);
+        setAuthReady(true);
+        return;
+      }
 
-      if (user && user.email) {
-        const cleanEmail = user.email.trim().toLowerCase();
-        const isPrimaryAdmin = cleanEmail === PRIMARY_ADMIN_EMAIL;
-        const emailDocId = emailToDocId(cleanEmail);
+      const cleanEmail = user.email.trim().toLowerCase();
+      const isPrimaryAdmin = cleanEmail === PRIMARY_ADMIN_EMAIL;
+      const emailDocId = emailToDocId(cleanEmail);
 
-        let resolvedRole: UserRole = isPrimaryAdmin ? 'ADMIN' : 'EDITOR';
-        let resolvedDays: DayId[] = DAYS_LIST.map((d) => d.id);
+      // Collect registered profiles from local state and Firestore (both db and defaultDb)
+      const candidateProfiles: UserProfile[] = [
+        ...sanitizeUsersList(usersListRef.current),
+      ];
 
-        // Check local usersList first
-        const localMatch = usersList.find(
-          (u) => u.email.trim().toLowerCase() === cleanEmail
-        );
-        if (localMatch) {
-          resolvedRole = isPrimaryAdmin ? 'ADMIN' : localMatch.role;
-          resolvedDays =
-            localMatch.allowedDays?.length > 0
-              ? localMatch.allowedDays
-              : DAYS_LIST.map((d) => d.id);
-        }
-
+      const tryFetchUserDoc = async (
+        targetDb: typeof db,
+        docKey: string
+      ): Promise<UserProfile | null> => {
         try {
-          // Check pre-assigned email document in Firestore (/users/{emailDocId})
-          const emailSnap = await getDoc(doc(db, 'users', emailDocId));
-          if (emailSnap.exists()) {
-            const emailData = emailSnap.data() as UserProfile;
-            resolvedRole = isPrimaryAdmin ? 'ADMIN' : emailData.role;
-            resolvedDays =
-              emailData.allowedDays?.length > 0
-                ? emailData.allowedDays
-                : DAYS_LIST.map((d) => d.id);
-          } else {
-            // Also check /users/{user.uid}
-            const uidSnap = await getDoc(doc(db, 'users', user.uid));
-            if (uidSnap.exists()) {
-              const uidData = uidSnap.data() as UserProfile;
-              resolvedRole = isPrimaryAdmin ? 'ADMIN' : uidData.role;
-              resolvedDays =
-                uidData.allowedDays?.length > 0
-                  ? uidData.allowedDays
-                  : DAYS_LIST.map((d) => d.id);
-            }
-          }
-
-          // If Admin, load full users list from Firestore so any added/deleted emails are synced
-          if (isPrimaryAdmin || resolvedRole === 'ADMIN') {
-            try {
-              const allUsersSnap = await getDocs(collection(db, 'users'));
-              if (!allUsersSnap.empty) {
-                const remoteUsers: UserProfile[] = [];
-                allUsersSnap.forEach((docSnap) => {
-                  const data = docSnap.data() as UserProfile;
-                  if (data.email) {
-                    remoteUsers.push({
-                      uid: docSnap.id,
-                      email: data.email.trim().toLowerCase(),
-                      displayName: data.displayName || data.email,
-                      role:
-                        data.email.trim().toLowerCase() === PRIMARY_ADMIN_EMAIL
-                          ? 'ADMIN'
-                          : data.role,
-                      allowedDays: data.allowedDays || DAYS_LIST.map((d) => d.id),
-                    });
-                  }
-                });
-                if (remoteUsers.length > 0) {
-                  setUsersList(remoteUsers);
-                }
-              }
-            } catch {
-              // Ignore list error if collection not yet created
+          const snap = await getDoc(doc(targetDb, 'users', docKey));
+          if (snap.exists()) {
+            const data = snap.data() as UserProfile;
+            if (data && data.email && !isFictionalOrBlockedEmail(data.email)) {
+              return {
+                uid: snap.id,
+                email: data.email.trim().toLowerCase(),
+                displayName: data.displayName || data.email,
+                role: data.role === 'ADMIN' ? 'ADMIN' : 'EDITOR',
+                allowedDays:
+                  Array.isArray(data.allowedDays) && data.allowedDays.length > 0
+                    ? data.allowedDays
+                    : DAYS_LIST.map((d) => d.id),
+              };
             }
           }
         } catch {
-          // Fallback to local role
+          // Document not found or permission denied for unregistered user
         }
+        return null;
+      };
 
-        setActiveRole(resolvedRole);
-        setAllowedDays(resolvedDays);
+      const [dbByEmail, defaultByEmail, dbByUid, defaultByUid] =
+        await Promise.all([
+          tryFetchUserDoc(db, emailDocId),
+          tryFetchUserDoc(defaultDb, emailDocId),
+          tryFetchUserDoc(db, user.uid),
+          tryFetchUserDoc(defaultDb, user.uid),
+        ]);
+
+      // Prefer remote Firestore record over local cache if present
+      const remoteFound =
+        dbByEmail || defaultByEmail || dbByUid || defaultByUid;
+      const effectiveUsersPool = remoteFound
+        ? upsertUserByEmail(candidateProfiles, {
+            email: remoteFound.email,
+            displayName: remoteFound.displayName,
+            role: remoteFound.role,
+            allowedDays: remoteFound.allowedDays,
+            uid: emailDocId,
+          })
+        : candidateProfiles;
+
+      const access = resolveAuthorizedUserAccess({
+        email: cleanEmail,
+        uid: user.uid,
+        registeredUsers: effectiveUsersPool,
+      });
+
+      // STRICT GATE: If the email is NOT registered in "إدارة البريد والصلاحيات",
+      // reject login immediately, delete the newly created Auth record from Firebase Authentication,
+      // and sign out so they cannot view admin/editor controls or modify the schedule.
+      if (!access.authorized || !access.role) {
+        setFirebaseUser(null);
+        setActiveRole(null);
+        setAllowedDays([]);
+        setIsSidebarOpen(false);
+        setAuthErrorBanner(
+          `⛔ تم رفض تسجيل الدخول: البريد الإلكتروني (${cleanEmail}) غير مسجل في «إدارة البريد والصلاحيات». لا يُسمح بتسجيل الدخول أو تعديل الجداول إلا للحسابات المعتمدة مسبقاً من مدير المجمع.`
+        );
+        try {
+          await deleteUser(user);
+        } catch {
+          // Fallback to signOut if deleteUser requires recent re-auth
+        }
+        try {
+          await signOut(auth);
+        } catch {
+          // Ignore
+        }
+        setAuthReady(true);
+        return;
       }
+
+      // User IS authorized!
+      setAuthErrorBanner(null);
+      setFirebaseUser(user);
+      setActiveRole(access.role);
+      setAllowedDays(access.allowedDays);
+
+      // Sync the user's Firebase Auth UID document so Firestore security rules (`users/$(request.auth.uid)`)
+      // recognize their exact role and allowedDays
+      const uidProfilePayload = {
+        uid: user.uid,
+        email: cleanEmail,
+        displayName: (
+          user.displayName ||
+          access.matchedProfile?.displayName ||
+          cleanEmail
+        ).slice(0, 120),
+        role: access.role,
+        allowedDays: access.allowedDays,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      };
+      mirrorSetDocToDefault('users', user.uid, uidProfilePayload);
+      void setDoc(doc(db, 'users', user.uid), uidProfilePayload).catch(
+        () => {}
+      );
+
+      // Purge any legacy fictional email from Firestore
+      mirrorDeleteDocFromDefault('users', 'editor_at_meetazzoun_dot_org');
+      void deleteDoc(doc(db, 'users', 'editor_at_meetazzoun_dot_org')).catch(
+        () => {}
+      );
+
+      // If Admin, load full users list from Firestore and purge any fictional accounts
+      if (isPrimaryAdmin || access.role === 'ADMIN') {
+        try {
+          const [snapPrimary, snapDefault] = await Promise.all([
+            getDocs(collection(db, 'users')).catch(() => null),
+            getDocs(collection(defaultDb, 'users')).catch(() => null),
+          ]);
+          const remoteUsers: UserProfile[] = [];
+          const processSnap = (snap: Awaited<ReturnType<typeof getDocs>> | null) => {
+            if (!snap || snap.empty) return;
+            snap.forEach((docSnap) => {
+              const data = docSnap.data() as UserProfile;
+              if (!data || !data.email) return;
+              if (isFictionalOrBlockedEmail(data.email)) {
+                // Actively delete fictional account from Firestore
+                void deleteDoc(doc(db, 'users', docSnap.id)).catch(() => {});
+                mirrorDeleteDocFromDefault('users', docSnap.id);
+                return;
+              }
+              remoteUsers.push({
+                uid: emailToDocId(data.email),
+                email: data.email.trim().toLowerCase(),
+                displayName: data.displayName || data.email,
+                role:
+                  data.email.trim().toLowerCase() === PRIMARY_ADMIN_EMAIL ||
+                  data.role === 'ADMIN'
+                    ? 'ADMIN'
+                    : 'EDITOR',
+                allowedDays:
+                  Array.isArray(data.allowedDays) && data.allowedDays.length > 0
+                    ? data.allowedDays
+                    : DAYS_LIST.map((d) => d.id),
+              });
+            });
+          };
+          processSnap(snapDefault);
+          processSnap(snapPrimary);
+          if (remoteUsers.length > 0) {
+            setUsersList(sanitizeUsersList(remoteUsers));
+          }
+        } catch {
+          // Ignore list error
+        }
+      }
+
+      setAuthReady(true);
     });
     return () => unsub();
   }, []);
 
-  // Automatically initialize/seed Firestore collections ONLY when an authenticated user is logged in
-  // Public viewers see the schedule without logging in and without reading from Firestore
+  // Automatically initialize/seed Firestore collections ONLY when an authenticated ADMIN is logged in
   useEffect(() => {
-    if (!isLoaded || !authReady || !firebaseUser || hasSeededFirestoreRef.current) return;
+    if (
+      !isLoaded ||
+      !authReady ||
+      !firebaseUser ||
+      activeRole !== 'ADMIN' ||
+      hasSeededFirestoreRef.current
+    ) {
+      return;
+    }
     hasSeededFirestoreRef.current = true;
 
     async function ensureFirestoreInitialized() {
       try {
-        const satSnap = await getDoc(doc(db, 'schedules', 'saturday'));
-        if (!satSnap.exists()) {
-          await syncAllDataToFirestore(auth.currentUser);
-        } else {
-          await syncAllDataToFirestore(auth.currentUser);
-        }
+        await syncAllDataToFirestore(auth.currentUser);
       } catch {
         // Non-blocking
       }
     }
     ensureFirestoreInitialized();
-  }, [isLoaded, authReady, firebaseUser]);
+  }, [isLoaded, authReady, firebaseUser, activeRole]);
 
   // 3. Single bounded Firestore onSnapshot listener (only active when authenticated; public viewers use local schedule without reading Firestore)
   useEffect(() => {
@@ -1028,7 +1148,7 @@ export default function App() {
       version: currentSchedule.version + 1,
       draftRows: [...currentSchedule.draftRows, simulatedRemoteRow],
       updatedBy: 'colleague-editor',
-      updatedByEmail: 'editor2@meetazzoun.org',
+      updatedByEmail: PRIMARY_ADMIN_EMAIL,
       updatedByName: 'د/ محمود (محرر مشارك)',
     };
 
@@ -1103,10 +1223,10 @@ export default function App() {
               onClick={() => setIsSidebarOpen(true)}
               data-testid="toggle-sidebar-btn"
               aria-label="فتح القائمة الجانبية للتعديل والصلاحيات"
-              className="inline-flex items-center gap-1.5 rounded-xl bg-white/15 hover:bg-white/25 border border-white/25 px-3 py-1.5 text-xs sm:text-sm font-black text-white shrink-0 transition cursor-pointer shadow-xs"
+              className="inline-flex items-center gap-1 rounded-xl bg-white/15 hover:bg-white/25 border border-white/25 p-2 sm:px-3 sm:py-1.5 text-xs sm:text-sm font-black text-white shrink-0 transition cursor-pointer shadow-xs"
             >
               <Menu className="w-4 h-4 text-amber-400 shrink-0" />
-              <span>القائمة</span>
+              <span className="hidden sm:inline">القائمة</span>
             </button>
           )}
 
@@ -1162,7 +1282,7 @@ export default function App() {
             })}
           </nav>
 
-          {/* Direct Login / Logout Button in Top Bar (Always visible for Editor & Viewer, and quick access for Admin) */}
+          {/* Direct Login / Logout Button in Top Bar (Compact Icon Button to preserve space for all 7 Days) */}
           {!isStrictPublicUrl && (
             <div className="flex items-center gap-1.5 shrink-0">
               {firebaseUser ? (
@@ -1170,20 +1290,24 @@ export default function App() {
                   type="button"
                   onClick={() => signOut(auth)}
                   data-testid="top-logout-btn"
-                  className="inline-flex items-center gap-1.5 rounded-xl bg-rose-600/90 hover:bg-rose-600 border border-rose-400/40 px-2.5 sm:px-3 py-1.5 text-xs font-extrabold text-white transition cursor-pointer shadow-xs"
+                  title="تسجيل الخروج"
+                  aria-label="تسجيل الخروج"
+                  className="inline-flex items-center justify-center gap-1 rounded-xl bg-rose-600/90 hover:bg-rose-600 border border-rose-400/40 p-2 sm:px-2.5 sm:py-1.5 text-xs font-extrabold text-white transition cursor-pointer shadow-xs shrink-0"
                 >
-                  <LogOut className="w-3.5 h-3.5" />
-                  <span>تسجيل الخروج</span>
+                  <LogOut className="w-4 h-4" />
+                  <span className="hidden md:inline">خروج</span>
                 </button>
               ) : (
                 <button
                   type="button"
                   onClick={handleGoogleSignIn}
                   data-testid="top-login-btn"
-                  className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 border border-emerald-400/40 px-2.5 sm:px-3 py-1.5 text-xs font-extrabold text-white transition cursor-pointer shadow-xs"
+                  title="تسجيل الدخول"
+                  aria-label="تسجيل الدخول"
+                  className="inline-flex items-center justify-center gap-1 rounded-xl bg-emerald-600 hover:bg-emerald-500 border border-emerald-400/40 p-2 sm:px-2.5 sm:py-1.5 text-xs font-extrabold text-white transition cursor-pointer shadow-xs shrink-0"
                 >
-                  <LogIn className="w-3.5 h-3.5" />
-                  <span>تسجيل الدخول</span>
+                  <LogIn className="w-4 h-4" />
+                  <span className="hidden sm:inline">دخول</span>
                 </button>
               )}
             </div>
@@ -1383,7 +1507,7 @@ export default function App() {
                   <select
                     id="role-switcher"
                     aria-label="تبديل دور الصلاحية"
-                    value={activeRole}
+                    value={activeRole || 'ADMIN'}
                     onChange={(e) => {
                       const nextRole = e.target.value as UserRole;
                       setActiveRole(nextRole);
@@ -1497,6 +1621,28 @@ export default function App() {
 
       {/* Main Content Area: Clean Page showing only Share Buttons above the Schedule Poster */}
       <main className="relative z-10 mx-auto w-full max-w-7xl flex-1 px-2 sm:px-6 py-3 sm:py-5 space-y-3">
+        {/* Unauthorized Email Rejection Banner */}
+        {authErrorBanner && (
+          <div
+            role="alert"
+            data-testid="auth-error-banner"
+            className="mx-auto max-w-[780px] rounded-2xl bg-rose-50 border-2 border-rose-400 p-3.5 text-rose-950 shadow-sm flex items-start justify-between gap-3"
+          >
+            <div className="flex items-start gap-2.5 text-xs sm:text-sm font-extrabold leading-relaxed">
+              <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+              <span>{authErrorBanner}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setAuthErrorBanner(null)}
+              aria-label="إغلاق تنبيه رفض الدخول"
+              className="rounded-lg p-1 text-rose-600 hover:bg-rose-100 shrink-0"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
         {/* Concurrent Conflict Resolution Banner */}
         {conflict && (
           <div
@@ -1709,11 +1855,11 @@ export default function App() {
         />
       )}
 
-      {showUsersAuditModal && (
+      {showUsersAuditModal && activeRole && (
         <UsersAndAuditModal
           initialTab={showUsersAuditModal}
           auditLogs={auditLogs}
-          users={usersList}
+          users={sanitizeUsersList(usersList)}
           currentUserRole={activeRole}
           onAddOrUpdateUserByEmail={handleAddOrUpdateUserByEmail}
           onDeleteUser={handleDeleteUser}

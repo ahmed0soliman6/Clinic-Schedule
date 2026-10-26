@@ -37,15 +37,24 @@ service cloud.firestore {
       return isSignedIn() && request.auth.token.email == 'ahmed0soliman6@gmail.com';
     }
 
+    function authEmailDocId() {
+      return request.auth.token.email.lower().replace('@', '_at_').replace('[.]', '_dot_');
+    }
+
     function isAdmin() {
       return isSuperAdminEmail() ||
         (isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid))) ||
+        (isSignedIn() && exists(/databases/$(database)/documents/users/$(authEmailDocId())) &&
+          get(/databases/$(database)/documents/users/$(authEmailDocId())).data.role == 'ADMIN') ||
         (isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'ADMIN');
     }
 
     function isEditorForDay(dayId) {
       return isAdmin() ||
+        (isSignedIn() && exists(/databases/$(database)/documents/users/$(authEmailDocId())) &&
+          get(/databases/$(database)/documents/users/$(authEmailDocId())).data.role == 'EDITOR' &&
+          dayId in get(/databases/$(database)/documents/users/$(authEmailDocId())).data.allowedDays) ||
         (isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'EDITOR' &&
           dayId in get(/databases/$(database)/documents/users/$(request.auth.uid)).data.allowedDays);
@@ -53,6 +62,8 @@ service cloud.firestore {
 
     function isStaff() {
       return isAdmin() ||
+        (isSignedIn() && exists(/databases/$(database)/documents/users/$(authEmailDocId())) &&
+          get(/databases/$(database)/documents/users/$(authEmailDocId())).data.role in ['ADMIN', 'EDITOR']) ||
         (isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['ADMIN', 'EDITOR']);
     }
@@ -151,7 +162,7 @@ service cloud.firestore {
         data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
         data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
         data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
-        data.role is string && data.role in ['ADMIN', 'EDITOR', 'VIEWER'] &&
+        data.role is string && data.role in ['ADMIN', 'EDITOR'] &&
         data.allowedDays is list && data.allowedDays.size() <= 7 &&
         (data.allowedDays.size() == 0 || (data.allowedDays[0] is string && data.allowedDays[0].size() <= 20)) &&
         data.createdAt is timestamp &&
@@ -236,7 +247,13 @@ service cloud.firestore {
         incoming().uid == userId &&
         incoming().createdAt == request.time && (
           isAdmin() ||
-          (isOwner(userId) && incoming().role == 'VIEWER' && incoming().allowedDays.size() == 0)
+          (
+            isOwner(userId) &&
+            exists(/databases/$(database)/documents/users/$(authEmailDocId())) &&
+            incoming().email == get(/databases/$(database)/documents/users/$(authEmailDocId())).data.email &&
+            incoming().role == get(/databases/$(database)/documents/users/$(authEmailDocId())).data.role &&
+            incoming().allowedDays == get(/databases/$(database)/documents/users/$(authEmailDocId())).data.allowedDays
+          )
         );
       allow update: if isSignedIn() && isValidId(userId) && isValidUserProfile(incoming()) && (
         (
@@ -247,11 +264,12 @@ service cloud.firestore {
         ) ||
         (
           isOwner(userId) &&
+          exists(/databases/$(database)/documents/users/$(authEmailDocId())) &&
           incoming().uid == existing().uid &&
-          incoming().role == existing().role &&
-          incoming().allowedDays == existing().allowedDays &&
+          incoming().role == get(/databases/$(database)/documents/users/$(authEmailDocId())).data.role &&
+          incoming().allowedDays == get(/databases/$(database)/documents/users/$(authEmailDocId())).data.allowedDays &&
           incoming().createdAt == existing().createdAt &&
-          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'updatedAt'])
+          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'role', 'allowedDays', 'updatedAt'])
         )
       );
       allow delete: if isValidId(userId) && isAdmin();

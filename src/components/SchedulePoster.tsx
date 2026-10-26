@@ -87,28 +87,28 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
   const getExportClinicFontSize = (text: string): string => {
     const len = (text || '').trim().length;
     const base =
-      rowCount <= 4 ? 36 : rowCount <= 6 ? 33 : rowCount <= 8 ? 30 : rowCount <= 10 ? 26 : 23;
-    if (len >= 18) return `${Math.min(base, 22)}px`;
-    if (len >= 14) return `${Math.min(base, 25)}px`;
-    if (len >= 10) return `${Math.min(base, 29)}px`;
+      rowCount <= 4 ? 32 : rowCount <= 6 ? 28 : rowCount <= 8 ? 25 : rowCount <= 10 ? 22 : 19;
+    if (len >= 22) return `${Math.min(base, 19)}px`;
+    if (len >= 16) return `${Math.min(base, 22)}px`;
+    if (len >= 12) return `${Math.min(base, 25)}px`;
     return `${base}px`;
   };
 
   const getExportDoctorFontSize = (text: string): string => {
     const len = (text || '').trim().length;
     const base =
-      rowCount <= 4 ? 40 : rowCount <= 6 ? 36 : rowCount <= 8 ? 33 : rowCount <= 10 ? 29 : 26;
-    if (len >= 22) return `${Math.min(base, 25)}px`;
-    if (len >= 18) return `${Math.min(base, 28)}px`;
-    if (len >= 14) return `${Math.min(base, 32)}px`;
+      rowCount <= 4 ? 34 : rowCount <= 6 ? 30 : rowCount <= 8 ? 27 : rowCount <= 10 ? 24 : 21;
+    if (len >= 22) return `${Math.min(base, 22)}px`;
+    if (len >= 18) return `${Math.min(base, 25)}px`;
+    if (len >= 14) return `${Math.min(base, 28)}px`;
     return `${base}px`;
   };
 
   const getExportTimeFontSize = (text: string): string => {
     const len = (text || '').trim().length;
     const base =
-      rowCount <= 4 ? 32 : rowCount <= 6 ? 29 : rowCount <= 8 ? 27 : rowCount <= 10 ? 24 : 21;
-    if (len >= 9) return `${Math.min(base, 22)}px`;
+      rowCount <= 4 ? 25 : rowCount <= 6 ? 23 : rowCount <= 8 ? 21 : rowCount <= 10 ? 19 : 17;
+    if (len >= 8) return `${Math.min(base, 19)}px`;
     return `${base}px`;
   };
 
@@ -228,7 +228,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
               : 'gap-1.5 sm:gap-4 mb-3.5 sm:mb-5'
           }`}
         >
-          {/* Right side in RTL: Transparent Medical Complex Logo (مجمع ميت عزون الطبي) */}
+          {/* Right side in RTL: Transparent Medical Complex Logo (مجمع ميت عزون الطبي) — Enlarged to match Day Banner */}
           <div className="flex flex-col items-center justify-center text-center">
             {settings.rightLogoUrl &&
             (settings.rightLogoUrl.startsWith('http') ||
@@ -240,9 +240,9 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                 className={`w-auto object-contain drop-shadow-xs ${
                   isExporting
                     ? isCompactExport
-                      ? 'h-24'
-                      : 'h-32'
-                    : 'h-20 sm:h-32'
+                      ? 'h-32 sm:h-36 scale-105'
+                      : 'h-40 sm:h-44 scale-105'
+                    : 'h-28 sm:h-40 scale-105'
                 }`}
               />
             ) : (
@@ -250,9 +250,9 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                 className={`w-auto object-contain drop-shadow-xs ${
                   isExporting
                     ? isCompactExport
-                      ? 'h-24'
-                      : 'h-32'
-                    : 'h-20 sm:h-32'
+                      ? 'h-32 sm:h-36 scale-105'
+                      : 'h-40 sm:h-44 scale-105'
+                    : 'h-28 sm:h-40 scale-105'
                 }`}
                 idSuffix={isExporting ? 'export-right' : 'view-right'}
               />
@@ -301,16 +301,18 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                   background:
                     'linear-gradient(135deg, #6d28d9 0%, #4c1d95 48%, #1e1b4b 100%)',
                 }}
-                className={`w-full max-w-[255px] rounded-full text-center shadow-lg border border-purple-400/30 ${
+                className={`w-full max-w-[280px] rounded-full text-center shadow-lg border border-purple-400/30 ${
                   isExporting
-                    ? 'px-6 pt-6 pb-4'
-                    : 'px-3 sm:px-6 pt-5 pb-2.5 sm:pt-6 sm:pb-4'
+                    ? 'px-6 pt-6 pb-3.5'
+                    : 'px-3 sm:px-6 pt-4 pb-2 sm:pt-6 sm:pb-3.5'
                 }`}
               >
                 <h2
                   data-testid={isExporting ? undefined : 'poster-day-title'}
                   className={`font-black text-white tracking-wide leading-tight drop-shadow ${
-                    isExporting ? 'text-4xl' : 'text-xl sm:text-4xl'
+                    isExporting
+                      ? 'text-[50px] leading-tight'
+                      : 'text-2xl sm:text-4xl md:text-[42px] leading-tight'
                   }`}
                 >
                   {dayLabel}
@@ -342,7 +344,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
             />
           </div>
 
-          {/* Left side in RTL: Community Development Association Logo (جمعية تنمية المجتمع المحلي بميت عزون) */}
+          {/* Left side in RTL: Community Development Association Logo (جمعية تنمية المجتمع المحلي بميت عزون) — Enlarged to match Right Complex Logo */}
           <div className="flex flex-col items-center justify-center text-center">
             {settings.leftLogoUrl &&
             (settings.leftLogoUrl.startsWith('http') ||
@@ -354,9 +356,9 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                 className={`w-auto object-contain drop-shadow-xs ${
                   isExporting
                     ? isCompactExport
-                      ? 'h-24'
-                      : 'h-32'
-                    : 'h-20 sm:h-32'
+                      ? 'h-32 sm:h-36 scale-105'
+                      : 'h-40 sm:h-44 scale-105'
+                    : 'h-28 sm:h-40 scale-105'
                 }`}
               />
             ) : (
@@ -364,9 +366,9 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                 className={`w-auto object-contain drop-shadow-xs ${
                   isExporting
                     ? isCompactExport
-                      ? 'h-24'
-                      : 'h-32'
-                    : 'h-20 sm:h-32'
+                      ? 'h-32 sm:h-36 scale-105'
+                      : 'h-40 sm:h-44 scale-105'
+                    : 'h-28 sm:h-40 scale-105'
                 }`}
                 idSuffix={isExporting ? 'export-left' : 'view-left'}
               />
@@ -382,12 +384,13 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
               : 'p-1.5 sm:p-3'
           }`}
         >
-          {/* Table Column Headers (RTL order: العيادة 31% | الطبيب 39% | من 15% | إلى 15%) */}
+          {/* Table Column Headers (RTL order: العيادة 31% | الطبيب 39% | من 15% | إلى 15%) — Dynamically styled via settings */}
           <div className="grid grid-cols-[minmax(0,31%)_minmax(0,39%)_minmax(0,15%)_minmax(0,15%)] gap-[2px] overflow-hidden rounded-t-[20px] shrink-0">
             {/* Column 1: العيادة */}
             <div
               style={{
-                background: 'linear-gradient(90deg, #f59e0b 0%, #fbbf24 100%)',
+                backgroundColor: settings.clinicHeaderColor || '#f59e0b',
+                background: `linear-gradient(135deg, ${settings.clinicHeaderColor || '#f59e0b'} 0%, ${settings.clinicHeaderColor || '#f59e0b'}ee 100%)`,
               }}
               className={`min-w-0 overflow-hidden flex items-center justify-center gap-1.5 px-1.5 text-white font-extrabold ${
                 isExporting ? 'py-2.5 text-[26px] font-black' : 'py-2 sm:py-3 text-xs sm:text-xl'
@@ -397,10 +400,11 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
               <StethoscopeHeaderIcon size={isExporting ? 28 : 20} />
             </div>
 
-            {/* Column 2: الطبيب (Vibrant Emerald Green matching Attachment #2) */}
+            {/* Column 2: الطبيب */}
             <div
               style={{
-                background: 'linear-gradient(90deg, #0d9456 0%, #10a361 100%)',
+                backgroundColor: settings.doctorHeaderColor || '#0d9456',
+                background: `linear-gradient(135deg, ${settings.doctorHeaderColor || '#0d9456'} 0%, ${settings.doctorHeaderColor || '#0d9456'}ee 100%)`,
               }}
               className={`min-w-0 overflow-hidden flex items-center justify-center gap-1.5 px-1.5 text-white font-extrabold ${
                 isExporting ? 'py-2.5 text-[26px] font-black' : 'py-2 sm:py-3 text-xs sm:text-xl'
@@ -413,7 +417,8 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
             {/* Column 3: من */}
             <div
               style={{
-                background: 'linear-gradient(90deg, #f59e0b 0%, #fbbf24 100%)',
+                backgroundColor: settings.fromHeaderColor || '#f59e0b',
+                background: `linear-gradient(135deg, ${settings.fromHeaderColor || '#f59e0b'} 0%, ${settings.fromHeaderColor || '#f59e0b'}ee 100%)`,
               }}
               className={`min-w-0 overflow-hidden flex items-center justify-center gap-1 px-1 text-white font-extrabold ${
                 isExporting ? 'py-2.5 text-[26px] font-black' : 'py-2 sm:py-3 text-xs sm:text-xl'
@@ -426,7 +431,8 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
             {/* Column 4: إلى */}
             <div
               style={{
-                background: 'linear-gradient(90deg, #0088cc 0%, #00a8e8 100%)',
+                backgroundColor: settings.toHeaderColor || '#0088cc',
+                background: `linear-gradient(135deg, ${settings.toHeaderColor || '#0088cc'} 0%, ${settings.toHeaderColor || '#0088cc'}ee 100%)`,
               }}
               className={`min-w-0 overflow-hidden flex items-center justify-center gap-1 px-1 text-white font-extrabold ${
                 isExporting ? 'py-2.5 text-[26px] font-black' : 'py-2 sm:py-3 text-xs sm:text-xl'
@@ -624,7 +630,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                       tabIndex={showControls ? 0 : undefined}
                       aria-label={
                         showControls
-                          ? `اختيار وقت البداية من: ${row.startTime || 'من'}`
+                          ? `اختيار وقت البدء من: ${row.startTime || 'من'}`
                           : undefined
                       }
                       style={
@@ -645,7 +651,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                       }`}
                     >
                       {row.startTime ? (
-                        <span className="whitespace-nowrap truncate">{row.startTime}</span>
+                        <span className="whitespace-nowrap">{row.startTime}</span>
                       ) : showControls ? (
                         <span className="text-slate-300 text-xs font-bold">
                           &nbsp;
@@ -682,32 +688,12 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                       }`}
                     >
                       {row.endTime ? (
-                        <span className="whitespace-nowrap truncate">{row.endTime}</span>
+                        <span className="whitespace-nowrap">{row.endTime}</span>
                       ) : showControls ? (
                         <span className="text-slate-300 text-xs font-bold">
                           &nbsp;
                         </span>
                       ) : null}
-
-                      {showControls && (
-                        <div
-                          data-export-ignore="true"
-                          className="absolute left-0.5 top-0.5 flex items-center"
-                        >
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openCellEditor(row, 'actions');
-                            }}
-                            aria-label={`خيارات صف ${row.clinicName || idx + 1}`}
-                            title="ترتيب أو نسخ أو حذف هذا الصف"
-                            className="flex items-center justify-center rounded bg-white/80 border border-slate-200/80 p-[2px] text-slate-500 hover:text-purple-700 hover:border-purple-300 transition"
-                          >
-                            <X className="w-2.5 h-2.5" />
-                          </button>
-                        </div>
-                      )}
                     </div>
 
                     {/* POPOVER 1: 18 SPECIALTY CLINICS SELECTOR */}

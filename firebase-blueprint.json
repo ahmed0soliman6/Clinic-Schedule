@@ -263,7 +263,7 @@
         "role": {
           "type": "string",
           "description": "Assigned role in the system",
-          "enum": ["ADMIN", "EDITOR", "VIEWER"]
+          "enum": ["ADMIN", "EDITOR"]
         },
         "allowedDays": {
           "type": "array",

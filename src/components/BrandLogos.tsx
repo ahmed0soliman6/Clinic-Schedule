@@ -13,50 +13,50 @@ interface LogoProps {
  * - "جمعية تنمية المجتمع المحلي" & "مشهرة برقم 2406" at the bottom
  */
 export const ComplexBrandLogo: React.FC<LogoProps> = ({
-  className = 'h-24 w-auto',
+  className = 'h-28 w-auto',
   idSuffix = 'main',
 }) => {
   const maskId = `heartCrossCutout_${idSuffix}`;
   return (
     <svg
-       xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 500 540"
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="-35 0 570 545"
       className={className}
       role="img"
       aria-label="شعار مجمع ميت عزون الطبي"
     >
       <defs>
         <mask id={maskId}>
-          <rect x="0" y="0" width="500" height="540" fill="white" />
+          <rect x="-35" y="0" width="570" height="545" fill="white" />
           {/* Vertical arm of white rounded cross */}
-          <rect x="130" y="102" width="84" height="230" rx="26" fill="black" />
+          <rect x="122" y="96" width="90" height="240" rx="28" fill="black" />
           {/* Horizontal arm of white rounded cross */}
-          <rect x="20" y="182" width="282" height="96" rx="26" fill="black" />
+          <rect x="10" y="180" width="300" height="102" rx="28" fill="black" />
         </mask>
       </defs>
 
       <g mask={`url(#${maskId})`}>
         {/* Outer Mint-Green Heart */}
         <path
-          d="M 250 335
-             C 250 335, 42 220, 42 112
-             C 42 46, 95 10, 154 10
-             C 198 10, 232 34, 250 66
-             C 268 34, 302 10, 346 10
-             C 405 10, 458 46, 458 112
-             C 458 220, 250 335, 250 335 Z"
+          d="M 250 342
+             C 250 342, 18 222, 18 110
+             C 18 40, 76 6, 144 6
+             C 194 6, 230 32, 250 66
+             C 270 32, 306 6, 356 6
+             C 424 6, 482 40, 482 110
+             C 482 222, 250 342, 250 342 Z"
           fill="#68e8b7"
         />
 
         {/* Inner Sky-Blue Heart */}
         <path
-          d="M 250 335
-             C 250 335, 86 236, 86 142
-             C 86 88, 130 58, 178 58
-             C 214 58, 238 78, 250 105
-             C 262 78, 286 58, 322 58
-             C 370 58, 414 88, 414 142
-             C 414 236, 250 335, 250 335 Z"
+          d="M 250 342
+             C 250 342, 68 238, 68 140
+             C 68 84, 118 54, 172 54
+             C 212 54, 236 76, 250 104
+             C 264 76, 288 54, 328 54
+             C 382 54, 432 84, 432 140
+             C 432 238, 250 342, 250 342 Z"
           fill="#2aa4df"
         />
       </g>
@@ -64,12 +64,12 @@ export const ComplexBrandLogo: React.FC<LogoProps> = ({
       {/* 'مجمع' inside the horizontal white cross cutout */}
       <text
         x="212"
-        y="246"
+        y="250"
         textAnchor="middle"
         fill="#194299"
         fontFamily="'Cairo', 'Tajawal', sans-serif"
         fontWeight="900"
-        fontSize="68"
+        fontSize="74"
       >
         مجمع
       </text>
@@ -77,12 +77,12 @@ export const ComplexBrandLogo: React.FC<LogoProps> = ({
       {/* 'ميت عزون الطبي' */}
       <text
         x="250"
-        y="404"
+        y="414"
         textAnchor="middle"
         fill="#194299"
         fontFamily="'Cairo', 'Tajawal', sans-serif"
         fontWeight="900"
-        fontSize="72"
+        fontSize="74"
       >
         ميت عزون الطبي
       </text>
@@ -90,12 +90,12 @@ export const ComplexBrandLogo: React.FC<LogoProps> = ({
       {/* 'جمعية تنمية المجتمع المحلي' */}
       <text
         x="250"
-        y="475"
+        y="482"
         textAnchor="middle"
         fill="#234fa2"
         fontFamily="'Cairo', 'Tajawal', sans-serif"
-        fontWeight="700"
-        fontSize="33"
+        fontWeight="800"
+        fontSize="38"
       >
         جمعية تنمية المجتمع المحلي
       </text>
@@ -103,12 +103,12 @@ export const ComplexBrandLogo: React.FC<LogoProps> = ({
       {/* 'مشهرة برقم 2406' */}
       <text
         x="250"
-        y="520"
+        y="530"
         textAnchor="middle"
         fill="#234fa2"
         fontFamily="'Cairo', 'Tajawal', sans-serif"
-        fontWeight="700"
-        fontSize="33"
+        fontWeight="800"
+        fontSize="38"
       >
         مشهرة برقم 2406
       </text>
@@ -135,7 +135,7 @@ export const AssociationBrandLogo: React.FC<LogoProps> = ({
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 500 500"
+      viewBox="35 30 430 460"
       className={className}
       role="img"
       aria-label="شعار جمعية تنمية المجتمع المحلي بميت عزون المشهرة برقم 2406"
