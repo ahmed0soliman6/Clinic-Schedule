@@ -76,6 +76,25 @@ test('addScheduleRow appends a new row and assigns sequential sortOrder', () => 
   assert.equal(updated[2].id, 'row-3');
   assert.equal(updated[2].clinicName, 'العيون');
   assert.equal(updated[2].sortOrder, 2);
+
+  // Adding a blank clinic row keeps all fields empty as requested
+  const withBlankRow = addScheduleRow(
+    updated,
+    {
+      clinicName: '',
+      doctorName: '',
+      startTime: '',
+      endTime: '',
+      icon: 'stethoscope',
+      iconColor: '#6d28d9',
+    },
+    'row-blank'
+  );
+  assert.equal(withBlankRow.length, 4);
+  assert.equal(withBlankRow[3].clinicName, '');
+  assert.equal(withBlankRow[3].doctorName, '');
+  assert.equal(withBlankRow[3].startTime, '');
+  assert.equal(withBlankRow[3].endTime, '');
 });
 
 test('updateScheduleRow updates target row fields while preserving order', () => {
@@ -173,12 +192,26 @@ test('detectConcurrentConflict identifies concurrent edits from another user', (
   assert.equal(merged.length, 2);
 });
 
-test('RBAC permissions, 4:5 export aspect ratio, and daily social post text work accurately', () => {
+test('RBAC permissions, empty new row creation, 4:5 export aspect ratio, and daily social post text work accurately', () => {
   assert.equal(canUserEditDay('ADMIN', [], 'friday'), true);
   assert.equal(canUserEditDay('EDITOR', ['saturday', 'monday'], 'monday'), true);
   assert.equal(canUserEditDay('EDITOR', ['saturday', 'monday'], 'wednesday'), false);
-  assert.equal(canUserEditDay('VIEWER', ['saturday'], 'saturday'), false);
   assert.equal(areRowsEqual(sampleRows, [...sampleRows]), true);
+
+  // Verify adding a blank row keeps all fields empty
+  const withBlankRow = addScheduleRow(sampleRows, {
+    clinicName: '',
+    doctorName: '',
+    startTime: '',
+    endTime: '',
+    icon: 'stethoscope',
+    iconColor: '#6d28d9',
+  });
+  const lastRow = withBlankRow[withBlankRow.length - 1];
+  assert.equal(lastRow.clinicName, '');
+  assert.equal(lastRow.doctorName, '');
+  assert.equal(lastRow.startTime, '');
+  assert.equal(lastRow.endTime, '');
 
   // Verify strict 4:5 aspect ratio (1440 / 1800 === 4 / 5)
   assert.equal(POSTER_EXPORT_WIDTH / POSTER_EXPORT_HEIGHT, 4 / 5);

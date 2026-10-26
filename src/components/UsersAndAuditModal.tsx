@@ -90,8 +90,6 @@ export const UsersAndAuditModal: React.FC<UsersAndAuditModalProps> = ({
       allowedDays:
         newRole === 'ADMIN'
           ? DAYS_LIST.map((d) => d.id)
-          : newRole === 'VIEWER'
-          ? []
           : newAllowedDays,
     });
 
@@ -314,7 +312,6 @@ export const UsersAndAuditModal: React.FC<UsersAndAuditModalProps> = ({
                     >
                       <option value="EDITOR">محرر (EDITOR)</option>
                       <option value="ADMIN">أدمن (ADMIN)</option>
-                      <option value="VIEWER">مشاهد فقط (VIEWER)</option>
                     </select>
                   </div>
                 </div>
@@ -379,16 +376,10 @@ export const UsersAndAuditModal: React.FC<UsersAndAuditModalProps> = ({
                             className={`rounded-full px-2.5 py-0.5 text-[10px] font-black ${
                               u.role === 'ADMIN'
                                 ? 'bg-purple-100 text-purple-800 border border-purple-200'
-                                : u.role === 'EDITOR'
-                                ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
-                                : 'bg-slate-200 text-slate-700'
+                                : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
                             }`}
                           >
-                            {u.role === 'ADMIN'
-                              ? 'أدمن (ADMIN)'
-                              : u.role === 'EDITOR'
-                              ? 'محرر (EDITOR)'
-                              : 'مشاهد (VIEWER)'}
+                            {u.role === 'ADMIN' ? 'أدمن (ADMIN)' : 'محرر (EDITOR)'}
                           </span>
                           {isPrimaryOwner && (
                             <span className="rounded-full bg-amber-100 text-amber-900 border border-amber-300 px-2 py-0.5 text-[10px] font-black">
@@ -418,19 +409,15 @@ export const UsersAndAuditModal: React.FC<UsersAndAuditModalProps> = ({
                                 email: u.email,
                                 displayName: u.displayName,
                                 role: nextRole,
-                                allowedDays:
-                                  nextRole === 'VIEWER'
-                                    ? []
-                                    : u.allowedDays?.length
-                                    ? u.allowedDays
-                                    : DAYS_LIST.map((d) => d.id),
+                                allowedDays: u.allowedDays?.length
+                                  ? u.allowedDays
+                                  : DAYS_LIST.map((d) => d.id),
                               });
                             }}
                             className="rounded-xl border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-extrabold text-slate-900 disabled:opacity-60 cursor-pointer"
                           >
                             <option value="ADMIN">أدمن (ADMIN)</option>
                             <option value="EDITOR">محرر (EDITOR)</option>
-                            <option value="VIEWER">مشاهد (VIEWER)</option>
                           </select>
 
                           {!isPrimaryOwner && (

@@ -8,11 +8,13 @@ build/
 .DS_Store
 
 # Prevent uploading any screenshots or temporary chat explanation images to GitHub
+.aistudio/
 public/assets/
-public/assets/aistudio/
+public/assets/**
 .playwright-cli/
 **/Screenshot*
 **/IMG-*
+**/image_*.png
 verify-*.png
 
 # Keep official logos and PWA icons tracked in GitHub

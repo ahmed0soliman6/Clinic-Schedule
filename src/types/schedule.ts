@@ -28,7 +28,7 @@ export type ClinicIconId =
   | 'kidney'
   | 'urology';
 
-export type UserRole = 'ADMIN' | 'EDITOR' | 'VIEWER';
+export type UserRole = 'ADMIN' | 'EDITOR';
 
 export type AuditAction =
   | 'CREATE_ROW'

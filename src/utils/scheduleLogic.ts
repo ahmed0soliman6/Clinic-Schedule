@@ -159,7 +159,7 @@ const CLINIC_NAME_AL_MAP: Record<string, string> = {
 
 export function normalizeClinicNameWithAl(name: string): string {
   const trimmed = name.trim();
-  if (!trimmed) return 'الباطنة';
+  if (!trimmed) return '';
   if (CLINIC_NAME_AL_MAP[trimmed]) {
     return CLINIC_NAME_AL_MAP[trimmed];
   }
@@ -238,12 +238,12 @@ export function validateRowInput(input: {
 export function sanitizeRowForFirestore(row: ScheduleRow, index: number): ScheduleRow {
   return {
     id: row.id.replace(/[^a-zA-Z0-9_\-]/g, '').slice(0, 80) || `row-${index}`,
-    clinicName: (row.clinicName.trim() || 'عيادة').slice(0, BLUEPRINT_LIMITS.CLINIC_NAME_MAX),
-    doctorName: (row.doctorName.trim() || 'د/ —').slice(0, BLUEPRINT_LIMITS.DOCTOR_NAME_MAX),
-    startTime: (row.startTime.trim() || '4:00 م').slice(0, BLUEPRINT_LIMITS.TIME_MAX),
-    endTime: (row.endTime.trim() || '6:00 م').slice(0, BLUEPRINT_LIMITS.TIME_MAX),
+    clinicName: row.clinicName.trim().slice(0, BLUEPRINT_LIMITS.CLINIC_NAME_MAX),
+    doctorName: row.doctorName.trim().slice(0, BLUEPRINT_LIMITS.DOCTOR_NAME_MAX),
+    startTime: row.startTime.trim().slice(0, BLUEPRINT_LIMITS.TIME_MAX),
+    endTime: row.endTime.trim().slice(0, BLUEPRINT_LIMITS.TIME_MAX),
     icon: row.icon,
-    iconColor: row.iconColor.trim().slice(0, 30),
+    iconColor: row.iconColor.trim().slice(0, 30) || '#0284c7',
     sortOrder: Math.max(0, Math.min(500, Math.floor(index))),
   };
 }
@@ -566,21 +566,19 @@ export function upsertUserByEmail(
 
   const docId = input.uid?.trim() || emailToDocId(cleanEmail);
   const effectiveRole: UserRole =
-    cleanEmail === PRIMARY_ADMIN_EMAIL ? 'ADMIN' : input.role;
+    cleanEmail === PRIMARY_ADMIN_EMAIL || input.role === 'ADMIN'
+      ? 'ADMIN'
+      : 'EDITOR';
   const effectiveDays: DayId[] =
-    effectiveRole === 'VIEWER'
-      ? []
-      : input.allowedDays && input.allowedDays.length > 0
+    input.allowedDays && input.allowedDays.length > 0
       ? input.allowedDays
       : DAYS_LIST.map((d) => d.id);
 
   const defaultName =
     input.displayName?.trim() ||
     (effectiveRole === 'ADMIN'
-      ? `أدمن (${cleanEmail.split('@')[0]})`
-      : effectiveRole === 'EDITOR'
-      ? `محرر (${cleanEmail.split('@')[0]})`
-      : `مشاهد (${cleanEmail.split('@')[0]})`);
+      ? `مدير (${cleanEmail.split('@')[0]})`
+      : `محرر (${cleanEmail.split('@')[0]})`);
 
   const existingIndex = users.findIndex(
     (u) =>

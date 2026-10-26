@@ -25,6 +25,7 @@ import {
   ListOrdered,
   LogIn,
   LogOut,
+  Menu,
   RotateCcw,
   Send,
   Settings,
@@ -140,6 +141,7 @@ export default function App() {
     isStrictPublicUrl ? 'public' : 'manage'
   );
   const [showAdvancedPanel, setShowAdvancedPanel] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   // Copy full day modal state
   const [showCopyDayModal, setShowCopyDayModal] = useState(false);
@@ -395,10 +397,8 @@ export default function App() {
         const isPrimaryAdmin = cleanEmail === PRIMARY_ADMIN_EMAIL;
         const emailDocId = emailToDocId(cleanEmail);
 
-        let resolvedRole: UserRole = isPrimaryAdmin ? 'ADMIN' : 'VIEWER';
-        let resolvedDays: DayId[] = isPrimaryAdmin
-          ? DAYS_LIST.map((d) => d.id)
-          : [];
+        let resolvedRole: UserRole = isPrimaryAdmin ? 'ADMIN' : 'EDITOR';
+        let resolvedDays: DayId[] = DAYS_LIST.map((d) => d.id);
 
         // Check local usersList first
         const localMatch = usersList.find(
@@ -475,9 +475,10 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // Automatically initialize/seed Firestore collections when loaded
+  // Automatically initialize/seed Firestore collections ONLY when an authenticated user is logged in
+  // Public viewers see the schedule without logging in and without reading from Firestore
   useEffect(() => {
-    if (!isLoaded || !authReady || hasSeededFirestoreRef.current) return;
+    if (!isLoaded || !authReady || !firebaseUser || hasSeededFirestoreRef.current) return;
     hasSeededFirestoreRef.current = true;
 
     async function ensureFirestoreInitialized() {
@@ -486,20 +487,18 @@ export default function App() {
         if (!satSnap.exists()) {
           await syncAllDataToFirestore(auth.currentUser);
         } else {
-          // Still mirror to defaultDb so (default) in mitazoun-schedule stays populated
           await syncAllDataToFirestore(auth.currentUser);
         }
       } catch {
-        // Mirror to defaultDb even if unauthenticated
-        await syncAllDataToFirestore(null);
+        // Non-blocking
       }
     }
     ensureFirestoreInitialized();
-  }, [isLoaded, authReady]);
+  }, [isLoaded, authReady, firebaseUser]);
 
-  // 3. Single bounded Firestore onSnapshot listener
+  // 3. Single bounded Firestore onSnapshot listener (only active when authenticated; public viewers use local schedule without reading Firestore)
   useEffect(() => {
-    if (!authReady || !isLoaded) return;
+    if (!authReady || !isLoaded || !firebaseUser) return;
 
     const settingsRef = doc(db, 'settings', 'center');
     const unsubSettings = onSnapshot(
@@ -575,7 +574,7 @@ export default function App() {
       unsubSettings();
       unsubSchedule();
     };
-  }, [authReady, isLoaded, selectedDay, saveStatus]);
+  }, [authReady, isLoaded, firebaseUser, selectedDay, saveStatus]);
 
   const appendAuditLog = async (
     action: AuditAction,
@@ -737,11 +736,12 @@ export default function App() {
 
   const currentSchedule = schedules[selectedDay];
   const userCanEditSelectedDay =
+    !isStrictPublicUrl &&
     viewMode === 'manage' &&
     canUserEditDay(activeRole, allowedDays, selectedDay);
 
   const displayedRows =
-    viewMode === 'public' || activeRole === 'VIEWER'
+    viewMode === 'public' || isStrictPublicUrl
       ? currentSchedule.publishedRows
       : currentSchedule.draftRows;
 
@@ -944,11 +944,7 @@ export default function App() {
       'users',
       'الصلاحيات',
       `تعيين صلاحية البريد (${cleanEmail}) إلى ${
-        savedUser.role === 'ADMIN'
-          ? 'أدمن (ADMIN)'
-          : savedUser.role === 'EDITOR'
-          ? 'محرر (EDITOR)'
-          : 'مشاهد (VIEWER)'
+        savedUser.role === 'ADMIN' ? 'أدمن (ADMIN)' : 'محرر (EDITOR)'
       }`
     );
 
@@ -1102,206 +1098,410 @@ export default function App() {
 
       <OfflineIndicator />
 
-      {/* Top Navigation & Control Header */}
-      <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-purple-200/80 shadow-xs">
-        <div className="mx-auto max-w-7xl px-3 sm:px-6 py-2.5 flex flex-wrap items-center justify-between gap-2.5">
-          {/* Brand Identity with Official Complex Logo */}
-          <div className="flex items-center gap-2.5">
-            <div className="h-10 w-10 sm:h-11 sm:w-11 rounded-xl bg-purple-50/80 p-1 border border-purple-200/70 flex items-center justify-center shrink-0 shadow-2xs">
-              <ComplexBrandLogo
-                className="h-full w-auto object-contain"
-                idSuffix="navbar-logo"
-              />
-            </div>
-            <div>
-              <h1 className="text-xs sm:text-base font-black text-slate-900 leading-tight">
-                {settings.complexName}
-              </h1>
-              <p className="text-[10px] sm:text-[11px] font-bold text-purple-700">
-                {settings.associationName} • {settings.registrationNumber}
-              </p>
-            </div>
-          </div>
+      {/* Compact Single-Row Top Bar: Sidebar Trigger (Admin Only) + 7-Day Navigation Tabs + Direct Login/Logout */}
+      <header className="sticky top-0 z-40 bg-gradient-to-r from-purple-950 via-indigo-950 to-purple-950 text-white border-b border-purple-800/60 shadow-md">
+        <div className="mx-auto max-w-7xl px-2.5 sm:px-6 py-2 flex items-center justify-between gap-2 overflow-x-auto no-scrollbar">
+          {/* Sidebar Menu Button — Shown ONLY for ADMIN (Hidden for EDITOR as requested) */}
+          {!isStrictPublicUrl && activeRole === 'ADMIN' && (
+            <button
+              type="button"
+              onClick={() => setIsSidebarOpen(true)}
+              data-testid="toggle-sidebar-btn"
+              aria-label="فتح القائمة الجانبية للتعديل والصلاحيات"
+              className="inline-flex items-center gap-1.5 rounded-xl bg-white/15 hover:bg-white/25 border border-white/25 px-3 py-1.5 text-xs sm:text-sm font-black text-white shrink-0 transition cursor-pointer shadow-xs"
+            >
+              <Menu className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>القائمة</span>
+            </button>
+          )}
 
+          {/* 7-Day Selector Tabs */}
+          <nav
+            aria-label="اختيار يوم الجدول"
+            className="flex items-center gap-1.5 sm:gap-2 flex-1 justify-start sm:justify-center overflow-x-auto no-scrollbar py-0.5"
+          >
+            {DAYS_LIST.map((day) => {
+              const isSelected = selectedDay === day.id;
+              const daySched = schedules[day.id];
+              const rowCount =
+                viewMode === 'public' || isStrictPublicUrl
+                  ? daySched?.publishedRows?.length || 0
+                  : daySched?.draftRows?.length || 0;
+              const hasDraftDiff =
+                viewMode === 'manage' && daySched?.hasUnpublishedChanges;
+
+              return (
+                <button
+                  key={day.id}
+                  type="button"
+                  onClick={() => {
+                    setSelectedDay(day.id);
+                    setSelectedRowId(null);
+                  }}
+                  data-testid={`day-tab-${day.id}`}
+                  aria-current={isSelected ? 'page' : undefined}
+                  className={`relative inline-flex items-center gap-1.5 rounded-xl px-3 sm:px-4 py-1.5 text-xs sm:text-sm font-extrabold transition shrink-0 cursor-pointer ${
+                    isSelected
+                      ? 'bg-amber-400 text-slate-950 shadow-md scale-105'
+                      : 'bg-white/10 text-white hover:bg-white/20'
+                  }`}
+                >
+                  <span>{day.label}</span>
+                  <span
+                    className={`rounded-full px-1.5 py-0.2 text-[10px] font-black ${
+                      isSelected
+                        ? 'bg-slate-950/15 text-slate-950'
+                        : 'bg-white/15 text-purple-100'
+                    }`}
+                  >
+                    {rowCount}
+                  </span>
+                  {hasDraftDiff && (
+                    <span
+                      title="توجد مسودة غير منشورة لهذا اليوم"
+                      className="absolute -top-1 -left-1 h-2.5 w-2.5 rounded-full bg-emerald-400 ring-2 ring-purple-950"
+                    />
+                  )}
+                </button>
+              );
+            })}
+          </nav>
+
+          {/* Direct Login / Logout Button in Top Bar (Always visible for Editor & Viewer, and quick access for Admin) */}
           {!isStrictPublicUrl && (
-            <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
-              <PWAInstallButton />
-              <NotificationToggleButton />
-
-              <div className="inline-flex rounded-xl bg-slate-100 p-1 border border-slate-200">
+            <div className="flex items-center gap-1.5 shrink-0">
+              {firebaseUser ? (
                 <button
                   type="button"
-                  onClick={() => setViewMode('manage')}
-                  data-testid="mode-manage-btn"
-                  className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-extrabold transition cursor-pointer ${
-                    viewMode === 'manage'
-                      ? 'bg-purple-700 text-white shadow-xs'
-                      : 'text-slate-700 hover:text-slate-900'
-                  }`}
+                  onClick={() => signOut(auth)}
+                  data-testid="top-logout-btn"
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-rose-600/90 hover:bg-rose-600 border border-rose-400/40 px-2.5 sm:px-3 py-1.5 text-xs font-extrabold text-white transition cursor-pointer shadow-xs"
                 >
-                  <Edit3 className="w-3.5 h-3.5" />
-                  <span>التعديل السريع</span>
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span>تسجيل الخروج</span>
                 </button>
+              ) : (
                 <button
                   type="button"
-                  onClick={() => setViewMode('public')}
-                  data-testid="mode-public-btn"
-                  className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-extrabold transition cursor-pointer ${
-                    viewMode === 'public'
-                      ? 'bg-emerald-600 text-white shadow-xs'
-                      : 'text-slate-700 hover:text-slate-900'
-                  }`}
+                  onClick={handleGoogleSignIn}
+                  data-testid="top-login-btn"
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 border border-emerald-400/40 px-2.5 sm:px-3 py-1.5 text-xs font-extrabold text-white transition cursor-pointer shadow-xs"
                 >
-                  <Eye className="w-3.5 h-3.5" />
-                  <span>العرض العام</span>
+                  <LogIn className="w-3.5 h-3.5" />
+                  <span>تسجيل الدخول</span>
                 </button>
-              </div>
-
-              {viewMode === 'manage' && (
-                <>
-                  <div className="flex items-center gap-1 rounded-xl border border-purple-200 bg-purple-50/70 px-2 py-1">
-                    <Shield className="w-3.5 h-3.5 text-purple-700" />
-                    <select
-                      id="role-switcher"
-                      aria-label="تبديل دور الصلاحية"
-                      value={activeRole}
-                      onChange={(e) => setActiveRole(e.target.value as UserRole)}
-                      className="bg-transparent text-xs font-extrabold text-purple-950 focus:outline-none cursor-pointer"
-                    >
-                      <option value="ADMIN">ADMIN (أدمن)</option>
-                      <option value="EDITOR">EDITOR (محرر)</option>
-                      <option value="VIEWER">VIEWER (مشاهد)</option>
-                    </select>
-                  </div>
-
-                  {activeRole === 'ADMIN' && (
-                    <button
-                      type="button"
-                      onClick={() => setShowUsersAuditModal('users')}
-                      data-testid="open-users-btn"
-                      aria-label="إدارة البريد والصلاحيات"
-                      className="inline-flex items-center gap-1 rounded-xl border border-purple-200 bg-purple-50 px-2.5 py-1.5 text-xs font-extrabold text-purple-900 hover:bg-purple-100 transition cursor-pointer"
-                    >
-                      <Users className="w-3.5 h-3.5 text-purple-700" />
-                      <span className="hidden sm:inline">البريد والصلاحيات</span>
-                    </button>
-                  )}
-
-                  {(activeRole === 'ADMIN' || activeRole === 'EDITOR') && (
-                    <button
-                      type="button"
-                      onClick={() => setShowUsersAuditModal('audit')}
-                      data-testid="open-audit-btn"
-                      aria-label="سجل التدقيق"
-                      className="inline-flex items-center gap-1 rounded-xl border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-800 hover:bg-slate-50 transition cursor-pointer"
-                    >
-                      <History className="w-3.5 h-3.5 text-purple-700" />
-                      <span className="hidden sm:inline">سجل التدقيق</span>
-                    </button>
-                  )}
-
-                  {activeRole === 'ADMIN' && (
-                    <button
-                      type="button"
-                      onClick={() => setShowSettingsModal(true)}
-                      data-testid="open-settings-btn"
-                      aria-label="إعدادات المركز"
-                      className="inline-flex items-center gap-1 rounded-xl border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-800 hover:bg-slate-50 transition cursor-pointer"
-                    >
-                      <Settings className="w-3.5 h-3.5 text-purple-700" />
-                      <span className="hidden sm:inline">الإعدادات</span>
-                    </button>
-                  )}
-
-                  {firebaseUser ? (
-                    <button
-                      type="button"
-                      onClick={() => signOut(auth)}
-                      className="inline-flex items-center gap-1 rounded-xl border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs font-bold text-rose-800 hover:bg-rose-100 transition cursor-pointer"
-                    >
-                      <LogOut className="w-3.5 h-3.5" />
-                      <span>خروج</span>
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={handleGoogleSignIn}
-                      className="inline-flex items-center gap-1 rounded-xl bg-slate-900 px-2.5 py-1.5 text-xs font-bold text-white hover:bg-slate-800 transition cursor-pointer"
-                    >
-                      <LogIn className="w-3.5 h-3.5" />
-                      <span>دخول جوجل</span>
-                    </button>
-                  )}
-                </>
               )}
             </div>
           )}
         </div>
-
-        {/* 7-Day Navigation Bar */}
-        <div className="border-t border-slate-200/80 bg-gradient-to-r from-purple-950 via-indigo-950 to-purple-950 text-white">
-          <div className="mx-auto max-w-7xl px-3 sm:px-6 py-2 flex items-center justify-between gap-2 overflow-x-auto no-scrollbar">
-            <div className="flex items-center gap-1.5 shrink-0 text-xs font-bold text-purple-200">
-              <Calendar className="w-4 h-4 text-amber-400" />
-              <span>اليوم:</span>
-            </div>
-
-            <nav
-              aria-label="اختيار يوم الجدول"
-              className="flex items-center gap-1.5 sm:gap-2 flex-1 justify-start sm:justify-center overflow-x-auto no-scrollbar py-0.5"
-            >
-              {DAYS_LIST.map((day) => {
-                const isSelected = selectedDay === day.id;
-                const daySched = schedules[day.id];
-                const rowCount =
-                  viewMode === 'public' || activeRole === 'VIEWER'
-                    ? daySched?.publishedRows?.length || 0
-                    : daySched?.draftRows?.length || 0;
-                const hasDraftDiff =
-                  viewMode === 'manage' && daySched?.hasUnpublishedChanges;
-
-                return (
-                  <button
-                    key={day.id}
-                    type="button"
-                    onClick={() => {
-                      setSelectedDay(day.id);
-                      setSelectedRowId(null);
-                    }}
-                    data-testid={`day-tab-${day.id}`}
-                    aria-current={isSelected ? 'page' : undefined}
-                    className={`relative inline-flex items-center gap-1.5 rounded-xl px-3 sm:px-4 py-1.5 text-xs sm:text-sm font-extrabold transition shrink-0 cursor-pointer ${
-                      isSelected
-                        ? 'bg-amber-400 text-slate-950 shadow-md scale-105'
-                        : 'bg-white/10 text-white hover:bg-white/20'
-                    }`}
-                  >
-                    <span>{day.label}</span>
-                    <span
-                      className={`rounded-full px-1.5 py-0.2 text-[10px] font-black ${
-                        isSelected
-                          ? 'bg-slate-950/15 text-slate-950'
-                          : 'bg-white/15 text-purple-100'
-                      }`}
-                    >
-                      {rowCount}
-                    </span>
-                    {hasDraftDiff && (
-                      <span
-                        title="توجد مسودة غير منشورة لهذا اليوم"
-                        className="absolute -top-1 -left-1 h-2.5 w-2.5 rounded-full bg-emerald-400 ring-2 ring-purple-950"
-                      />
-                    )}
-                  </button>
-                );
-              })}
-            </nav>
-          </div>
-        </div>
       </header>
 
-      {/* Main Content Area */}
-      <main className="relative z-10 mx-auto w-full max-w-7xl flex-1 px-2 sm:px-6 py-4 sm:py-6 space-y-4">
+      {/* Slide-Over RTL Sidebar Menu — Rendered ONLY for ADMIN */}
+      {!isStrictPublicUrl && activeRole === 'ADMIN' && (
+        <div
+          aria-hidden={!isSidebarOpen}
+          className={`fixed inset-0 z-50 transition-opacity duration-200 ${
+            isSidebarOpen
+              ? 'opacity-100 pointer-events-auto'
+              : 'opacity-0 pointer-events-none'
+          }`}
+        >
+          {/* Backdrop */}
+          <div
+            onClick={() => setIsSidebarOpen(false)}
+            className="absolute inset-0 bg-slate-950/60 backdrop-blur-xs"
+          />
+
+          {/* Sidebar Drawer Panel (Right side in RTL) */}
+          <aside
+            data-testid="app-sidebar"
+            aria-label="القائمة الجانبية للتعديل والصلاحيات"
+            className={`absolute top-0 right-0 h-full w-[320px] max-w-[88vw] bg-white shadow-2xl border-l border-purple-200 flex flex-col justify-between overflow-y-auto transition-transform duration-200 ${
+              isSidebarOpen ? 'translate-x-0' : 'translate-x-full'
+            }`}
+          >
+            <div className="p-4 space-y-5">
+              {/* 1. الشعار والاسم (Official Complex Logo & Name) */}
+              <div className="flex items-start justify-between gap-2 pb-4 border-b border-slate-200">
+                <div className="flex items-center gap-3">
+                  <div className="h-14 w-14 rounded-2xl bg-purple-50 p-1.5 border border-purple-200 flex items-center justify-center shrink-0 shadow-xs">
+                    <ComplexBrandLogo
+                      className="h-full w-auto object-contain"
+                      idSuffix="sidebar-logo"
+                    />
+                  </div>
+                  <div>
+                    <h1 className="text-base font-black text-slate-950 leading-snug">
+                      {settings.complexName}
+                    </h1>
+                    <p className="text-xs font-bold text-purple-700 mt-0.5">
+                      {settings.associationName} • {settings.registrationNumber}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsSidebarOpen(false)}
+                  data-testid="close-sidebar-btn"
+                  aria-label="إغلاق القائمة الجانبية"
+                  className="rounded-xl p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-800 transition cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* 2. وضع التعديل وإدارة الجدول (Schedule Editing Controls) */}
+              <div className="space-y-3">
+                <h2 className="text-xs font-black text-slate-500 uppercase tracking-wider">
+                  التعديل وإدارة الجدول
+                </h2>
+
+                {/* Mode Switcher */}
+                <div className="grid grid-cols-2 gap-1.5 rounded-xl bg-slate-100 p-1 border border-slate-200">
+                  <button
+                    type="button"
+                    onClick={() => setViewMode('manage')}
+                    data-testid="mode-manage-btn"
+                    className={`inline-flex items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-extrabold transition cursor-pointer ${
+                      viewMode === 'manage'
+                        ? 'bg-purple-700 text-white shadow-xs'
+                        : 'text-slate-700 hover:text-slate-900'
+                    }`}
+                  >
+                    <Edit3 className="w-3.5 h-3.5" />
+                    <span>التعديل السريع</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setViewMode('public')}
+                    data-testid="mode-public-btn"
+                    className={`inline-flex items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-extrabold transition cursor-pointer ${
+                      viewMode === 'public'
+                        ? 'bg-emerald-600 text-white shadow-xs'
+                        : 'text-slate-700 hover:text-slate-900'
+                    }`}
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>العرض العام</span>
+                  </button>
+                </div>
+
+                {/* Firestore Instant Save Status + Publish */}
+                {userCanEditSelectedDay && (
+                  <div className="rounded-xl bg-emerald-50/70 border border-emerald-200 p-2.5 space-y-2">
+                    <div
+                      data-testid="save-status-indicator"
+                      className="flex items-center gap-1.5 text-xs font-extrabold text-emerald-800"
+                    >
+                      <span className="h-2 w-2 rounded-full bg-emerald-500 shrink-0" />
+                      <span>
+                        {saveStatus === 'saving'
+                          ? 'جارٍ الحفظ الفوري...'
+                          : 'حفظ فوري تلقائي على Firestore'}
+                      </span>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handlePublishDay();
+                        setIsSidebarOpen(false);
+                      }}
+                      className={`w-full inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-xs font-extrabold text-white shadow-xs transition cursor-pointer ${
+                        currentSchedule.hasUnpublishedChanges
+                          ? 'bg-emerald-600 hover:bg-emerald-700'
+                          : 'bg-purple-700 hover:bg-purple-800'
+                      }`}
+                    >
+                      <Send className="w-3.5 h-3.5 shrink-0" />
+                      <span>
+                        {currentSchedule.hasUnpublishedChanges
+                          ? 'اعتماد ونشر التعديلات'
+                          : 'معتمد ومنشور'}
+                      </span>
+                    </button>
+                  </div>
+                )}
+
+                {/* Edit Action Buttons */}
+                {userCanEditSelectedDay && (
+                  <div className="grid grid-cols-1 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowAdvancedPanel(!showAdvancedPanel);
+                        setIsSidebarOpen(false);
+                      }}
+                      className="w-full inline-flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs font-extrabold text-slate-800 hover:bg-slate-100 transition cursor-pointer"
+                    >
+                      <span className="inline-flex items-center gap-2">
+                        <ListOrdered className="w-4 h-4 text-purple-700" />
+                        <span>
+                          {showAdvancedPanel
+                            ? 'إخفاء قائمة الصفوف المتقدمة'
+                            : 'قائمة الصفوف (تحرير متقدم)'}
+                        </span>
+                      </span>
+                    </button>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCopyDayTarget(
+                            selectedDay === 'saturday' ? 'sunday' : 'saturday'
+                          );
+                          setShowCopyDayModal(true);
+                          setIsSidebarOpen(false);
+                        }}
+                        className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-2.5 py-2 text-xs font-extrabold text-indigo-900 hover:bg-indigo-100 transition cursor-pointer"
+                      >
+                        <Copy className="w-3.5 h-3.5 shrink-0" />
+                        <span>نسخ اليوم</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleUndo}
+                        disabled={!canUndo}
+                        className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 bg-white px-2.5 py-2 text-xs font-extrabold text-slate-700 hover:bg-slate-50 disabled:opacity-40 transition cursor-pointer"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5 shrink-0" />
+                        <span>تراجع ({undoCount})</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* 3. الصلاحيات والحساب (Permissions & Account) */}
+              <div className="space-y-2.5 pt-3 border-t border-slate-200">
+                <h2 className="text-xs font-black text-slate-500 uppercase tracking-wider">
+                  الصلاحيات وإدارة المستخدمين
+                </h2>
+
+                <div className="flex items-center justify-between gap-2 rounded-xl border border-purple-200 bg-purple-50/70 px-3 py-2">
+                  <span className="inline-flex items-center gap-1.5 text-xs font-bold text-purple-900">
+                    <Shield className="w-4 h-4 text-purple-700" />
+                    <span>الدور الحالي:</span>
+                  </span>
+                  <select
+                    id="role-switcher"
+                    aria-label="تبديل دور الصلاحية"
+                    value={activeRole}
+                    onChange={(e) => {
+                      const nextRole = e.target.value as UserRole;
+                      setActiveRole(nextRole);
+                      if (nextRole === 'EDITOR') {
+                        setViewMode('manage');
+                        setIsSidebarOpen(false);
+                      }
+                    }}
+                    className="bg-transparent text-xs font-black text-purple-950 focus:outline-none cursor-pointer"
+                  >
+                    <option value="ADMIN">ADMIN (مدير)</option>
+                    <option value="EDITOR">EDITOR (محرر)</option>
+                  </select>
+                </div>
+
+                {activeRole === 'ADMIN' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowUsersAuditModal('users');
+                      setIsSidebarOpen(false);
+                    }}
+                    data-testid="open-users-btn"
+                    aria-label="إدارة البريد والصلاحيات"
+                    className="w-full inline-flex items-center justify-between rounded-xl border border-purple-200 bg-purple-50 px-3 py-2.5 text-xs font-extrabold text-purple-950 hover:bg-purple-100 transition cursor-pointer"
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      <Users className="w-4 h-4 text-purple-700" />
+                      <span>إدارة البريد والصلاحيات (أدمن / محرر)</span>
+                    </span>
+                  </button>
+                )}
+
+                {(activeRole === 'ADMIN' || activeRole === 'EDITOR') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowUsersAuditModal('audit');
+                      setIsSidebarOpen(false);
+                    }}
+                    data-testid="open-audit-btn"
+                    aria-label="سجل التدقيق"
+                    className="w-full inline-flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-extrabold text-slate-800 hover:bg-slate-50 transition cursor-pointer"
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      <History className="w-4 h-4 text-purple-700" />
+                      <span>سجل التدقيق والتعديلات</span>
+                    </span>
+                  </button>
+                )}
+
+                {activeRole === 'ADMIN' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowSettingsModal(true);
+                      setIsSidebarOpen(false);
+                    }}
+                    data-testid="open-settings-btn"
+                    aria-label="إعدادات المركز"
+                    className="w-full inline-flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-extrabold text-slate-800 hover:bg-slate-50 transition cursor-pointer"
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      <Settings className="w-4 h-4 text-purple-700" />
+                      <span>إعدادات المركز وأرقام التواصل</span>
+                    </span>
+                  </button>
+                )}
+              </div>
+
+              {/* 4. الإشعارات وتثبيت التطبيق وحساب جوجل */}
+              <div className="space-y-2.5 pt-3 border-t border-slate-200">
+                <h2 className="text-xs font-black text-slate-500 uppercase tracking-wider">
+                  التطبيق والحساب
+                </h2>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <PWAInstallButton />
+                  <NotificationToggleButton />
+                </div>
+
+                {firebaseUser ? (
+                  <div className="space-y-2 pt-1">
+                    <div className="text-[11px] font-bold text-slate-600 truncate">
+                      مسجل باسم: {firebaseUser.email}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => signOut(auth)}
+                      className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-extrabold text-rose-800 hover:bg-rose-100 transition cursor-pointer"
+                    >
+                      <LogOut className="w-4 h-4" />
+                      <span>تسجيل الخروج</span>
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleGoogleSignIn}
+                    className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl bg-slate-900 px-3 py-2.5 text-xs font-extrabold text-white hover:bg-slate-800 transition cursor-pointer"
+                  >
+                    <LogIn className="w-4 h-4" />
+                    <span>تسجيل الدخول بحساب جوجل</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          </aside>
+        </div>
+      )}
+
+      {/* Main Content Area: Clean Page showing only Share Buttons above the Schedule Poster */}
+      <main className="relative z-10 mx-auto w-full max-w-7xl flex-1 px-2 sm:px-6 py-3 sm:py-5 space-y-3">
         {/* Concurrent Conflict Resolution Banner */}
         {conflict && (
           <div
@@ -1351,82 +1551,7 @@ export default function App() {
           </div>
         )}
 
-        {/* Quick Simplified Action Toolbar for Editors */}
-        {userCanEditSelectedDay && (
-          <div className="mx-auto max-w-[780px] rounded-2xl bg-white/95 backdrop-blur-xs p-3 sm:p-4 shadow-xs border border-purple-100 space-y-2.5">
-            {/* Row 1: Save Status Badge + Primary Publish Action */}
-            <div className="flex items-center justify-between gap-2">
-              <span
-                data-testid="save-status-indicator"
-                className="inline-flex items-center gap-1.5 text-[11px] sm:text-xs font-extrabold text-emerald-700 bg-emerald-50 px-3 py-1.5 rounded-full border border-emerald-200 whitespace-nowrap"
-              >
-                <span className="h-2 w-2 rounded-full bg-emerald-500 shrink-0" />
-                <span>
-                  {saveStatus === 'saving'
-                    ? 'جارٍ الحفظ الفوري...'
-                    : 'حفظ فوري تلقائي على Firestore'}
-                </span>
-              </span>
-
-              <button
-                type="button"
-                onClick={handlePublishDay}
-                className={`inline-flex items-center justify-center gap-1.5 rounded-xl px-3.5 py-1.5 text-[11px] sm:text-xs font-extrabold text-white whitespace-nowrap shadow-xs transition cursor-pointer ${
-                  currentSchedule.hasUnpublishedChanges
-                    ? 'bg-emerald-600 hover:bg-emerald-700 ring-2 ring-emerald-300'
-                    : 'bg-purple-700 hover:bg-purple-800'
-                }`}
-              >
-                <Send className="w-3.5 h-3.5 shrink-0" />
-                <span>
-                  {currentSchedule.hasUnpublishedChanges
-                    ? 'اعتماد ونشر التعديلات'
-                    : 'معتمد ومنشور'}
-                </span>
-              </button>
-            </div>
-
-            {/* Row 2: 3 Equal Columns (Undo | Copy Day | Toggle Rows Panel) */}
-            <div className="grid grid-cols-3 gap-2">
-              <button
-                type="button"
-                onClick={handleUndo}
-                disabled={!canUndo}
-                className="w-full inline-flex items-center justify-center gap-1 rounded-xl border border-slate-300 bg-white px-2 py-2 text-[11px] sm:text-xs font-extrabold text-slate-700 whitespace-nowrap hover:bg-slate-50 disabled:opacity-40 transition cursor-pointer"
-              >
-                <RotateCcw className="w-3.5 h-3.5 shrink-0" />
-                <span>تراجع ({undoCount})</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setCopyDayTarget(
-                    selectedDay === 'saturday' ? 'sunday' : 'saturday'
-                  );
-                  setShowCopyDayModal(true);
-                }}
-                className="w-full inline-flex items-center justify-center gap-1 rounded-xl border border-indigo-200 bg-indigo-50 px-2 py-2 text-[11px] sm:text-xs font-extrabold text-indigo-900 whitespace-nowrap hover:bg-indigo-100 transition cursor-pointer"
-              >
-                <Copy className="w-3.5 h-3.5 shrink-0" />
-                <span>نسخ اليوم</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setShowAdvancedPanel(!showAdvancedPanel)}
-                className="w-full inline-flex items-center justify-center gap-1 rounded-xl border border-slate-300 bg-slate-50 px-2 py-2 text-[11px] sm:text-xs font-extrabold text-slate-700 whitespace-nowrap hover:bg-slate-100 transition cursor-pointer"
-              >
-                <ListOrdered className="w-3.5 h-3.5 shrink-0" />
-                <span>
-                  {showAdvancedPanel ? 'إخفاء القائمة' : 'قائمة الصفوف'}
-                </span>
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Export & Share Bar (2 rows x 3 columns grid + 4:5 fixed image export) */}
+        {/* Export & Share Bar directly above the Schedule Poster */}
         <ShareAndExportBar
           dayId={selectedDay}
           dayLabel={currentSchedule.dayLabel}

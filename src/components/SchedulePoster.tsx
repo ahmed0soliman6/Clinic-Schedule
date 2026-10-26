@@ -3,7 +3,6 @@ import {
   ArrowDown,
   ArrowUp,
   Check,
-  ChevronDown,
   Copy,
   Plus,
   Trash2,
@@ -81,18 +80,40 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
 
   const showControls = isEditable && !isExporting;
   const rowCount = orderedRows.length;
+  const isCompactExport = isExporting && rowCount >= 8;
 
-  // Dynamic font and icon sizing when exporting to 4:5 (780x975) so 2 rows or 9 rows both look balanced
-  const exportRowTextClass =
-    rowCount <= 4
-      ? 'text-2xl'
-      : rowCount <= 7
-      ? 'text-xl'
-      : rowCount <= 10
-      ? 'text-lg'
-      : 'text-base';
+  // Dynamic font and icon sizing ONLY when exporting to 4:5 PNG (780x975 -> 1440x1800)
+  // Guarantees every text fills its box clearly while staying 100% locked inside fixed column bounds
+  const getExportClinicFontSize = (text: string): string => {
+    const len = (text || '').trim().length;
+    const base =
+      rowCount <= 4 ? 30 : rowCount <= 6 ? 27 : rowCount <= 8 ? 25 : rowCount <= 10 ? 22 : 20;
+    if (len >= 16) return `${Math.min(base, 18.5)}px`;
+    if (len >= 13) return `${Math.min(base, 20.5)}px`;
+    if (len >= 10) return `${Math.min(base, 24)}px`;
+    return `${base}px`;
+  };
+
+  const getExportDoctorFontSize = (text: string): string => {
+    const len = (text || '').trim().length;
+    const base =
+      rowCount <= 4 ? 34 : rowCount <= 6 ? 31 : rowCount <= 8 ? 29 : rowCount <= 10 ? 26 : 23;
+    if (len >= 22) return `${Math.min(base, 21)}px`;
+    if (len >= 18) return `${Math.min(base, 24.5)}px`;
+    if (len >= 15) return `${Math.min(base, 27.5)}px`;
+    return `${base}px`;
+  };
+
+  const getExportTimeFontSize = (text: string): string => {
+    const len = (text || '').trim().length;
+    const base =
+      rowCount <= 4 ? 28 : rowCount <= 6 ? 26 : rowCount <= 8 ? 24 : rowCount <= 10 ? 22 : 19;
+    if (len >= 8) return `${Math.min(base, 20)}px`;
+    return `${base}px`;
+  };
+
   const exportIconSize =
-    rowCount <= 4 ? 34 : rowCount <= 7 ? 30 : rowCount <= 10 ? 27 : 22;
+    rowCount <= 4 ? 42 : rowCount <= 7 ? 38 : rowCount === 8 ? 34 : 30;
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -140,9 +161,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
   const handleSaveDoctorName = (rowId: string) => {
     if (!onUpdateRow) return;
     const trimmed = doctorDraft.trim();
-    if (trimmed) {
-      onUpdateRow(rowId, { doctorName: trimmed });
-    }
+    onUpdateRow(rowId, { doctorName: trimmed });
     setActivePopup(null);
   };
 
@@ -153,21 +172,19 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
   ) => {
     if (!onUpdateRow) return;
     const trimmed = timeValue.trim();
-    if (trimmed) {
-      onUpdateRow(rowId, { [field]: trimmed });
-    }
+    onUpdateRow(rowId, { [field]: trimmed });
     setActivePopup(null);
   };
 
   const handleQuickAddRow = () => {
     if (!onAddRow) return;
     onAddRow({
-      clinicName: 'الباطنة',
-      doctorName: 'د/ اكتب اسم الطبيب',
-      startTime: '4:00 م',
-      endTime: '6:00 م',
-      icon: 'internal',
-      iconColor: '#0284c7',
+      clinicName: '',
+      doctorName: '',
+      startTime: '',
+      endTime: '',
+      icon: 'stethoscope',
+      iconColor: '#6d28d9',
     });
   };
 
@@ -186,8 +203,8 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
         }}
         className={`relative mx-auto overflow-hidden rounded-[28px] shadow-xl border border-purple-200/70 select-none ${
           isExporting
-            ? 'w-[780px] h-[975px] p-6 flex flex-col justify-between'
-            : 'w-full max-w-[780px] p-3 sm:p-6'
+            ? 'w-[780px] h-[975px] p-4 flex flex-col justify-between'
+            : 'w-full max-w-[780px] p-2.5 sm:p-6'
         }`}
       >
         {/* Subtle Center Watermark Background of مجمع ميت عزون الطبي Logo */}
@@ -204,7 +221,11 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
         {/* Top Header: Right Transparent Logo - Center Day Banner - Left Association Logo */}
         <div
           className={`relative z-10 grid grid-cols-[1fr_1.45fr_1fr] items-center shrink-0 ${
-            isExporting ? 'gap-4 mb-3' : 'gap-1.5 sm:gap-4 mb-3.5 sm:mb-5'
+            isExporting
+              ? isCompactExport
+                ? 'gap-3 mb-1.5'
+                : 'gap-4 mb-3'
+              : 'gap-1.5 sm:gap-4 mb-3.5 sm:mb-5'
           }`}
         >
           {/* Right side in RTL: Transparent Medical Complex Logo (مجمع ميت عزون الطبي) */}
@@ -217,13 +238,21 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                 alt={settings.complexName}
                 crossOrigin="anonymous"
                 className={`w-auto object-contain drop-shadow-xs ${
-                  isExporting ? 'h-32' : 'h-20 sm:h-32'
+                  isExporting
+                    ? isCompactExport
+                      ? 'h-24'
+                      : 'h-32'
+                    : 'h-20 sm:h-32'
                 }`}
               />
             ) : (
               <ComplexBrandLogo
                 className={`w-auto object-contain drop-shadow-xs ${
-                  isExporting ? 'h-32' : 'h-20 sm:h-32'
+                  isExporting
+                    ? isCompactExport
+                      ? 'h-24'
+                      : 'h-32'
+                    : 'h-20 sm:h-32'
                 }`}
                 idSuffix={isExporting ? 'export-right' : 'view-right'}
               />
@@ -323,13 +352,21 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                 alt={settings.associationName}
                 crossOrigin="anonymous"
                 className={`w-auto object-contain drop-shadow-xs ${
-                  isExporting ? 'h-32' : 'h-20 sm:h-32'
+                  isExporting
+                    ? isCompactExport
+                      ? 'h-24'
+                      : 'h-32'
+                    : 'h-20 sm:h-32'
                 }`}
               />
             ) : (
               <AssociationBrandLogo
                 className={`w-auto object-contain drop-shadow-xs ${
-                  isExporting ? 'h-32' : 'h-20 sm:h-32'
+                  isExporting
+                    ? isCompactExport
+                      ? 'h-24'
+                      : 'h-32'
+                    : 'h-20 sm:h-32'
                 }`}
                 idSuffix={isExporting ? 'export-left' : 'view-left'}
               />
@@ -337,48 +374,27 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
           </div>
         </div>
 
-        {/* Interactive Hint Bar (Only shown in edit mode, never exported) */}
-        {showControls && (
-          <div
-            data-export-ignore="true"
-            className="mb-2.5 rounded-xl bg-purple-900/95 px-3 py-2 text-white text-xs font-bold flex flex-wrap items-center justify-between gap-2 shadow-xs"
-          >
-            <span>
-              اضغط مباشرة على أي خانة في الجدول لاختيار (نوع العيادة وأيقونتها) أو كتابة (الطبيب) أو تحديد (الموعد)
-            </span>
-            <button
-              type="button"
-              onClick={handleQuickAddRow}
-              data-testid="quick-add-row-btn"
-              className="inline-flex items-center gap-1 rounded-lg bg-amber-400 px-3 py-1 text-xs font-black text-slate-950 hover:bg-amber-300 transition shrink-0"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>إضافة صف جديد</span>
-            </button>
-          </div>
-        )}
-
         {/* Main White Table Card — Stretches vertically in 4:5 export mode so 2 rows or 9 rows always fill the frame */}
         <div
           className={`relative z-20 rounded-[26px] bg-white shadow-md border border-purple-100 ${
             isExporting
-              ? 'p-3 flex-1 flex flex-col min-h-0'
-              : 'p-2 sm:p-3'
+              ? 'p-2 flex-1 flex flex-col min-h-0'
+              : 'p-1.5 sm:p-3'
           }`}
         >
-          {/* Table Column Headers (RTL order: العيادة | الطبيب | من | إلى) */}
-          <div className="grid grid-cols-[1.45fr_1.35fr_0.72fr_0.72fr] gap-[2px] overflow-hidden rounded-t-[20px] shrink-0">
+          {/* Table Column Headers (RTL order: العيادة 31% | الطبيب 39% | من 15% | إلى 15%) */}
+          <div className="grid grid-cols-[minmax(0,31%)_minmax(0,39%)_minmax(0,15%)_minmax(0,15%)] gap-[2px] overflow-hidden rounded-t-[20px] shrink-0">
             {/* Column 1: العيادة */}
             <div
               style={{
                 background: 'linear-gradient(90deg, #f59e0b 0%, #fbbf24 100%)',
               }}
-              className={`flex items-center justify-center gap-2 px-2 text-white font-extrabold ${
-                isExporting ? 'py-3 text-2xl' : 'py-2.5 sm:py-3.5 text-sm sm:text-2xl'
+              className={`min-w-0 overflow-hidden flex items-center justify-center gap-1.5 px-1.5 text-white font-extrabold ${
+                isExporting ? 'py-2.5 text-[26px] font-black' : 'py-2 sm:py-3 text-xs sm:text-xl'
               }`}
             >
               <span>العيادة</span>
-              <StethoscopeHeaderIcon size={isExporting ? 26 : 24} />
+              <StethoscopeHeaderIcon size={isExporting ? 28 : 20} />
             </div>
 
             {/* Column 2: الطبيب (Vibrant Emerald Green matching Attachment #2) */}
@@ -386,12 +402,12 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
               style={{
                 background: 'linear-gradient(90deg, #0d9456 0%, #10a361 100%)',
               }}
-              className={`flex items-center justify-center gap-2 px-2 text-white font-extrabold ${
-                isExporting ? 'py-3 text-2xl' : 'py-2.5 sm:py-3.5 text-sm sm:text-2xl'
+              className={`min-w-0 overflow-hidden flex items-center justify-center gap-1.5 px-1.5 text-white font-extrabold ${
+                isExporting ? 'py-2.5 text-[26px] font-black' : 'py-2 sm:py-3 text-xs sm:text-xl'
               }`}
             >
               <span>الطبيب</span>
-              <DoctorHeaderIcon size={isExporting ? 26 : 24} />
+              <DoctorHeaderIcon size={isExporting ? 28 : 20} />
             </div>
 
             {/* Column 3: من */}
@@ -399,12 +415,12 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
               style={{
                 background: 'linear-gradient(90deg, #f59e0b 0%, #fbbf24 100%)',
               }}
-              className={`flex items-center justify-center gap-1.5 px-1.5 text-white font-extrabold ${
-                isExporting ? 'py-3 text-2xl' : 'py-2.5 sm:py-3.5 text-sm sm:text-2xl'
+              className={`min-w-0 overflow-hidden flex items-center justify-center gap-1 px-1 text-white font-extrabold ${
+                isExporting ? 'py-2.5 text-[26px] font-black' : 'py-2 sm:py-3 text-xs sm:text-xl'
               }`}
             >
               <span>من</span>
-              <ClockHeaderIcon size={22} />
+              <ClockHeaderIcon size={isExporting ? 24 : 18} />
             </div>
 
             {/* Column 4: إلى */}
@@ -412,12 +428,12 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
               style={{
                 background: 'linear-gradient(90deg, #0088cc 0%, #00a8e8 100%)',
               }}
-              className={`flex items-center justify-center gap-1.5 px-1.5 text-white font-extrabold ${
-                isExporting ? 'py-3 text-2xl' : 'py-2.5 sm:py-3.5 text-sm sm:text-2xl'
+              className={`min-w-0 overflow-hidden flex items-center justify-center gap-1 px-1 text-white font-extrabold ${
+                isExporting ? 'py-2.5 text-[26px] font-black' : 'py-2 sm:py-3 text-xs sm:text-xl'
               }`}
             >
               <span>إلى</span>
-              <ClockHeaderIcon size={22} />
+              <ClockHeaderIcon size={isExporting ? 24 : 18} />
             </div>
           </div>
 
@@ -446,7 +462,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                   <div
                     key={row.id}
                     data-testid={isExporting ? undefined : `poster-row-${row.id}`}
-                    className={`relative grid grid-cols-[1.45fr_1.35fr_0.72fr_0.72fr] gap-[2px] group ${
+                    className={`relative grid grid-cols-[minmax(0,31%)_minmax(0,39%)_minmax(0,15%)_minmax(0,15%)] gap-[2px] group ${
                       isExporting ? 'flex-1 min-h-0' : ''
                     }`}
                   >
@@ -457,12 +473,14 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                       role={showControls ? 'button' : undefined}
                       tabIndex={showControls ? 0 : undefined}
                       aria-label={
-                        showControls ? `اختيار نوع العيادة: ${row.clinicName}` : undefined
+                        showControls
+                          ? `اختيار نوع العيادة: ${row.clinicName || 'اختر العيادة'}`
+                          : undefined
                       }
-                      className={`bg-[#fdf8f3] flex items-center justify-between gap-2 relative ${
+                      className={`min-w-0 overflow-hidden bg-[#fdf8f3] flex items-center justify-between gap-1 relative ${
                         isExporting
-                          ? 'px-3.5 py-1.5 h-full'
-                          : 'px-2 sm:px-3.5 py-2.5 sm:py-3 min-h-[54px] sm:min-h-[62px]'
+                          ? 'px-2 py-0.5 h-full'
+                          : 'px-1.5 sm:px-3 py-2 sm:py-2.5 min-h-[48px] sm:min-h-[58px]'
                       } ${
                         showControls
                           ? 'cursor-pointer hover:bg-amber-50/90 hover:ring-2 hover:ring-inset hover:ring-amber-400 transition'
@@ -473,28 +491,39 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                           : ''
                       }`}
                     >
-                      <div className="shrink-0 flex items-center justify-center">
-                        <ClinicMedicalIcon
-                          icon={row.icon}
-                          color={row.iconColor}
-                          size={isExporting ? exportIconSize : 28}
-                          className={
-                            isExporting ? undefined : 'w-6 h-6 sm:w-7 sm:h-7'
-                          }
-                        />
-                      </div>
+                      {row.clinicName ? (
+                        <div className="shrink-0 flex items-center justify-center">
+                          <ClinicMedicalIcon
+                            icon={row.icon}
+                            color={row.iconColor}
+                            size={isExporting ? exportIconSize : 24}
+                            className={
+                              isExporting ? undefined : 'w-5 h-5 sm:w-7 sm:h-7'
+                            }
+                          />
+                        </div>
+                      ) : null}
                       <div
-                        className={`flex-1 text-center font-extrabold text-slate-900 leading-snug break-words flex items-center justify-center gap-1 ${
-                          isExporting ? exportRowTextClass : 'text-xs sm:text-lg'
+                        style={
+                          isExporting
+                            ? { fontSize: getExportClinicFontSize(row.clinicName) }
+                            : undefined
+                        }
+                        className={`min-w-0 flex-1 text-center text-slate-950 flex items-center justify-center ${
+                          isExporting
+                            ? 'font-black leading-tight whitespace-nowrap overflow-hidden'
+                            : 'font-extrabold text-[11px] sm:text-base leading-snug'
                         }`}
                       >
-                        <span>{row.clinicName}</span>
-                        {showControls && (
-                          <ChevronDown
-                            data-export-ignore="true"
-                            className="w-3.5 h-3.5 text-amber-600 opacity-50 group-hover:opacity-100 shrink-0"
-                          />
-                        )}
+                        {row.clinicName ? (
+                          <span className={isExporting ? 'whitespace-nowrap truncate' : ''}>
+                            {row.clinicName}
+                          </span>
+                        ) : showControls ? (
+                          <span className="text-slate-300 text-xs font-bold">
+                            &nbsp;
+                          </span>
+                        ) : null}
                       </div>
                     </div>
 
@@ -507,12 +536,19 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                       role={showControls ? 'button' : undefined}
                       tabIndex={showControls ? 0 : undefined}
                       aria-label={
-                        showControls ? `تعديل اسم الطبيب: ${row.doctorName}` : undefined
+                        showControls
+                          ? `تعديل اسم الطبيب: ${row.doctorName || 'اكتب اسم الطبيب'}`
+                          : undefined
                       }
-                      className={`bg-[#f1f5f2] flex items-center justify-center text-center font-extrabold text-slate-900 leading-snug break-words relative ${
+                      style={
                         isExporting
-                          ? `px-3 py-1.5 h-full ${exportRowTextClass}`
-                          : 'px-1.5 sm:px-3 py-2.5 sm:py-3 text-xs sm:text-lg'
+                          ? { fontSize: getExportDoctorFontSize(row.doctorName) }
+                          : undefined
+                      }
+                      className={`min-w-0 overflow-hidden bg-[#f1f5f2] flex items-center justify-center text-center text-slate-950 relative ${
+                        isExporting
+                          ? 'px-1.5 py-0.5 h-full font-black leading-tight whitespace-nowrap'
+                          : 'px-1 sm:px-2.5 py-2 sm:py-2.5 font-extrabold text-[11px] sm:text-base leading-snug'
                       } ${
                         showControls
                           ? 'cursor-pointer hover:bg-emerald-50/90 hover:ring-2 hover:ring-inset hover:ring-emerald-500 transition'
@@ -532,6 +568,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                               type="text"
                               autoFocus
                               aria-label="كتابة اسم الطبيب"
+                              placeholder="مثال: د/ أمجد رضا"
                               value={doctorDraft}
                               onChange={(e) => setDoctorDraft(e.target.value)}
                               onKeyDown={(e) => {
@@ -568,9 +605,15 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                             ))}
                           </div>
                         </div>
-                      ) : (
-                        <span>{row.doctorName}</span>
-                      )}
+                      ) : row.doctorName ? (
+                        <span className={isExporting ? 'whitespace-nowrap truncate' : ''}>
+                          {row.doctorName}
+                        </span>
+                      ) : showControls ? (
+                        <span className="text-slate-300 text-xs font-bold">
+                          &nbsp;
+                        </span>
+                      ) : null}
                     </div>
 
                     {/* CELL 3: START TIME (من) */}
@@ -580,12 +623,19 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                       role={showControls ? 'button' : undefined}
                       tabIndex={showControls ? 0 : undefined}
                       aria-label={
-                        showControls ? `اختيار وقت البداية من: ${row.startTime}` : undefined
+                        showControls
+                          ? `اختيار وقت البداية من: ${row.startTime || 'من'}`
+                          : undefined
                       }
-                      className={`bg-[#fdf9f2] flex items-center justify-center px-1 text-center font-extrabold text-slate-900 tracking-tight relative ${
+                      style={
                         isExporting
-                          ? `py-1.5 h-full ${exportRowTextClass}`
-                          : 'py-2.5 sm:py-3 text-xs sm:text-lg'
+                          ? { fontSize: getExportTimeFontSize(row.startTime) }
+                          : undefined
+                      }
+                      className={`min-w-0 overflow-hidden bg-[#fdf9f2] flex items-center justify-center px-1 text-center text-slate-950 tracking-tight whitespace-nowrap relative ${
+                        isExporting
+                          ? 'py-0.5 h-full font-black leading-none'
+                          : 'py-2 sm:py-2.5 font-extrabold text-[11px] sm:text-base leading-none'
                       } ${
                         showControls
                           ? 'cursor-pointer hover:bg-amber-50/90 hover:ring-2 hover:ring-inset hover:ring-amber-400 transition'
@@ -594,7 +644,13 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                         isStartOpen ? 'ring-2 ring-inset ring-amber-500 bg-amber-50' : ''
                       }`}
                     >
-                      <span>{row.startTime}</span>
+                      {row.startTime ? (
+                        <span className="whitespace-nowrap truncate">{row.startTime}</span>
+                      ) : showControls ? (
+                        <span className="text-slate-300 text-xs font-bold">
+                          &nbsp;
+                        </span>
+                      ) : null}
                     </div>
 
                     {/* CELL 4: END TIME (إلى) */}
@@ -604,12 +660,19 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                       role={showControls ? 'button' : undefined}
                       tabIndex={showControls ? 0 : undefined}
                       aria-label={
-                        showControls ? `اختيار وقت النهاية إلى: ${row.endTime}` : undefined
+                        showControls
+                          ? `اختيار وقت النهاية إلى: ${row.endTime || 'إلى'}`
+                          : undefined
                       }
-                      className={`bg-[#eef6fc] flex items-center justify-center px-1 text-center font-extrabold text-slate-900 tracking-tight relative ${
+                      style={
                         isExporting
-                          ? `py-1.5 h-full ${exportRowTextClass}`
-                          : 'py-2.5 sm:py-3 text-xs sm:text-lg'
+                          ? { fontSize: getExportTimeFontSize(row.endTime) }
+                          : undefined
+                      }
+                      className={`min-w-0 overflow-hidden bg-[#eef6fc] flex items-center justify-center px-1 text-center text-slate-950 tracking-tight whitespace-nowrap relative ${
+                        isExporting
+                          ? 'py-0.5 h-full font-black leading-none'
+                          : 'py-2 sm:py-2.5 font-extrabold text-[11px] sm:text-base leading-none'
                       } ${
                         showControls
                           ? 'cursor-pointer hover:bg-sky-50/90 hover:ring-2 hover:ring-inset hover:ring-sky-400 transition'
@@ -618,22 +681,47 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                         isEndOpen ? 'ring-2 ring-inset ring-sky-500 bg-sky-50' : ''
                       }`}
                     >
-                      <span>{row.endTime}</span>
+                      {row.endTime ? (
+                        <span className="whitespace-nowrap truncate">{row.endTime}</span>
+                      ) : showControls ? (
+                        <span className="text-slate-300 text-xs font-bold">
+                          &nbsp;
+                        </span>
+                      ) : null}
 
                       {showControls && (
-                        <button
-                          type="button"
+                        <div
                           data-export-ignore="true"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openCellEditor(row, 'actions');
-                          }}
-                          aria-label={`خيارات صف ${row.clinicName}`}
-                          title="ترتيب أو حذف أو نسخ هذا الصف"
-                          className="absolute left-1 top-1/2 -translate-y-1/2 flex items-center justify-center rounded-md bg-white/90 border border-slate-200 p-0.5 text-slate-400 hover:text-rose-600 hover:border-rose-300 shadow-2xs"
+                          className="absolute left-0.5 top-0.5 flex items-center gap-0.5"
                         >
-                          <X className="w-3 h-3" />
-                        </button>
+                          {onDeleteRow && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onDeleteRow(row.id);
+                              }}
+                              data-testid={`quick-delete-row-${idx}`}
+                              aria-label={`حذف صف ${row.clinicName || idx + 1}`}
+                              title="حذف هذا الصف مباشرة"
+                              className="flex items-center justify-center rounded bg-rose-50/90 border border-rose-200 p-[2px] text-rose-600 hover:bg-rose-600 hover:text-white transition"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openCellEditor(row, 'actions');
+                            }}
+                            aria-label={`خيارات صف ${row.clinicName || idx + 1}`}
+                            title="ترتيب أو نسخ أو حذف هذا الصف"
+                            className="flex items-center justify-center rounded bg-white/80 border border-slate-200/80 p-[2px] text-slate-500 hover:text-purple-700 hover:border-purple-300 transition"
+                          >
+                            <X className="w-2.5 h-2.5" />
+                          </button>
+                        </div>
                       )}
                     </div>
 
@@ -916,12 +1004,13 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
           </div>
 
           {/* Quick Add Row Button at Bottom of Table (Hidden on Export) */}
-          {showControls && orderedRows.length > 0 && (
+          {showControls && (
             <div data-export-ignore="true" className="mt-2 pt-1 text-center">
               <button
                 type="button"
                 onClick={handleQuickAddRow}
-                className="w-full rounded-xl border-2 border-dashed border-purple-300 bg-purple-50/50 py-2 text-xs font-extrabold text-purple-800 hover:bg-purple-100/70 hover:border-purple-400 transition flex items-center justify-center gap-1.5"
+                data-testid="quick-add-row-btn"
+                className="w-full rounded-xl border-2 border-dashed border-purple-300 bg-purple-50/50 py-2 text-xs font-extrabold text-purple-800 hover:bg-purple-100/70 hover:border-purple-400 transition flex items-center justify-center gap-1.5 cursor-pointer"
               >
                 <Plus className="w-4 h-4" />
                 <span>إضافة عيادة جديدة إلى جدول يوم {dayLabel}</span>
@@ -933,8 +1022,12 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
         {/* Bottom Dark-Blue Footer Bar — EXACT MATCH TO REFERENCE ATTACHMENT #2 ON ALL VIEWPORTS AND EXPORT */}
         <div
           style={{ backgroundColor: settings.footerBgColor }}
-          className={`relative z-10 mt-3.5 rounded-[24px] text-white shadow-lg ${
-            isExporting ? 'px-6 py-4' : 'px-2.5 sm:px-6 py-3 sm:py-4'
+          className={`relative z-10 rounded-[24px] text-white shadow-lg shrink-0 ${
+            isExporting
+              ? isCompactExport
+                ? 'mt-2 px-6 py-2.5'
+                : 'mt-3 px-6 py-4'
+              : 'mt-3.5 px-2.5 sm:px-6 py-3 sm:py-4'
           }`}
         >
           {/* Top Line: [Line] ميت عزون - بجوار المسجد الكبير [Line] [Purple Pin Circle on Left] */}

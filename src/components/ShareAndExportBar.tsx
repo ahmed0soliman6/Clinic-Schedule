@@ -63,7 +63,7 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
   const [postText, setPostText] = useState<string>(() =>
     buildDailySocialPostText(dayLabel, settings)
   );
-  const [showPostBox, setShowPostBox] = useState<boolean>(true);
+  const [showPostBox, setShowPostBox] = useState<boolean>(false);
   const [copiedPost, setCopiedPost] = useState<boolean>(false);
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
 
