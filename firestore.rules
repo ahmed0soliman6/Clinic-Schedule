@@ -188,8 +188,9 @@ service cloud.firestore {
     }
 
     match /schedules/{dayId} {
-      // Only authorized staff (Admin / Editor) can read the draft schedules
-      allow get, list: if isStaff();
+      // Authorized staff can read; public visitors can also read if isPublic is true
+      allow get: if isStaff() || (resource.data.isPublic == true);
+      allow list: if isStaff();
       allow create: if isSignedIn() && isValidId(dayId) && isEditorForDay(dayId) && isValidDailySchedule(incoming()) && incoming().dayId == dayId;
       allow update: if isSignedIn() && isValidId(dayId) && isEditorForDay(dayId) && isValidDailySchedule(incoming()) &&
         incoming().dayId == existing().dayId && (

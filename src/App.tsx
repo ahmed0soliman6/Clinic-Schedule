@@ -112,7 +112,7 @@ const FALLBACK_SETTINGS: CenterSettings = {
   footerBgColor: '#1e295b',
 };
 
-const STORAGE_KEY = 'meet_azzoun_medical_schedules_v8';
+const STORAGE_KEY = 'meet_azzoun_medical_schedules_v9_live';
 
 const DEFAULT_USERS_LIST: UserProfile[] = [
   {
@@ -653,7 +653,8 @@ export default function App() {
     const optimisticDay: DailyScheduleData = {
       ...currentDay,
       draftRows: sanitizedDraft,
-      hasUnpublishedChanges: true,
+      publishedRows: sanitizedDraft,
+      hasUnpublishedChanges: false,
       version: baseVersion + 1,
       updatedBy: firebaseUser?.uid || 'local-staff',
       updatedByEmail: firebaseUser?.email || PRIMARY_ADMIN_EMAIL,
@@ -676,40 +677,70 @@ export default function App() {
     }
 
     const scheduleDocRef = doc(db, 'schedules', targetDayId);
+    const nowIso = new Date().toISOString();
+
+    const schedulePayload = {
+      dayId: optimisticDay.dayId,
+      dayLabel: optimisticDay.dayLabel,
+      dayOrder: optimisticDay.dayOrder,
+      isPublic: true,
+      hasUnpublishedChanges: false,
+      version: baseVersion + 1,
+      draftRows: sanitizedDraft,
+      publishedRows: sanitizedDraft,
+      updatedBy: firebaseUser.uid,
+      updatedByEmail: firebaseUser.email || PRIMARY_ADMIN_EMAIL,
+      updatedByName: optimisticDay.updatedByName.slice(0, 120),
+      updatedAt: serverTimestamp(),
+      publishedAt: nowIso,
+    };
 
     try {
       let finalVersion = baseVersion + 1;
 
-      await runTransaction(db, async (transaction) => {
-        const remoteSnap = await transaction.get(scheduleDocRef);
-        if (remoteSnap.exists()) {
-          const remoteData = remoteSnap.data() as DailyScheduleData;
-          const remoteVer = remoteData.version || 1;
-          if (
-            remoteVer > baseVersion &&
-            remoteData.updatedByEmail !== firebaseUser.email
-          ) {
-            throw new Error(`CONCURRENT_CONFLICT:${JSON.stringify(remoteData)}`);
+      try {
+        await runTransaction(db, async (transaction) => {
+          const remoteSnap = await transaction.get(scheduleDocRef);
+          if (remoteSnap.exists()) {
+            const remoteData = remoteSnap.data() as DailyScheduleData;
+            const remoteVer = remoteData.version || 1;
+            if (
+              remoteVer > baseVersion &&
+              remoteData.updatedByEmail !== firebaseUser.email
+            ) {
+              throw new Error(`CONCURRENT_CONFLICT:${JSON.stringify(remoteData)}`);
+            }
+            finalVersion = remoteVer + 1;
           }
-          finalVersion = remoteVer + 1;
-        }
 
-        transaction.set(scheduleDocRef, {
+          transaction.set(scheduleDocRef, {
+            ...schedulePayload,
+            version: finalVersion,
+          });
+        });
+      } catch (transErr: unknown) {
+        const transErrMsg =
+          transErr instanceof Error ? transErr.message : String(transErr);
+        if (transErrMsg.startsWith('CONCURRENT_CONFLICT:')) {
+          throw transErr;
+        }
+        // Direct setDoc write fallback
+        await setDoc(scheduleDocRef, schedulePayload);
+      }
+
+      // Also persist to publicSchedules/{targetDayId} so public visitors see changes immediately
+      try {
+        await setDoc(doc(db, 'publicSchedules', targetDayId), {
           dayId: optimisticDay.dayId,
           dayLabel: optimisticDay.dayLabel,
           dayOrder: optimisticDay.dayOrder,
           isPublic: true,
-          hasUnpublishedChanges: true,
-          version: finalVersion,
-          draftRows: sanitizedDraft,
-          publishedRows: currentDay.publishedRows || [],
-          updatedBy: firebaseUser.uid,
-          updatedByEmail: firebaseUser.email || PRIMARY_ADMIN_EMAIL,
-          updatedByName: optimisticDay.updatedByName.slice(0, 120),
-          updatedAt: serverTimestamp(),
-          publishedAt: currentDay.publishedAt,
+          publishedRows: sanitizedDraft,
+          publishedAt: nowIso,
         });
-      });
+      } catch {
+        // Non-blocking
+      }
 
       localVersionRef.current[targetDayId] = finalVersion;
       setSaveStatus('saved');
@@ -754,7 +785,7 @@ export default function App() {
   /**
    * "اعتماد ونشر التعديلات":
    * Copies draftRows to publishedRows, sets hasUnpublishedChanges: false,
-   * and commits both schedules/{selectedDay} and publicSchedules/{selectedDay} via transaction.
+   * and commits both schedules/{selectedDay} and publicSchedules/{selectedDay}.
    */
   const handlePublishDay = async () => {
     if (!userCanEditSelectedDay) return;
@@ -797,44 +828,55 @@ export default function App() {
     const scheduleDocRef = doc(db, 'schedules', selectedDay);
     const publicDocRef = doc(db, 'publicSchedules', selectedDay);
 
+    const staffPayload = {
+      dayId: publishedDay.dayId,
+      dayLabel: publishedDay.dayLabel,
+      dayOrder: publishedDay.dayOrder,
+      isPublic: true,
+      hasUnpublishedChanges: false,
+      version: baseVersion + 1,
+      draftRows: sanitizedRows,
+      publishedRows: sanitizedRows,
+      updatedBy: firebaseUser.uid,
+      updatedByEmail: firebaseUser.email || PRIMARY_ADMIN_EMAIL,
+      updatedByName: publishedDay.updatedByName.slice(0, 120),
+      updatedAt: serverTimestamp(),
+      publishedAt: publishTimestamp,
+    };
+
+    const publicPayload = {
+      dayId: publishedDay.dayId,
+      dayLabel: publishedDay.dayLabel,
+      dayOrder: publishedDay.dayOrder,
+      isPublic: true,
+      publishedRows: sanitizedRows,
+      publishedAt: publishTimestamp,
+      updatedAt: serverTimestamp(),
+    };
+
     try {
       let finalVersion = baseVersion + 1;
 
-      await runTransaction(db, async (transaction) => {
-        const remoteSnap = await transaction.get(scheduleDocRef);
-        if (remoteSnap.exists()) {
-          const remoteData = remoteSnap.data() as DailyScheduleData;
-          finalVersion = (remoteData.version || 1) + 1;
-        }
+      try {
+        await runTransaction(db, async (transaction) => {
+          const remoteSnap = await transaction.get(scheduleDocRef);
+          if (remoteSnap.exists()) {
+            const remoteData = remoteSnap.data() as DailyScheduleData;
+            finalVersion = (remoteData.version || 1) + 1;
+          }
 
-        // 1. Write staff schedule
-        transaction.set(scheduleDocRef, {
-          dayId: publishedDay.dayId,
-          dayLabel: publishedDay.dayLabel,
-          dayOrder: publishedDay.dayOrder,
-          isPublic: true,
-          hasUnpublishedChanges: false,
-          version: finalVersion,
-          draftRows: sanitizedRows,
-          publishedRows: sanitizedRows,
-          updatedBy: firebaseUser.uid,
-          updatedByEmail: firebaseUser.email || PRIMARY_ADMIN_EMAIL,
-          updatedByName: publishedDay.updatedByName.slice(0, 120),
-          updatedAt: serverTimestamp(),
-          publishedAt: publishTimestamp,
-        });
+          transaction.set(scheduleDocRef, {
+            ...staffPayload,
+            version: finalVersion,
+          });
 
-        // 2. Write visitor public schedule
-        transaction.set(publicDocRef, {
-          dayId: publishedDay.dayId,
-          dayLabel: publishedDay.dayLabel,
-          dayOrder: publishedDay.dayOrder,
-          isPublic: true,
-          publishedRows: sanitizedRows,
-          publishedAt: publishTimestamp,
-          updatedAt: serverTimestamp(),
+          transaction.set(publicDocRef, publicPayload);
         });
-      });
+      } catch {
+        // Direct setDoc fallback if transaction fails
+        await setDoc(scheduleDocRef, staffPayload);
+        await setDoc(publicDocRef, publicPayload);
+      }
 
       localVersionRef.current[selectedDay] = finalVersion;
       setSaveStatus('saved');
@@ -1546,32 +1588,20 @@ export default function App() {
                       </span>
                     </button>
 
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setCopyDayTarget(
-                            selectedDay === 'saturday' ? 'sunday' : 'saturday'
-                          );
-                          setShowCopyDayModal(true);
-                          setIsSidebarOpen(false);
-                        }}
-                        className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-2.5 py-2 text-xs font-extrabold text-indigo-900 hover:bg-indigo-100 transition cursor-pointer"
-                      >
-                        <Copy className="w-3.5 h-3.5 shrink-0" />
-                        <span>نسخ اليوم</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={handleUndo}
-                        disabled={!canUndo}
-                        className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 bg-white px-2.5 py-2 text-xs font-extrabold text-slate-700 hover:bg-slate-50 disabled:opacity-40 transition cursor-pointer"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5 shrink-0" />
-                        <span>تراجع ({undoCount})</span>
-                      </button>
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCopyDayTarget(
+                          selectedDay === 'saturday' ? 'sunday' : 'saturday'
+                        );
+                        setShowCopyDayModal(true);
+                        setIsSidebarOpen(false);
+                      }}
+                      className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2.5 text-xs font-extrabold text-indigo-900 hover:bg-indigo-100 transition cursor-pointer"
+                    >
+                      <Copy className="w-4 h-4 shrink-0 text-indigo-700" />
+                      <span>نسخ جدول اليوم بالكامل إلى يوم آخر</span>
+                    </button>
                   </div>
                 )}
               </div>
@@ -1801,6 +1831,9 @@ export default function App() {
           rows={displayedRows}
           settings={settings}
           posterRef={exportPosterRef}
+          canUndo={canUndo}
+          undoCount={undoCount}
+          onUndo={handleUndo}
         />
 
         {/* Main Workspace: Interactive Poster Table */}

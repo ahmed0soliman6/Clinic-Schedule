@@ -47,10 +47,15 @@ export const app = initializeApp(resolvedConfig);
 export const resolvedDatabaseId =
   import.meta.env.VITE_FIREBASE_DATABASE_ID ||
   firebaseAppletConfig.firestoreDatabaseId ||
-  'ai-studio-a7f07dfc-95fa-4891-9ea2-3134e232e78b';
+  '(default)';
 
-// Primary provisioned Firestore database
-export const db = getFirestore(app, resolvedDatabaseId);
+// Primary provisioned Firestore database: connects to (default) shown in console
+export const db =
+  resolvedDatabaseId &&
+  resolvedDatabaseId !== '(default)' &&
+  resolvedDatabaseId !== 'default'
+    ? getFirestore(app, resolvedDatabaseId)
+    : getFirestore(app);
 
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();

@@ -4,6 +4,7 @@ import {
   Copy,
   Download,
   MessageSquareText,
+  RotateCcw,
   Smartphone,
 } from 'lucide-react';
 import { CenterSettings, DayId, ScheduleRow } from '../types/schedule';
@@ -24,6 +25,9 @@ interface ShareAndExportBarProps {
   rows: ScheduleRow[];
   settings: CenterSettings;
   posterRef: React.RefObject<HTMLDivElement | null>;
+  canUndo?: boolean;
+  undoCount?: number;
+  onUndo?: () => void;
 }
 
 function copyTextToClipboardSync(text: string): void {
@@ -51,6 +55,9 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
   rows,
   settings,
   posterRef,
+  canUndo = false,
+  undoCount = 0,
+  onUndo,
 }) => {
   const [isExporting, setIsExporting] = useState(false);
   const [cachedPoster, setCachedPoster] = useState<{
@@ -178,10 +185,10 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
       dir="rtl"
       className="mx-auto w-full max-w-[780px] rounded-2xl bg-white p-3 sm:p-4 shadow-sm border border-purple-100 space-y-3"
     >
-      {/* 3 Main Action Buttons in a Single Clean Row */}
+      {/* 4 Main Action Buttons: Save, Share Mobile, Post, and Undo */}
       <div
         data-testid="share-buttons-grid"
-        className="grid grid-cols-3 gap-2 sm:gap-3"
+        className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-2.5"
       >
         {/* Button 1: Save 4:5 PNG Image */}
         <button
@@ -213,11 +220,37 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
           type="button"
           onClick={() => setShowPostBox((prev) => !prev)}
           data-testid="toggle-post-caption-btn"
-          title="عرض ونسخ النص الترويجي لجدول اليوم"
-          className="w-full inline-flex items-center justify-center gap-1 sm:gap-2 rounded-xl border-2 border-purple-300 bg-purple-50 px-2 sm:px-3 py-2.5 sm:py-3 text-xs sm:text-sm font-black text-purple-950 whitespace-nowrap shadow-xs hover:bg-purple-100 transition cursor-pointer"
+          title={`عرض ونسخ النص الترويجي لبوست يوم ${dayLabel}`}
+          className={`w-full inline-flex items-center justify-center gap-1 sm:gap-2 rounded-xl border-2 px-2 sm:px-3 py-2.5 sm:py-3 text-xs sm:text-sm font-black whitespace-nowrap shadow-xs transition cursor-pointer ${
+            showPostBox
+              ? 'border-purple-600 bg-purple-100 text-purple-950'
+              : 'border-purple-300 bg-purple-50 text-purple-950 hover:bg-purple-100'
+          }`}
         >
           <MessageSquareText className="w-4 h-4 text-purple-700 shrink-0" />
           <span>{showPostBox ? 'إخفاء البوست' : `بوست ${dayLabel}`}</span>
+        </button>
+
+        {/* Button 4: Undo Button directly next to Post button */}
+        <button
+          type="button"
+          onClick={onUndo}
+          disabled={!canUndo}
+          data-testid="main-undo-btn"
+          title={
+            canUndo
+              ? `تراجع عن آخر تعديل في جدول يوم ${dayLabel} (${undoCount} متاح)`
+              : 'لا توجد تعديلات سابقة للتراجع عنها'
+          }
+          aria-label={`تراجع عن آخر تعديل في جدول يوم ${dayLabel}`}
+          className={`w-full inline-flex items-center justify-center gap-1 sm:gap-2 rounded-xl border-2 px-2 sm:px-3 py-2.5 sm:py-3 text-xs sm:text-sm font-black whitespace-nowrap shadow-xs transition ${
+            canUndo
+              ? 'border-amber-400 bg-amber-400 hover:bg-amber-500 text-slate-950 cursor-pointer'
+              : 'border-slate-200 bg-slate-100 text-slate-400 opacity-60 cursor-not-allowed'
+          }`}
+        >
+          <RotateCcw className={`w-4 h-4 shrink-0 ${canUndo ? 'text-slate-950' : 'text-slate-400'}`} />
+          <span>{canUndo && undoCount > 0 ? `تراجع (${undoCount})` : 'تراجع'}</span>
         </button>
       </div>
 

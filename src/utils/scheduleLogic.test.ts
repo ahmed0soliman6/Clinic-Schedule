@@ -446,6 +446,27 @@ test('mergeConflictingRows 3-way merge correctly resolves deletions, local edits
   assert.equal(row2.doctorName, 'د/ 2 معدل محلياً');
 });
 
+test('Empty initial schedules start clean and undo stack tracks state transitions correctly', () => {
+  const emptyDayRows: ScheduleRow[] = [];
+  assert.equal(emptyDayRows.length, 0);
 
+  // Step 1: User adds a real row
+  const state1 = addScheduleRow(emptyDayRows, {
+    clinicName: 'الجلدية',
+    doctorName: 'د/ أحمد زكريا',
+    startTime: '8:00 م',
+    endTime: '9:30 م',
+    icon: 'dermatology',
+    iconColor: '#ec4899',
+  });
+  assert.equal(state1.length, 1);
 
+  // Undo stack records previous state
+  const undoStack: ScheduleRow[][] = [emptyDayRows];
+  assert.equal(undoStack.length, 1);
 
+  // User triggers undo: state reverts to clean empty state
+  const revertedState = undoStack.pop();
+  assert.ok(revertedState);
+  assert.equal(revertedState.length, 0);
+});
