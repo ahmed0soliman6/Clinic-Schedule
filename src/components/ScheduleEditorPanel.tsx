@@ -52,7 +52,6 @@ interface ScheduleEditorPanelProps {
   onPublishDay: () => void;
   conflict: ConflictInfo | null;
   onResolveConflict: (resolution: 'merge' | 'remote' | 'local') => void;
-  onSimulateConflict?: () => void;
 }
 
 export const ScheduleEditorPanel: React.FC<ScheduleEditorPanelProps> = ({

@@ -34,7 +34,6 @@ interface UsersAndAuditModalProps {
   }) => void;
   onDeleteUser: (uidOrEmail: string) => void;
   onSyncAllToFirestore?: () => Promise<void>;
-  onSimulateConflict: () => void;
   onClose: () => void;
 }
 
@@ -46,7 +45,6 @@ export const UsersAndAuditModal: React.FC<UsersAndAuditModalProps> = ({
   onAddOrUpdateUserByEmail,
   onDeleteUser,
   onSyncAllToFirestore,
-  onSimulateConflict,
   onClose,
 }) => {
   const [activeTab, setActiveTab] = useState<'audit' | 'users'>(initialTab);
@@ -318,9 +316,16 @@ export const UsersAndAuditModal: React.FC<UsersAndAuditModalProps> = ({
 
                 {newRole === 'EDITOR' && (
                   <div className="pt-1">
-                    <span className="block text-[11px] font-extrabold text-slate-700 mb-1.5">
-                      الأيام المسموح للمحرر بتعديلها:
-                    </span>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="block text-[11px] font-extrabold text-slate-700">
+                        الأيام المسموح للمحرر بتعديلها: *
+                      </span>
+                      {newAllowedDays.length === 0 && (
+                        <span className="text-[11px] font-extrabold text-rose-600">
+                          (يجب تحديد يوم واحد على الأقل)
+                        </span>
+                      )}
+                    </div>
                     <div className="flex flex-wrap gap-1.5">
                       {DAYS_LIST.map((d) => (
                         <button
@@ -343,8 +348,9 @@ export const UsersAndAuditModal: React.FC<UsersAndAuditModalProps> = ({
                 <div className="flex justify-end pt-1">
                   <button
                     type="submit"
+                    disabled={newRole === 'EDITOR' && newAllowedDays.length === 0}
                     data-testid="submit-add-email-btn"
-                    className="inline-flex items-center gap-1.5 rounded-xl bg-purple-700 px-4 py-2 text-xs font-extrabold text-white hover:bg-purple-800 shadow-xs transition cursor-pointer"
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-purple-700 px-4 py-2 text-xs font-extrabold text-white hover:bg-purple-800 disabled:opacity-40 disabled:cursor-not-allowed shadow-xs transition cursor-pointer"
                   >
                     <UserPlus className="w-3.5 h-3.5" />
                     <span>إضافة البريد وحفظ الصلاحية</span>
@@ -448,26 +454,13 @@ export const UsersAndAuditModal: React.FC<UsersAndAuditModalProps> = ({
           </div>
         ) : (
           <div className="space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-50 p-3 rounded-xl border border-slate-200">
-              <div>
-                <h4 className="text-sm font-extrabold text-slate-900">
-                  سجل التدقيق الزمني للتعديلات (Audit Log)
-                </h4>
-                <p className="text-xs text-slate-600 font-semibold mt-0.5">
-                  يوثّق كل عملية إضافة أو تعديل أو حذف أو نسخ أو نشر مع البريد الإلكتروني والوقت.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  onSimulateConflict();
-                  onClose();
-                }}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-bold text-amber-900 hover:bg-amber-100"
-              >
-                <AlertTriangle className="w-3.5 h-3.5" />
-                <span>محاكاة تعارض تعديل متزامن</span>
-              </button>
+            <div className="bg-slate-50 p-3 rounded-xl border border-slate-200">
+              <h4 className="text-sm font-extrabold text-slate-900">
+                سجل التدقيق الزمني للتعديلات (Audit Log)
+              </h4>
+              <p className="text-xs text-slate-600 font-semibold mt-0.5">
+                يوثّق كل عملية إضافة أو تعديل أو حذف أو نسخ أو نشر مع البريد الإلكتروني والوقت.
+              </p>
             </div>
 
             {auditLogs.length === 0 ? (

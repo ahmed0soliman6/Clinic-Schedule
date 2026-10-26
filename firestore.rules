@@ -26,46 +26,38 @@ service cloud.firestore {
     }
 
     function isSignedIn() {
-      return request.auth != null && request.auth.token.email_verified == true;
-    }
-
-    function isOwner(userId) {
-      return isSignedIn() && request.auth.uid == userId;
+      return request.auth != null && request.auth.token.email != null;
     }
 
     function isSuperAdminEmail() {
-      return isSignedIn() && request.auth.token.email == 'ahmed0soliman6@gmail.com';
+      return isSignedIn() && request.auth.token.email.lower() == 'ahmed0soliman6@gmail.com';
     }
 
     function authEmailDocId() {
-      return request.auth.token.email.lower().replace('@', '_at_').replace('[.]', '_dot_');
+      return request.auth.token.email.lower().replace('@', '_at_').replace('\\.', '_dot_').replace('\\+', '_plus_');
     }
 
     function isAdmin() {
       return isSuperAdminEmail() ||
-        (isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid))) ||
         (isSignedIn() && exists(/databases/$(database)/documents/users/$(authEmailDocId())) &&
-          get(/databases/$(database)/documents/users/$(authEmailDocId())).data.role == 'ADMIN') ||
-        (isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'ADMIN');
+          get(/databases/$(database)/documents/users/$(authEmailDocId())).data.role == 'ADMIN');
     }
 
     function isEditorForDay(dayId) {
       return isAdmin() ||
         (isSignedIn() && exists(/databases/$(database)/documents/users/$(authEmailDocId())) &&
           get(/databases/$(database)/documents/users/$(authEmailDocId())).data.role == 'EDITOR' &&
-          dayId in get(/databases/$(database)/documents/users/$(authEmailDocId())).data.allowedDays) ||
-        (isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'EDITOR' &&
-          dayId in get(/databases/$(database)/documents/users/$(request.auth.uid)).data.allowedDays);
+          dayId in get(/databases/$(database)/documents/users/$(authEmailDocId())).data.allowedDays);
     }
 
     function isStaff() {
       return isAdmin() ||
         (isSignedIn() && exists(/databases/$(database)/documents/users/$(authEmailDocId())) &&
-          get(/databases/$(database)/documents/users/$(authEmailDocId())).data.role in ['ADMIN', 'EDITOR']) ||
-        (isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['ADMIN', 'EDITOR']);
+          get(/databases/$(database)/documents/users/$(authEmailDocId())).data.role in ['ADMIN', 'EDITOR']);
+    }
+
+    function isValidAllowedDay(day) {
+      return day in ['saturday', 'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday'];
     }
 
     // 3. Entity Validation Blueprints
@@ -76,15 +68,7 @@ service cloud.firestore {
           'whatsappPhone', 'landlinePhone', 'dentalPhone', 'dentalLabel',
           'bgStartColor', 'bgEndColor', 'clinicHeaderColor',
           'doctorHeaderColor', 'fromHeaderColor', 'toHeaderColor',
-          'footerBgColor', 'updatedBy', 'updatedByEmail', 'updatedAt'
-        ]) &&
-        data.keys().hasOnly([
-          'complexName', 'associationName', 'registrationNumber',
-          'rightLogoUrl', 'leftLogoUrl', 'address',
-          'whatsappPhone', 'landlinePhone', 'dentalPhone', 'dentalLabel',
-          'bgStartColor', 'bgEndColor', 'clinicHeaderColor',
-          'doctorHeaderColor', 'fromHeaderColor', 'toHeaderColor',
-          'footerBgColor', 'updatedBy', 'updatedByEmail', 'updatedAt'
+          'footerBgColor'
         ]) &&
         data.complexName is string && data.complexName.size() >= 1 && data.complexName.size() <= 120 &&
         data.associationName is string && data.associationName.size() >= 1 && data.associationName.size() <= 160 &&
@@ -102,24 +86,17 @@ service cloud.firestore {
         data.doctorHeaderColor is string && data.doctorHeaderColor.size() >= 4 && data.doctorHeaderColor.size() <= 30 &&
         data.fromHeaderColor is string && data.fromHeaderColor.size() >= 4 && data.fromHeaderColor.size() <= 30 &&
         data.toHeaderColor is string && data.toHeaderColor.size() >= 4 && data.toHeaderColor.size() <= 30 &&
-        data.footerBgColor is string && data.footerBgColor.size() >= 4 && data.footerBgColor.size() <= 30 &&
-        data.updatedBy is string && data.updatedBy.size() >= 1 && data.updatedBy.size() <= 128 &&
-        data.updatedBy == request.auth.uid &&
-        data.updatedByEmail is string && data.updatedByEmail.size() >= 3 && data.updatedByEmail.size() <= 160 &&
-        data.updatedAt is timestamp && data.updatedAt == request.time;
+        data.footerBgColor is string && data.footerBgColor.size() >= 4 && data.footerBgColor.size() <= 30;
     }
 
     function isValidRowItem(row) {
       return row is map &&
-        row.keys().hasAll(['id', 'clinicName', 'doctorName', 'startTime', 'endTime', 'icon', 'iconColor', 'sortOrder']) &&
-        row.keys().hasOnly(['id', 'clinicName', 'doctorName', 'startTime', 'endTime', 'icon', 'iconColor', 'sortOrder']) &&
+        row.keys().hasAll(['id', 'clinicName', 'doctorName', 'startTime', 'endTime', 'sortOrder']) &&
         row.id is string && row.id.size() >= 1 && row.id.size() <= 80 &&
         row.clinicName is string && row.clinicName.size() >= 1 && row.clinicName.size() <= 120 &&
         row.doctorName is string && row.doctorName.size() >= 1 && row.doctorName.size() <= 120 &&
         row.startTime is string && row.startTime.size() >= 1 && row.startTime.size() <= 40 &&
         row.endTime is string && row.endTime.size() >= 1 && row.endTime.size() <= 40 &&
-        row.icon is string && row.icon.size() >= 1 && row.icon.size() <= 40 &&
-        row.iconColor is string && row.iconColor.size() >= 4 && row.iconColor.size() <= 30 &&
         row.sortOrder is int && row.sortOrder >= 0 && row.sortOrder <= 500;
     }
 
@@ -129,13 +106,18 @@ service cloud.firestore {
         (rows.size() == 0 || isValidRowItem(rows[0]));
     }
 
+    function isValidPublicSchedule(data) {
+      return data.keys().hasAll(['dayId', 'dayLabel', 'dayOrder', 'isPublic', 'publishedRows', 'publishedAt']) &&
+        data.dayId is string && data.dayId in ['saturday', 'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday'] &&
+        data.dayLabel is string && data.dayLabel.size() >= 3 && data.dayLabel.size() <= 30 &&
+        data.dayOrder is int && data.dayOrder >= 0 && data.dayOrder <= 6 &&
+        data.isPublic is bool &&
+        data.publishedAt is string && data.publishedAt.size() >= 1 && data.publishedAt.size() <= 60 &&
+        isValidRowsList(data.publishedRows);
+    }
+
     function isValidDailySchedule(data) {
       return data.keys().hasAll([
-          'dayId', 'dayLabel', 'dayOrder', 'isPublic', 'hasUnpublishedChanges',
-          'version', 'draftRows', 'publishedRows', 'updatedBy',
-          'updatedByEmail', 'updatedByName', 'updatedAt', 'publishedAt'
-        ]) &&
-        data.keys().hasOnly([
           'dayId', 'dayLabel', 'dayOrder', 'isPublic', 'hasUnpublishedChanges',
           'version', 'draftRows', 'publishedRows', 'updatedBy',
           'updatedByEmail', 'updatedByName', 'updatedAt', 'publishedAt'
@@ -149,7 +131,6 @@ service cloud.firestore {
         isValidRowsList(data.draftRows) &&
         isValidRowsList(data.publishedRows) &&
         data.updatedBy is string && data.updatedBy.size() >= 1 && data.updatedBy.size() <= 128 &&
-        data.updatedBy == request.auth.uid &&
         data.updatedByEmail is string && data.updatedByEmail.size() >= 3 && data.updatedByEmail.size() <= 160 &&
         data.updatedByName is string && data.updatedByName.size() >= 1 && data.updatedByName.size() <= 120 &&
         data.updatedAt is timestamp && data.updatedAt == request.time &&
@@ -158,20 +139,18 @@ service cloud.firestore {
 
     function isValidUserProfile(data) {
       return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'allowedDays', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'allowedDays', 'createdAt', 'updatedAt']) &&
         data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
         data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
         data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
         data.role is string && data.role in ['ADMIN', 'EDITOR'] &&
         data.allowedDays is list && data.allowedDays.size() <= 7 &&
-        (data.allowedDays.size() == 0 || (data.allowedDays[0] is string && data.allowedDays[0].size() <= 20)) &&
+        (data.allowedDays.size() == 0 || isValidAllowedDay(data.allowedDays[0])) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp && data.updatedAt == request.time;
     }
 
     function isValidAuditLog(data) {
       return data.keys().hasAll(['action', 'dayId', 'dayLabel', 'details', 'userId', 'userEmail', 'userName', 'createdAt']) &&
-        data.keys().hasOnly(['action', 'dayId', 'dayLabel', 'details', 'userId', 'userEmail', 'userName', 'createdAt']) &&
         data.action is string && data.action in [
           'CREATE_ROW', 'UPDATE_ROW', 'DELETE_ROW', 'REORDER_ROWS',
           'COPY_ROW', 'COPY_DAY', 'PUBLISH_DAY', 'UPDATE_SETTINGS',
@@ -181,7 +160,6 @@ service cloud.firestore {
         data.dayLabel is string && data.dayLabel.size() >= 1 && data.dayLabel.size() <= 60 &&
         data.details is string && data.details.size() >= 1 && data.details.size() <= 500 &&
         data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
-        data.userId == request.auth.uid &&
         data.userEmail is string && data.userEmail.size() >= 3 && data.userEmail.size() <= 160 &&
         data.userName is string && data.userName.size() >= 1 && data.userName.size() <= 120 &&
         data.createdAt is timestamp && data.createdAt == request.time;
@@ -189,96 +167,57 @@ service cloud.firestore {
 
     // 4. Collection Rules
     match /admins/{adminId} {
-      allow get: if isValidId(adminId) && (isOwner(adminId) || isAdmin());
-      allow list: if isSuperAdminEmail();
-      allow create, update, delete: if isValidId(adminId) && isSuperAdminEmail();
+      allow get: if isValidId(adminId) && isAdmin();
+      allow list, write: if isSuperAdminEmail();
     }
 
     match /settings/{settingId} {
-      // Public visitors can read the center branding document 'center'
-      allow get: if isValidId(settingId) && (settingId == 'center' || isStaff());
+      // Public visitors can read the center branding document
+      allow get: if isValidId(settingId);
       allow list: if false;
-      allow create: if isSignedIn() && isValidId(settingId) && isValidCenterSettings(incoming()) && isAdmin();
-      allow update: if isSignedIn() && isValidId(settingId) && isValidCenterSettings(incoming()) && (
-        isAdmin() &&
-        incoming().diff(existing()).affectedKeys().hasOnly([
-          'complexName', 'associationName', 'registrationNumber',
-          'rightLogoUrl', 'leftLogoUrl', 'address',
-          'whatsappPhone', 'landlinePhone', 'dentalPhone', 'dentalLabel',
-          'bgStartColor', 'bgEndColor', 'clinicHeaderColor',
-          'doctorHeaderColor', 'fromHeaderColor', 'toHeaderColor',
-          'footerBgColor', 'updatedBy', 'updatedByEmail', 'updatedAt'
-        ])
-      );
+      allow create: if isSignedIn() && isValidId(settingId) && isAdmin() && isValidCenterSettings(incoming());
+      allow update: if isSignedIn() && isValidId(settingId) && isAdmin() && isValidCenterSettings(incoming());
+      allow delete: if false;
+    }
+
+    match /publicSchedules/{dayId} {
+      // Public visitors can read approved schedules
+      allow get, list: if true;
+      allow create, update: if isSignedIn() && isValidId(dayId) && isEditorForDay(dayId) && isValidPublicSchedule(incoming());
       allow delete: if false;
     }
 
     match /schedules/{dayId} {
-      // Public can read individual day schedule docs; list requires resource.data.isPublic == true
-      allow get: if isValidId(dayId) && (resource == null || existing().isPublic == true || isStaff());
-      allow list: if existing().isPublic == true || isSuperAdminEmail();
-      allow create: if isSignedIn() && isValidId(dayId) && isValidDailySchedule(incoming()) &&
-        incoming().dayId == dayId && isEditorForDay(dayId);
-      allow update: if isSignedIn() && isValidId(dayId) && isValidDailySchedule(incoming()) &&
-        incoming().dayId == existing().dayId &&
-        incoming().dayOrder == existing().dayOrder && (
-          isAdmin() || (
-            isEditorForDay(dayId) &&
-            incoming().version == existing().version + 1 &&
-            incoming().diff(existing()).affectedKeys().hasOnly([
-              'dayLabel', 'isPublic', 'hasUnpublishedChanges', 'version',
-              'draftRows', 'publishedRows', 'updatedBy', 'updatedByEmail',
-              'updatedByName', 'updatedAt', 'publishedAt'
-            ])
-          )
+      // Only authorized staff (Admin / Editor) can read the draft schedules
+      allow get, list: if isStaff();
+      allow create: if isSignedIn() && isValidId(dayId) && isEditorForDay(dayId) && isValidDailySchedule(incoming()) && incoming().dayId == dayId;
+      allow update: if isSignedIn() && isValidId(dayId) && isEditorForDay(dayId) && isValidDailySchedule(incoming()) &&
+        incoming().dayId == existing().dayId && (
+          isAdmin() || incoming().version == existing().version + 1
         );
       allow delete: if false;
     }
 
     match /users/{userId} {
-      // Strict PII Isolation: only profile owner (by uid or verified email) or Admin can read
+      // Single permissions source of truth: users/{emailDocId}
       allow get: if isValidId(userId) && (
-        isOwner(userId) ||
-        isAdmin() ||
-        (isSignedIn() && resource != null && existing().email == request.auth.token.email)
+        isAdmin() || (isSignedIn() && userId == authEmailDocId())
       );
-      allow list: if isSuperAdminEmail() || (isSignedIn() && existing().uid == request.auth.uid);
-      allow create: if isSignedIn() && isValidId(userId) && isValidUserProfile(incoming()) &&
-        incoming().uid == userId &&
-        incoming().createdAt == request.time && (
-          isAdmin() ||
-          (
-            isOwner(userId) &&
-            exists(/databases/$(database)/documents/users/$(authEmailDocId())) &&
-            incoming().email == get(/databases/$(database)/documents/users/$(authEmailDocId())).data.email &&
-            incoming().role == get(/databases/$(database)/documents/users/$(authEmailDocId())).data.role &&
-            incoming().allowedDays == get(/databases/$(database)/documents/users/$(authEmailDocId())).data.allowedDays
-          )
-        );
-      allow update: if isSignedIn() && isValidId(userId) && isValidUserProfile(incoming()) && (
-        (
-          isAdmin() &&
-          incoming().uid == existing().uid &&
-          incoming().createdAt == existing().createdAt &&
-          incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName', 'role', 'allowedDays', 'updatedAt'])
-        ) ||
-        (
-          isOwner(userId) &&
-          exists(/databases/$(database)/documents/users/$(authEmailDocId())) &&
-          incoming().uid == existing().uid &&
-          incoming().role == get(/databases/$(database)/documents/users/$(authEmailDocId())).data.role &&
-          incoming().allowedDays == get(/databases/$(database)/documents/users/$(authEmailDocId())).data.allowedDays &&
-          incoming().createdAt == existing().createdAt &&
-          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'role', 'allowedDays', 'updatedAt'])
-        )
-      );
+      allow list: if isAdmin();
+      allow create: if isSignedIn() && isValidId(userId) && isAdmin() && isValidUserProfile(incoming()) &&
+        incoming().uid == userId && incoming().createdAt == request.time;
+      allow update: if isSignedIn() && isValidId(userId) && isAdmin() && isValidUserProfile(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName', 'role', 'allowedDays', 'updatedAt']);
       allow delete: if isValidId(userId) && isAdmin();
     }
 
     match /auditLogs/{logId} {
       allow get: if isValidId(logId) && isStaff();
-      allow list: if isSuperAdminEmail() || (isSignedIn() && existing().userId == request.auth.uid);
-      allow create: if isSignedIn() && isValidId(logId) && isValidAuditLog(incoming()) && isStaff();
+      allow list: if isAdmin() || (isSignedIn() && existing().userEmail == request.auth.token.email);
+      allow create: if isSignedIn() && isValidId(logId) && isValidAuditLog(incoming()) &&
+        incoming().userEmail == request.auth.token.email;
       allow update, delete: if false;
     }
   }

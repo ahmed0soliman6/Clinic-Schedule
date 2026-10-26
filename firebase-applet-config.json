@@ -1,12 +1,12 @@
 {
   "projectId": "mitazoun-schedule",
-  "appId": "1:771790865724:web:005719d99b6ca989440a39",
+  "appId": "1:771790865724:web:a9ca5db6f5e3a2de440a39",
   "apiKey": "AIzaSyAYaOY6bw3pm2XQIAz4bP8c6QCNXDqXf_0",
   "authDomain": "mitazoun-schedule.firebaseapp.com",
   "firestoreDatabaseId": "ai-studio-a7f07dfc-95fa-4891-9ea2-3134e232e78b",
   "storageBucket": "mitazoun-schedule.firebasestorage.app",
   "messagingSenderId": "771790865724",
-  "measurementId": "",
+  "measurementId": "G-5EFDKNM38Q",
   "oAuthClientId": "771790865724-qv7ecult45c3l84ihk4asfuvjeprvfe6.apps.googleusercontent.com",
   "recaptchaSiteKey": ""
 }

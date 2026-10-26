@@ -16,6 +16,9 @@ import {
   mergeConflictingRows,
   moveScheduleRow,
   normalizeRightLogoUrl,
+  normalizeSortOrders,
+  normalizeArabicText,
+  normalizeClinicNameWithAl,
   reorderScheduleRows,
   updateScheduleRow,
   validateCenterSettings,
@@ -350,7 +353,99 @@ test('Email-based RBAC: add email, switch role between Editor and Admin, and del
     canUserEditDay(editorAccess.role, editorAccess.allowedDays, 'tuesday'),
     false
   );
+
+  // 8. Empty allowedDays bug fix: Editor with empty allowedDays gets [] and can edit 0 days
+  const emptyDaysEditor = upsertUserByEmail([], {
+    email: 'restricted@gmail.com',
+    role: 'EDITOR',
+    allowedDays: [],
+  });
+  const restrictedUser = emptyDaysEditor.find((u) => u.email === 'restricted@gmail.com');
+  assert.ok(restrictedUser);
+  assert.deepEqual(restrictedUser.allowedDays, []);
+  const restrictedAccess = resolveAuthorizedUserAccess({
+    email: 'restricted@gmail.com',
+    registeredUsers: emptyDaysEditor,
+  });
+  assert.equal(restrictedAccess.authorized, true);
+  assert.equal(restrictedAccess.role, 'EDITOR');
+  assert.deepEqual(restrictedAccess.allowedDays, []);
+  assert.equal(canUserEditDay(restrictedAccess.role, restrictedAccess.allowedDays, 'saturday'), false);
+  assert.equal(canUserEditDay(restrictedAccess.role, restrictedAccess.allowedDays, 'friday'), false);
 });
+
+test('emailToDocId encodes +, ., - deterministically matching security rules', () => {
+  assert.equal(emailToDocId('ahmed0soliman6@gmail.com'), 'ahmed0soliman6_at_gmail_dot_com');
+  assert.equal(emailToDocId('doctor+clinic@gmail.com'), 'doctor_plus_clinic_at_gmail_dot_com');
+  assert.equal(emailToDocId('dr_ali-nour@clinic.org'), 'dr_ali-nour_at_clinic_dot_org');
+});
+
+test('normalizeSortOrders is pure and does not mutate clinicName', () => {
+  const original = [{ ...sampleRows[0], clinicName: 'باطنه', sortOrder: 5 }];
+  const sorted = normalizeSortOrders(original);
+  assert.equal(sorted[0].sortOrder, 0);
+  assert.equal(sorted[0].clinicName, 'باطنه');
+});
+
+test('normalizeArabicText and normalizeClinicNameWithAl handle Arabic variations', () => {
+  assert.equal(normalizeClinicNameWithAl('باطنه'), 'الباطنة');
+  assert.equal(normalizeClinicNameWithAl('باطنة'), 'الباطنة');
+  assert.equal(normalizeClinicNameWithAl('اطفال'), 'الأطفال');
+  assert.equal(normalizeClinicNameWithAl('مخ واعصاب'), 'المخ والأعصاب');
+});
+
+test('60 row cap is respected in addScheduleRow, copyRowToDay, and copyFullDayRows', () => {
+  const maxRows: ScheduleRow[] = Array.from({ length: 60 }, (_, i) => ({
+    id: `row-${i}`,
+    clinicName: 'الباطنة',
+    doctorName: `طبيب ${i}`,
+    startTime: '10:00 ص',
+    endTime: '12:00 م',
+    icon: 'internal',
+    iconColor: '#0284c7',
+    sortOrder: i,
+  }));
+
+  const afterAdd = addScheduleRow(maxRows, {
+    clinicName: 'العيون',
+    doctorName: 'د/ جديد',
+    startTime: '1:00 م',
+    endTime: '2:00 م',
+    icon: 'eye',
+    iconColor: '#15803d',
+  });
+  assert.equal(afterAdd.length, 60);
+
+  const afterCopy = copyRowToDay(maxRows, sampleRows[0]);
+  assert.equal(afterCopy.length, 60);
+});
+
+test('mergeConflictingRows 3-way merge correctly resolves deletions, local edits, and additions', () => {
+  const base: ScheduleRow[] = [
+    { id: '1', clinicName: 'الباطنة', doctorName: 'د/ 1', startTime: '1:00', endTime: '2:00', icon: 'internal', iconColor: '#000', sortOrder: 0 },
+    { id: '2', clinicName: 'الأطفال', doctorName: 'د/ 2', startTime: '2:00', endTime: '3:00', icon: 'baby', iconColor: '#000', sortOrder: 1 },
+    { id: '3', clinicName: 'الأسنان', doctorName: 'د/ 3', startTime: '3:00', endTime: '4:00', icon: 'tooth', iconColor: '#000', sortOrder: 2 },
+  ];
+
+  const local: ScheduleRow[] = [
+    { id: '2', clinicName: 'الأطفال', doctorName: 'د/ 2 معدل محلياً', startTime: '2:00', endTime: '3:00', icon: 'baby', iconColor: '#000', sortOrder: 0 },
+    { id: '3', clinicName: 'الأسنان', doctorName: 'د/ 3', startTime: '3:00', endTime: '4:00', icon: 'tooth', iconColor: '#000', sortOrder: 1 },
+  ];
+
+  const remote: ScheduleRow[] = [
+    { id: '1', clinicName: 'الباطنة', doctorName: 'د/ 1', startTime: '1:00', endTime: '2:00', icon: 'internal', iconColor: '#000', sortOrder: 0 },
+    { id: '2', clinicName: 'الأطفال', doctorName: 'د/ 2 معدل عن بعد', startTime: '2:00', endTime: '3:00', icon: 'baby', iconColor: '#000', sortOrder: 1 },
+  ];
+
+  const merged = mergeConflictingRows(base, local, remote);
+
+  assert.equal(merged.some((r) => r.id === '1'), false);
+  assert.equal(merged.some((r) => r.id === '3'), false);
+  const row2 = merged.find((r) => r.id === '2');
+  assert.ok(row2);
+  assert.equal(row2.doctorName, 'د/ 2 معدل محلياً');
+});
+
 
 
 

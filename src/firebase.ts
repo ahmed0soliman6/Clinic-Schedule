@@ -44,14 +44,13 @@ const resolvedConfig = {
 
 export const app = initializeApp(resolvedConfig);
 
-// Primary provisioned Firestore database
-export const db = getFirestore(
-  app,
-  firebaseAppletConfig.firestoreDatabaseId
-);
+export const resolvedDatabaseId =
+  import.meta.env.VITE_FIREBASE_DATABASE_ID ||
+  firebaseAppletConfig.firestoreDatabaseId ||
+  'ai-studio-a7f07dfc-95fa-4891-9ea2-3134e232e78b';
 
-// Secondary reference to (default) database in mitazoun-schedule for seamless Console mirroring
-export const defaultDb = getFirestore(app);
+// Primary provisioned Firestore database
+export const db = getFirestore(app, resolvedDatabaseId);
 
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
@@ -67,29 +66,6 @@ if (typeof window !== 'undefined') {
     .catch(() => {
       // Ignore analytics errors in restricted environments
     });
-}
-
-/**
- * Quietly mirrors writes/deletes to the (default) Firestore database in mitazoun-schedule
- * in addition to the primary database so both databases stay in sync on Vercel & Console.
- */
-export function mirrorSetDocToDefault(
-  collectionName: string,
-  docId: string,
-  data: Record<string, unknown>
-): void {
-  void setDoc(doc(defaultDb, collectionName, docId), data).catch(() => {
-    // Non-blocking mirror
-  });
-}
-
-export function mirrorDeleteDocFromDefault(
-  collectionName: string,
-  docId: string
-): void {
-  void deleteDoc(doc(defaultDb, collectionName, docId)).catch(() => {
-    // Non-blocking mirror
-  });
 }
 
 /**
@@ -253,10 +229,8 @@ export function handleFirestoreError(
 async function testConnection() {
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration.');
-    }
+  } catch {
+    // Ignore test connection error in preview environments or offline state
   }
 }
 

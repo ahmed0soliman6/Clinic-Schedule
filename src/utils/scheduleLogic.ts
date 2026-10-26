@@ -128,40 +128,59 @@ export const BLUEPRINT_LIMITS = {
   PHONE_MAX: 40,
 };
 
-const CLINIC_NAME_AL_MAP: Record<string, string> = {
-  'باطنة': 'الباطنة',
-  'باطنه': 'الباطنة',
-  'جلدية': 'الجلدية',
-  'جلديه': 'الجلدية',
-  'نساء وتوليد': 'النساء والتوليد',
-  'النساء': 'النساء والتوليد',
-  'عظام': 'العظام',
-  'أنف وأذن': 'الأنف والأذن',
-  'انف واذن': 'الأنف والأذن',
-  'قلب': 'القلب',
-  'أطفال': 'الأطفال',
-  'اطفال': 'الأطفال',
-  'تخاطب': 'التخاطب',
-  'تغذية علاجية': 'التغذية العلاجية',
-  'مخ وأعصاب': 'المخ والأعصاب',
-  'جراحة عامة': 'الجراحة العامة',
-  'علاج طبيعى': 'العلاج الطبيعي',
-  'علاج طبيعي': 'العلاج الطبيعي',
-  'صدر': 'الصدر',
-  'نفسية': 'النفسية',
-  'أسنان': 'الأسنان',
-  'اسنان': 'الأسنان',
-  'عيون': 'العيون',
-  'كلي': 'الكلى',
-  'كلى': 'الكلى',
-  'مسالك': 'المسالك',
-};
+export function normalizeArabicText(str: string): string {
+  return str
+    .trim()
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
+    .replace(/[\u064B-\u065F]/g, '');
+}
+
+export const CLINIC_NAME_AL_MAP = new Map<string, string>([
+  ['باطنة', 'الباطنة'],
+  ['باطنه', 'الباطنة'],
+  ['جلدية', 'الجلدية'],
+  ['جلديه', 'الجلدية'],
+  ['نساء وتوليد', 'النساء والتوليد'],
+  ['النساء', 'النساء والتوليد'],
+  ['عظام', 'العظام'],
+  ['أنف وأذن', 'الأنف والأذن'],
+  ['انف واذن', 'الأنف والأذن'],
+  ['قلب', 'القلب'],
+  ['أطفال', 'الأطفال'],
+  ['اطفال', 'الأطفال'],
+  ['تخاطب', 'التخاطب'],
+  ['تغذية علاجية', 'التغذية العلاجية'],
+  ['تغذيه علاجيه', 'التغذية العلاجية'],
+  ['مخ وأعصاب', 'المخ والأعصاب'],
+  ['مخ واعصاب', 'المخ والأعصاب'],
+  ['جراحة عامة', 'الجراحة العامة'],
+  ['جراحه عامه', 'الجراحة العامة'],
+  ['علاج طبيعى', 'العلاج الطبيعي'],
+  ['علاج طبيعي', 'العلاج الطبيعي'],
+  ['صدر', 'الصدر'],
+  ['نفسية', 'النفسية'],
+  ['نفسيه', 'النفسية'],
+  ['أسنان', 'الأسنان'],
+  ['اسنان', 'الأسنان'],
+  ['عيون', 'العيون'],
+  ['كلي', 'الكلى'],
+  ['كلى', 'الكلى'],
+  ['مسالك', 'المسالك'],
+]);
 
 export function normalizeClinicNameWithAl(name: string): string {
   const trimmed = name.trim();
   if (!trimmed) return '';
-  if (CLINIC_NAME_AL_MAP[trimmed]) {
-    return CLINIC_NAME_AL_MAP[trimmed];
+  if (CLINIC_NAME_AL_MAP.has(trimmed)) {
+    return CLINIC_NAME_AL_MAP.get(trimmed)!;
+  }
+  const norm = normalizeArabicText(trimmed);
+  for (const [key, val] of CLINIC_NAME_AL_MAP.entries()) {
+    if (normalizeArabicText(key) === norm) {
+      return val;
+    }
   }
   return trimmed;
 }
@@ -178,7 +197,6 @@ export function normalizeSortOrders(rows: ScheduleRow[]): ScheduleRow[] {
     .sort((a, b) => a.sortOrder - b.sortOrder)
     .map((row, idx) => ({
       ...row,
-      clinicName: normalizeClinicNameWithAl(row.clinicName),
       sortOrder: idx,
     }));
 }
@@ -254,6 +272,9 @@ export function addScheduleRow(
   customId?: string
 ): ScheduleRow[] {
   const ordered = normalizeSortOrders(rows);
+  if (ordered.length >= BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY) {
+    return ordered;
+  }
   const newId = customId || `row-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const newRow: ScheduleRow = sanitizeRowForFirestore(
     {
@@ -332,6 +353,9 @@ export function copyRowToDay(
   customNewId?: string
 ): ScheduleRow[] {
   const orderedTarget = normalizeSortOrders(targetDayRows);
+  if (orderedTarget.length >= BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY) {
+    return orderedTarget;
+  }
   const newId =
     customNewId || `${sourceRow.id}-copy-${Date.now().toString(36)}-${orderedTarget.length}`;
   const copiedRow: ScheduleRow = sanitizeRowForFirestore(
@@ -346,7 +370,10 @@ export function copyRowToDay(
 }
 
 export function copyFullDayRows(sourceRows: ScheduleRow[], targetDayId: DayId): ScheduleRow[] {
-  const orderedSource = normalizeSortOrders(sourceRows);
+  const orderedSource = normalizeSortOrders(sourceRows).slice(
+    0,
+    BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY
+  );
   return orderedSource.map((row, idx) =>
     sanitizeRowForFirestore(
       {
@@ -438,20 +465,143 @@ export function canUserEditDay(
 }
 
 export function mergeConflictingRows(
+  baseOrLocal: ScheduleRow[],
+  localOrRemote: ScheduleRow[],
+  maybeRemote?: ScheduleRow[]
+): ScheduleRow[] {
+  const isThreeWay = Array.isArray(maybeRemote);
+  const baseRows = isThreeWay ? baseOrLocal : [];
+  const localRows = isThreeWay ? localOrRemote : baseOrLocal;
+  const remoteRows = isThreeWay ? maybeRemote : localOrRemote;
+
+  const baseMap = new Map<string, ScheduleRow>(baseRows.map((r) => [r.id, r]));
+  const localMap = new Map<string, ScheduleRow>(localRows.map((r) => [r.id, r]));
+  const remoteMap = new Map<string, ScheduleRow>(remoteRows.map((r) => [r.id, r]));
+
+  const areSingleRowsEqual = (r1: ScheduleRow, r2: ScheduleRow) => {
+    return (
+      r1.clinicName === r2.clinicName &&
+      r1.doctorName === r2.doctorName &&
+      r1.startTime === r2.startTime &&
+      r1.endTime === r2.endTime &&
+      r1.icon === r2.icon &&
+      r1.iconColor === r2.iconColor
+    );
+  };
+
+  const allIds = new Set<string>([
+    ...baseMap.keys(),
+    ...localMap.keys(),
+    ...remoteMap.keys(),
+  ]);
+
+  const mergedRows: ScheduleRow[] = [];
+
+  for (const id of allIds) {
+    const base = baseMap.get(id);
+    const local = localMap.get(id);
+    const remote = remoteMap.get(id);
+
+    if (isThreeWay && base) {
+      const localChanged = !local || !areSingleRowsEqual(base, local);
+      const remoteChanged = !remote || !areSingleRowsEqual(base, remote);
+
+      if (!local && !remoteChanged) {
+        // Deleted locally and unchanged remotely -> keep deleted
+        continue;
+      }
+      if (!remote && !localChanged) {
+        // Deleted remotely and unchanged locally -> keep deleted
+        continue;
+      }
+      if (local && remote) {
+        // Both exist: if local changed, local wins; otherwise keep remote
+        mergedRows.push(localChanged ? local : remote);
+      } else if (local) {
+        // Remote deleted it, but local modified it -> local wins
+        mergedRows.push(local);
+      }
+    } else {
+      if (local) {
+        mergedRows.push(local);
+      } else if (remote) {
+        mergedRows.push(remote);
+      }
+    }
+  }
+
+  return normalizeSortOrders(mergedRows).slice(0, BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY);
+}
+
+export function mergeConflictingRowsThreeWay(
+  baseRows: ScheduleRow[],
   localRows: ScheduleRow[],
   remoteRows: ScheduleRow[]
-): ScheduleRow[] {
-  const mergedMap = new Map<string, ScheduleRow>();
-  for (const r of normalizeSortOrders(remoteRows)) {
-    mergedMap.set(r.id, r);
+): { success: boolean; rows: ScheduleRow[]; error?: string } {
+  const baseMap = new Map<string, ScheduleRow>(baseRows.map((r) => [r.id, r]));
+  const localMap = new Map<string, ScheduleRow>(localRows.map((r) => [r.id, r]));
+  const remoteMap = new Map<string, ScheduleRow>(remoteRows.map((r) => [r.id, r]));
+
+  const areSingleRowsEqual = (r1: ScheduleRow, r2: ScheduleRow) => {
+    return (
+      r1.clinicName === r2.clinicName &&
+      r1.doctorName === r2.doctorName &&
+      r1.startTime === r2.startTime &&
+      r1.endTime === r2.endTime &&
+      r1.icon === r2.icon &&
+      r1.iconColor === r2.iconColor
+    );
+  };
+
+  const allIds = new Set<string>([
+    ...baseMap.keys(),
+    ...localMap.keys(),
+    ...remoteMap.keys(),
+  ]);
+
+  const mergedRows: ScheduleRow[] = [];
+
+  for (const id of allIds) {
+    const base = baseMap.get(id);
+    const local = localMap.get(id);
+    const remote = remoteMap.get(id);
+
+    if (base) {
+      const localChanged = !local || !areSingleRowsEqual(base, local);
+      const remoteChanged = !remote || !areSingleRowsEqual(base, remote);
+
+      if (!local && !remoteChanged) {
+        continue;
+      }
+      if (!remote && !localChanged) {
+        continue;
+      }
+      if (local && remote) {
+        mergedRows.push(localChanged ? local : remote);
+      } else if (local) {
+        mergedRows.push(local);
+      }
+    } else {
+      if (local) {
+        mergedRows.push(local);
+      } else if (remote) {
+        mergedRows.push(remote);
+      }
+    }
   }
-  for (const l of normalizeSortOrders(localRows)) {
-    mergedMap.set(l.id, l);
+
+  if (mergedRows.length > BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY) {
+    return {
+      success: false,
+      rows: [],
+      error: 'الحد الأقصى للعيادات في اليوم الواحد هو 60 عيادة',
+    };
   }
-  return normalizeSortOrders(Array.from(mergedMap.values())).slice(
-    0,
-    BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY
-  );
+
+  return {
+    success: true,
+    rows: normalizeSortOrders(mergedRows),
+  };
 }
 
 export function validateCenterSettings(settings: CenterSettings): {
@@ -563,6 +713,7 @@ export function emailToDocId(email: string): string {
     .toLowerCase()
     .replace(/@/g, '_at_')
     .replace(/\./g, '_dot_')
+    .replace(/\+/g, '_plus_')
     .replace(/[^a-z0-9_\-]/g, '_');
   return (normalized || 'user_email').slice(0, 120);
 }
@@ -591,15 +742,12 @@ export function sanitizeUsersList(users: UserProfile[]): UserProfile[] {
     const validDays: DayId[] =
       validRole === 'ADMIN'
         ? allDayIds
-        : Array.isArray(u.allowedDays) && u.allowedDays.length > 0
+        : Array.isArray(u.allowedDays)
         ? u.allowedDays.filter((d) => allDayIds.includes(d))
-        : allDayIds;
+        : [];
 
     const existing = byEmail.get(cleanEmail);
-    // Prefer emailToDocId for consistent lookup or keep non-placeholder uid
-    const docId =
-      existing?.uid ||
-      (u.uid && !u.uid.includes('meetazzoun') ? u.uid : emailToDocId(cleanEmail));
+    const docId = emailToDocId(cleanEmail);
 
     byEmail.set(cleanEmail, {
       uid: docId,
@@ -637,7 +785,7 @@ export function resolveAuthorizedUserAccess(params: {
 
   if (cleanEmail === PRIMARY_ADMIN_EMAIL) {
     const adminProfile: UserProfile = {
-      uid: params.uid || emailToDocId(PRIMARY_ADMIN_EMAIL),
+      uid: emailToDocId(PRIMARY_ADMIN_EMAIL),
       email: PRIMARY_ADMIN_EMAIL,
       displayName: 'مدير مجمع ميت عزون الطبي',
       role: 'ADMIN',
@@ -656,8 +804,7 @@ export function resolveAuthorizedUserAccess(params: {
   const match = sanitized.find(
     (u) =>
       u.email.trim().toLowerCase() === cleanEmail ||
-      u.uid === emailDocId ||
-      (params.uid && u.uid === params.uid)
+      u.uid === emailDocId
   );
 
   if (!match) {
@@ -668,8 +815,8 @@ export function resolveAuthorizedUserAccess(params: {
   const allowedDays: DayId[] =
     role === 'ADMIN'
       ? allDayIds
-      : Array.isArray(match.allowedDays) && match.allowedDays.length > 0
-      ? match.allowedDays
+      : Array.isArray(match.allowedDays)
+      ? match.allowedDays.filter((d) => allDayIds.includes(d))
       : [];
 
   return {
@@ -693,7 +840,7 @@ export function upsertUserByEmail(
   const cleanEmail = input.email.trim().toLowerCase();
   if (!isValidEmailAddress(cleanEmail)) return sanitizeUsersList(users);
 
-  const docId = input.uid?.trim() || emailToDocId(cleanEmail);
+  const docId = emailToDocId(cleanEmail);
   const effectiveRole: UserRole =
     cleanEmail === PRIMARY_ADMIN_EMAIL || input.role === 'ADMIN'
       ? 'ADMIN'
@@ -701,9 +848,9 @@ export function upsertUserByEmail(
   const effectiveDays: DayId[] =
     effectiveRole === 'ADMIN'
       ? DAYS_LIST.map((d) => d.id)
-      : input.allowedDays && input.allowedDays.length > 0
-      ? input.allowedDays
-      : DAYS_LIST.map((d) => d.id);
+      : Array.isArray(input.allowedDays)
+      ? input.allowedDays.filter((d) => DAYS_LIST.some((day) => day.id === d))
+      : [];
 
   const defaultName =
     input.displayName?.trim() ||

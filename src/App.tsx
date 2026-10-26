@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  deleteUser,
+  getRedirectResult,
   onAuthStateChanged,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
   User as FirebaseUser,
 } from 'firebase/auth';
@@ -13,13 +14,15 @@ import {
   getDoc,
   getDocs,
   onSnapshot,
+  runTransaction,
   serverTimestamp,
   setDoc,
+  updateDoc,
 } from 'firebase/firestore';
 import {
   AlertTriangle,
-  Calendar,
   Copy,
+  Database,
   Edit3,
   Eye,
   History,
@@ -37,11 +40,8 @@ import {
 import {
   auth,
   db,
-  defaultDb,
   googleProvider,
   handleFirestoreError,
-  mirrorDeleteDocFromDefault,
-  mirrorSetDocToDefault,
   OperationType,
   showLocalNotification,
 } from './firebase';
@@ -52,6 +52,7 @@ import {
   ConflictInfo,
   DailyScheduleData,
   DayId,
+  PublicDailyScheduleData,
   SaveStatus,
   ScheduleRow,
   UserProfile,
@@ -61,7 +62,6 @@ import {
   DAYS_LIST,
   PRIMARY_ADMIN_EMAIL,
   addScheduleRow,
-  areRowsEqual,
   canUserEditDay,
   copyFullDayRows,
   copyRowToDay,
@@ -70,7 +70,7 @@ import {
   detectConcurrentConflict,
   emailToDocId,
   isFictionalOrBlockedEmail,
-  mergeConflictingRows,
+  mergeConflictingRowsThreeWay,
   moveScheduleRow,
   normalizeSortOrders,
   reorderScheduleRows,
@@ -141,9 +141,14 @@ export default function App() {
   const [showAdvancedPanel, setShowAdvancedPanel] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
-  // Copy full day modal state
+  // Copy full day confirmation modal state
   const [showCopyDayModal, setShowCopyDayModal] = useState(false);
   const [copyDayTarget, setCopyDayTarget] = useState<DayId>('sunday');
+
+  // Super Admin explicit database seed modal
+  const [showSeedModal, setShowSeedModal] = useState(false);
+  const [seedLoading, setSeedLoading] = useState(false);
+  const [seedSuccessMessage, setSeedSuccessMessage] = useState<string | null>(null);
 
   // Auth & RBAC state — Strictly null until verified against registered emails
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
@@ -196,6 +201,7 @@ export default function App() {
   });
 
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved');
+  const saveStatusRef = useRef<SaveStatus>('saved');
   const [conflict, setConflict] = useState<ConflictInfo | null>(null);
   const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
 
@@ -207,7 +213,6 @@ export default function App() {
 
   const posterRef = useRef<HTMLDivElement | null>(null);
   const exportPosterRef = useRef<HTMLDivElement | null>(null);
-  const hasSeededFirestoreRef = useRef(false);
   const localVersionRef = useRef<Record<DayId, number>>({
     saturday: 1,
     sunday: 1,
@@ -218,19 +223,18 @@ export default function App() {
     friday: 1,
   });
 
-  // 1. Load initial schedules from external JSON or local cache
+  // Handle redirect result on mount if user signed in via redirect fallback
+  useEffect(() => {
+    getRedirectResult(auth).catch((err) => {
+      console.warn('Redirect sign-in result:', err);
+    });
+  }, []);
+
+  // 1. Load initial schedules from external JSON or offline public cache
   useEffect(() => {
     let mounted = true;
     async function loadInitialJson() {
       try {
-        // Purge legacy storage keys that might contain editor@meetazzoun.org
-        try {
-          localStorage.removeItem('meet_azzoun_medical_schedules_v7');
-          localStorage.removeItem('meet_azzoun_medical_schedules_v6');
-        } catch {
-          // Ignore
-        }
-
         const res = await fetch('/data/initial-schedules.json');
         const json = await res.json();
         if (!mounted) return;
@@ -239,18 +243,28 @@ export default function App() {
           setDefaultSettings(json.settings);
         }
 
+        // Only settings and publishedRows are cached locally for public visitors
         const cachedRaw = localStorage.getItem(STORAGE_KEY);
         if (cachedRaw) {
           try {
             const cached = JSON.parse(cachedRaw);
             if (cached.settings) setSettings(cached.settings);
-            if (cached.schedules) setSchedules(cached.schedules);
-            if (cached.auditLogs) setAuditLogs(cached.auditLogs);
-            if (Array.isArray(cached.usersList) && cached.usersList.length > 0) {
-              setUsersList(sanitizeUsersList(cached.usersList));
+            if (cached.publishedSchedules) {
+              setSchedules((prev) => {
+                const next = { ...prev };
+                DAYS_LIST.forEach((d) => {
+                  if (Array.isArray(cached.publishedSchedules[d.id])) {
+                    next[d.id] = {
+                      ...next[d.id],
+                      publishedRows: cached.publishedSchedules[d.id],
+                    };
+                  }
+                });
+                return next;
+              });
+              setIsLoaded(true);
+              return;
             }
-            setIsLoaded(true);
-            return;
           } catch {
             // Fall through
           }
@@ -293,118 +307,27 @@ export default function App() {
     };
   }, []);
 
+  // Cache ONLY settings and publishedRows locally for visitor offline support
   useEffect(() => {
     if (!isLoaded) return;
     try {
+      const publicCache: Record<string, ScheduleRow[]> = {};
+      DAYS_LIST.forEach((d) => {
+        publicCache[d.id] = schedules[d.id]?.publishedRows || [];
+      });
       localStorage.setItem(
         STORAGE_KEY,
         JSON.stringify({
           settings,
-          schedules,
-          auditLogs,
-          usersList: sanitizeUsersList(usersList),
+          publishedSchedules: publicCache,
         })
       );
     } catch {
       // Ignore storage quota errors
     }
-  }, [settings, schedules, auditLogs, usersList, isLoaded]);
+  }, [settings, schedules, isLoaded]);
 
-  // Helper to seed/sync all data to Firestore (both primary db and defaultDb)
-  const syncAllDataToFirestore = async (
-    currentUserOverride?: FirebaseUser | null
-  ) => {
-    const activeUser = currentUserOverride ?? firebaseUser ?? auth.currentUser;
-    if (!activeUser || !activeUser.email) return;
-
-    const uid = activeUser.uid;
-    const userEmail = activeUser.email.trim().toLowerCase();
-    const userName = activeUser.displayName || 'مدير مجمع ميت عزون الطبي';
-
-    setSaveStatus('saving');
-
-    // Remove any legacy fictional email from Firestore immediately
-    mirrorDeleteDocFromDefault('users', 'editor_at_meetazzoun_dot_org');
-    void deleteDoc(doc(db, 'users', 'editor_at_meetazzoun_dot_org')).catch(
-      () => {}
-    );
-
-    // 1. Save Center Settings
-    const settingsPayload = {
-      ...settings,
-      updatedBy: uid,
-      updatedByEmail: userEmail,
-      updatedAt: serverTimestamp(),
-    };
-    await mirrorSetDocToDefault('settings', 'center', settingsPayload);
-    try {
-      await setDoc(doc(db, 'settings', 'center'), settingsPayload);
-    } catch {
-      // Non-blocking if user lacks admin role
-    }
-
-    // 2. Save all 7 Daily Schedules for instant persistence
-    for (const day of DAYS_LIST) {
-      const daySched = schedules[day.id];
-      if (!daySched) continue;
-      const sanitizedDraft = normalizeSortOrders(daySched.draftRows).map(
-        (r, i) => sanitizeRowForFirestore(r, i)
-      );
-      const sanitizedPublished = normalizeSortOrders(
-        daySched.publishedRows.length > 0
-          ? daySched.publishedRows
-          : sanitizedDraft
-      ).map((r, i) => sanitizeRowForFirestore(r, i));
-
-      const dayPayload = {
-        dayId: day.id,
-        dayLabel: day.label,
-        dayOrder: day.order,
-        isPublic: true,
-        hasUnpublishedChanges: false,
-        version: daySched.version || 1,
-        draftRows: sanitizedDraft,
-        publishedRows: sanitizedPublished,
-        updatedBy: uid,
-        updatedByEmail: userEmail,
-        updatedByName: userName.slice(0, 120),
-        updatedAt: serverTimestamp(),
-        publishedAt: daySched.publishedAt || new Date().toISOString(),
-      };
-
-      await mirrorSetDocToDefault('schedules', day.id, dayPayload);
-      try {
-        await setDoc(doc(db, 'schedules', day.id), dayPayload);
-      } catch {
-        // Non-blocking
-      }
-    }
-
-    // 3. Save Sanitized Users / Email Permissions List
-    const cleanUsers = sanitizeUsersList(usersListRef.current);
-    for (const u of cleanUsers) {
-      const docId = u.uid || emailToDocId(u.email);
-      const userPayload = {
-        uid: docId,
-        email: u.email.trim().toLowerCase(),
-        displayName: (u.displayName || u.email).slice(0, 120),
-        role: u.role === 'ADMIN' ? 'ADMIN' : 'EDITOR',
-        allowedDays: u.allowedDays || DAYS_LIST.map((d) => d.id),
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      };
-      await mirrorSetDocToDefault('users', docId, userPayload);
-      try {
-        await setDoc(doc(db, 'users', docId), userPayload);
-      } catch {
-        // Non-blocking
-      }
-    }
-
-    setSaveStatus('saved');
-  };
-
-  // 2. Strict Whitelist Firebase Authentication listener & Email-Based Role Resolution
+  // 2. Strict Whitelist Firebase Authentication listener & users/{emailDocId} Role Resolution
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user || !user.email) {
@@ -420,68 +343,42 @@ export default function App() {
       const isPrimaryAdmin = cleanEmail === PRIMARY_ADMIN_EMAIL;
       const emailDocId = emailToDocId(cleanEmail);
 
-      // Collect registered profiles from local state and Firestore (both db and defaultDb)
-      const candidateProfiles: UserProfile[] = [
-        ...sanitizeUsersList(usersListRef.current),
-      ];
-
-      const tryFetchUserDoc = async (
-        targetDb: typeof db,
-        docKey: string
-      ): Promise<UserProfile | null> => {
-        try {
-          const snap = await getDoc(doc(targetDb, 'users', docKey));
-          if (snap.exists()) {
-            const data = snap.data() as UserProfile;
-            if (data && data.email && !isFictionalOrBlockedEmail(data.email)) {
-              return {
-                uid: snap.id,
-                email: data.email.trim().toLowerCase(),
-                displayName: data.displayName || data.email,
-                role: data.role === 'ADMIN' ? 'ADMIN' : 'EDITOR',
-                allowedDays:
-                  Array.isArray(data.allowedDays) && data.allowedDays.length > 0
-                    ? data.allowedDays
-                    : DAYS_LIST.map((d) => d.id),
-              };
-            }
+      let remoteUserDoc: UserProfile | null = null;
+      try {
+        const snap = await getDoc(doc(db, 'users', emailDocId));
+        if (snap.exists()) {
+          const data = snap.data() as UserProfile;
+          if (data && data.email && !isFictionalOrBlockedEmail(data.email)) {
+            remoteUserDoc = {
+              uid: emailDocId,
+              email: data.email.trim().toLowerCase(),
+              displayName: data.displayName || data.email,
+              role: data.role === 'ADMIN' ? 'ADMIN' : 'EDITOR',
+              allowedDays:
+                Array.isArray(data.allowedDays) && data.allowedDays.length > 0
+                  ? data.allowedDays
+                  : isPrimaryAdmin
+                  ? DAYS_LIST.map((d) => d.id)
+                  : [],
+            };
           }
-        } catch {
-          // Document not found or permission denied for unregistered user
         }
-        return null;
-      };
+      } catch {
+        // Unregistered or permission denied
+      }
 
-      const [dbByEmail, defaultByEmail, dbByUid, defaultByUid] =
-        await Promise.all([
-          tryFetchUserDoc(db, emailDocId),
-          tryFetchUserDoc(defaultDb, emailDocId),
-          tryFetchUserDoc(db, user.uid),
-          tryFetchUserDoc(defaultDb, user.uid),
-        ]);
-
-      // Prefer remote Firestore record over local cache if present
-      const remoteFound =
-        dbByEmail || defaultByEmail || dbByUid || defaultByUid;
-      const effectiveUsersPool = remoteFound
-        ? upsertUserByEmail(candidateProfiles, {
-            email: remoteFound.email,
-            displayName: remoteFound.displayName,
-            role: remoteFound.role,
-            allowedDays: remoteFound.allowedDays,
-            uid: emailDocId,
-          })
-        : candidateProfiles;
+      const candidateProfiles = remoteUserDoc
+        ? upsertUserByEmail(usersListRef.current, remoteUserDoc)
+        : usersListRef.current;
 
       const access = resolveAuthorizedUserAccess({
         email: cleanEmail,
         uid: user.uid,
-        registeredUsers: effectiveUsersPool,
+        registeredUsers: candidateProfiles,
       });
 
-      // STRICT GATE: If the email is NOT registered in "إدارة البريد والصلاحيات",
-      // reject login immediately, delete the newly created Auth record from Firebase Authentication,
-      // and sign out so they cannot view admin/editor controls or modify the schedule.
+      // STRICT GATE: If email is NOT registered, reject login immediately
+      // Do NOT call deleteUser (per Rule 3.5), simply signOut and show Arabic error banner
       if (!access.authorized || !access.role) {
         setFirebaseUser(null);
         setActiveRole(null);
@@ -490,11 +387,6 @@ export default function App() {
         setAuthErrorBanner(
           `⛔ تم رفض تسجيل الدخول: البريد الإلكتروني (${cleanEmail}) غير مسجل في «إدارة البريد والصلاحيات». لا يُسمح بتسجيل الدخول أو تعديل الجداول إلا للحسابات المعتمدة مسبقاً من مدير المجمع.`
         );
-        try {
-          await deleteUser(user);
-        } catch {
-          // Fallback to signOut if deleteUser requires recent re-auth
-        }
         try {
           await signOut(auth);
         } catch {
@@ -510,74 +402,58 @@ export default function App() {
       setActiveRole(access.role);
       setAllowedDays(access.allowedDays);
 
-      // Sync the user's Firebase Auth UID document so Firestore security rules (`users/$(request.auth.uid)`)
-      // recognize their exact role and allowedDays
-      const uidProfilePayload = {
-        uid: user.uid,
-        email: cleanEmail,
-        displayName: (
-          user.displayName ||
-          access.matchedProfile?.displayName ||
-          cleanEmail
-        ).slice(0, 120),
-        role: access.role,
-        allowedDays: access.allowedDays,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      };
-      mirrorSetDocToDefault('users', user.uid, uidProfilePayload);
-      void setDoc(doc(db, 'users', user.uid), uidProfilePayload).catch(
-        () => {}
-      );
-
-      // Purge any legacy fictional email from Firestore
-      mirrorDeleteDocFromDefault('users', 'editor_at_meetazzoun_dot_org');
-      void deleteDoc(doc(db, 'users', 'editor_at_meetazzoun_dot_org')).catch(
-        () => {}
-      );
-
-      // If Admin, load full users list from Firestore and purge any fictional accounts
+      // If Admin, load full users list and audit logs from Firestore
       if (isPrimaryAdmin || access.role === 'ADMIN') {
         try {
-          const [snapPrimary, snapDefault] = await Promise.all([
-            getDocs(collection(db, 'users')).catch(() => null),
-            getDocs(collection(defaultDb, 'users')).catch(() => null),
-          ]);
+          const snap = await getDocs(collection(db, 'users'));
           const remoteUsers: UserProfile[] = [];
-          const processSnap = (snap: Awaited<ReturnType<typeof getDocs>> | null) => {
-            if (!snap || snap.empty) return;
-            snap.forEach((docSnap) => {
-              const data = docSnap.data() as UserProfile;
-              if (!data || !data.email) return;
-              if (isFictionalOrBlockedEmail(data.email)) {
-                // Actively delete fictional account from Firestore
-                void deleteDoc(doc(db, 'users', docSnap.id)).catch(() => {});
-                mirrorDeleteDocFromDefault('users', docSnap.id);
-                return;
-              }
-              remoteUsers.push({
-                uid: emailToDocId(data.email),
-                email: data.email.trim().toLowerCase(),
-                displayName: data.displayName || data.email,
-                role:
-                  data.email.trim().toLowerCase() === PRIMARY_ADMIN_EMAIL ||
-                  data.role === 'ADMIN'
-                    ? 'ADMIN'
-                    : 'EDITOR',
-                allowedDays:
-                  Array.isArray(data.allowedDays) && data.allowedDays.length > 0
-                    ? data.allowedDays
-                    : DAYS_LIST.map((d) => d.id),
-              });
+          snap.forEach((docSnap) => {
+            const data = docSnap.data() as UserProfile;
+            if (!data || !data.email) return;
+            if (isFictionalOrBlockedEmail(data.email)) return;
+            remoteUsers.push({
+              uid: docSnap.id,
+              email: data.email.trim().toLowerCase(),
+              displayName: data.displayName || data.email,
+              role:
+                data.email.trim().toLowerCase() === PRIMARY_ADMIN_EMAIL ||
+                data.role === 'ADMIN'
+                  ? 'ADMIN'
+                  : 'EDITOR',
+              allowedDays: Array.isArray(data.allowedDays) ? data.allowedDays : [],
             });
-          };
-          processSnap(snapDefault);
-          processSnap(snapPrimary);
+          });
           if (remoteUsers.length > 0) {
             setUsersList(sanitizeUsersList(remoteUsers));
           }
         } catch {
-          // Ignore list error
+          // Ignore
+        }
+
+        try {
+          const logsSnap = await getDocs(collection(db, 'auditLogs'));
+          const logs: AuditLogEntry[] = [];
+          logsSnap.forEach((d) => {
+            const data = d.data();
+            logs.push({
+              id: d.id,
+              action: data.action,
+              dayId: data.dayId,
+              dayLabel: data.dayLabel,
+              details: data.details,
+              userId: data.userId,
+              userEmail: data.userEmail,
+              userName: data.userName,
+              createdAtIso:
+                data.createdAt && typeof data.createdAt.toDate === 'function'
+                  ? data.createdAt.toDate().toISOString()
+                  : new Date().toISOString(),
+            });
+          });
+          logs.sort((a, b) => b.createdAtIso.localeCompare(a.createdAtIso));
+          setAuditLogs(logs.slice(0, 100));
+        } catch {
+          // Non-blocking
         }
       }
 
@@ -586,33 +462,13 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // Automatically initialize/seed Firestore collections ONLY when an authenticated ADMIN is logged in
+  // 3. Firestore Real-Time Subscriptions:
+  // - Public Visitors: Subscribe to publicSchedules/{selectedDay} & settings/center
+  // - Authenticated Staff: Subscribe to schedules/{selectedDay} & settings/center
   useEffect(() => {
-    if (
-      !isLoaded ||
-      !authReady ||
-      !firebaseUser ||
-      activeRole !== 'ADMIN' ||
-      hasSeededFirestoreRef.current
-    ) {
-      return;
-    }
-    hasSeededFirestoreRef.current = true;
+    if (!authReady || !isLoaded) return;
 
-    async function ensureFirestoreInitialized() {
-      try {
-        await syncAllDataToFirestore(auth.currentUser);
-      } catch {
-        // Non-blocking
-      }
-    }
-    ensureFirestoreInitialized();
-  }, [isLoaded, authReady, firebaseUser, activeRole]);
-
-  // 3. Single bounded Firestore onSnapshot listener (only active when authenticated; public viewers use local schedule without reading Firestore)
-  useEffect(() => {
-    if (!authReady || !isLoaded || !firebaseUser) return;
-
+    // Center Settings Listener (readable by all)
     const settingsRef = doc(db, 'settings', 'center');
     const unsubSettings = onSnapshot(
       settingsRef,
@@ -622,73 +478,103 @@ export default function App() {
           setSettings((prev) => ({ ...prev, ...remoteSettings }));
         }
       },
-      (error) => {
-        if (auth.currentUser) {
-          try {
-            handleFirestoreError(error, OperationType.GET, 'settings/center');
-          } catch {
-            // Handled
-          }
-        }
+      () => {
+        // Handled
       }
     );
 
-    const scheduleRef = doc(db, 'schedules', selectedDay);
-    const unsubSchedule = onSnapshot(
-      scheduleRef,
-      (snap) => {
-        if (snap.exists()) {
-          const remoteDoc = snap.data() as DailyScheduleData;
-          setSchedules((prev) => {
-            const currentLocal = prev[selectedDay];
-            const conflictCheck = detectConcurrentConflict({
-              localBaseVersion: localVersionRef.current[selectedDay] || 1,
-              incomingRemoteSchedule: remoteDoc,
-              currentUserId: auth.currentUser?.uid,
-              hasLocalUnsavedChanges: saveStatus === 'unsaved',
-              localDraftRows: currentLocal?.draftRows || [],
+    // Schedule listener depending on authentication
+    let unsubSchedule: () => void;
+
+    if (!firebaseUser) {
+      // Visitor: Read public approved schedule only
+      const publicRef = doc(db, 'publicSchedules', selectedDay);
+      unsubSchedule = onSnapshot(
+        publicRef,
+        (snap) => {
+          if (snap.exists()) {
+            const pubData = snap.data() as PublicDailyScheduleData;
+            setSchedules((prev) => {
+              const current = prev[selectedDay];
+              if (!current) return prev;
+              return {
+                ...prev,
+                [selectedDay]: {
+                  ...current,
+                  publishedRows: pubData.publishedRows || [],
+                  publishedAt: pubData.publishedAt || current.publishedAt,
+                  isPublic: pubData.isPublic ?? true,
+                },
+              };
             });
-
-            if (conflictCheck.hasConflict) {
-              setConflict({
-                dayId: selectedDay,
-                localRows: currentLocal.draftRows,
-                remoteSchedule: remoteDoc,
-                detectedAt: new Date().toISOString(),
-              });
-              setSaveStatus('conflict');
-              return prev;
-            }
-
-            localVersionRef.current[selectedDay] = remoteDoc.version || 1;
-            return {
-              ...prev,
-              [selectedDay]: remoteDoc,
-            };
-          });
+          }
+        },
+        () => {
+          // Handled
         }
-      },
-      (error) => {
-        if (auth.currentUser) {
-          try {
-            handleFirestoreError(
-              error,
-              OperationType.GET,
-              `schedules/${selectedDay}`
-            );
-          } catch {
-            // Handled
+      );
+    } else {
+      // Staff / Editor / Admin: Read full draft schedule from schedules/{selectedDay}
+      const scheduleRef = doc(db, 'schedules', selectedDay);
+      unsubSchedule = onSnapshot(
+        scheduleRef,
+        (snap) => {
+          if (snap.exists()) {
+            const remoteDoc = snap.data() as DailyScheduleData;
+            setSchedules((prev) => {
+              const currentLocal = prev[selectedDay];
+              const conflictCheck = detectConcurrentConflict({
+                localBaseVersion: localVersionRef.current[selectedDay] || 1,
+                incomingRemoteSchedule: remoteDoc,
+                currentUserId: auth.currentUser?.uid,
+                hasLocalUnsavedChanges: saveStatusRef.current === 'unsaved',
+                localDraftRows: currentLocal?.draftRows || [],
+              });
+
+              if (conflictCheck.hasConflict) {
+                setConflict({
+                  dayId: selectedDay,
+                  baseRows: currentLocal?.draftRows,
+                  localRows: currentLocal?.draftRows || [],
+                  remoteSchedule: remoteDoc,
+                  detectedAt: new Date().toISOString(),
+                });
+                setSaveStatus('conflict');
+                saveStatusRef.current = 'conflict';
+                return prev;
+              }
+
+              localVersionRef.current[selectedDay] = remoteDoc.version || 1;
+              return {
+                ...prev,
+                [selectedDay]: remoteDoc,
+              };
+            });
+          }
+        },
+        (error) => {
+          if (auth.currentUser) {
+            try {
+              handleFirestoreError(
+                error,
+                OperationType.GET,
+                `schedules/${selectedDay}`
+              );
+            } catch {
+              // Handled
+            }
           }
         }
-      }
-    );
+      );
+    }
 
     return () => {
       unsubSettings();
       unsubSchedule();
     };
-  }, [authReady, isLoaded, firebaseUser, selectedDay, saveStatus]);
+  }, [authReady, isLoaded, firebaseUser, selectedDay]);
 
+  // Non-blocking audit log append
   const appendAuditLog = async (
     action: AuditAction,
     dayId: string,
@@ -715,45 +601,32 @@ export default function App() {
 
     setAuditLogs((prev) => [newEntry, ...prev.slice(0, 99)]);
 
-    const logPayload = {
-      action: newEntry.action,
-      dayId: newEntry.dayId,
-      dayLabel: newEntry.dayLabel,
-      details: newEntry.details,
-      userId,
-      userEmail,
-      userName: newEntry.userName.slice(0, 120),
-      createdAt: serverTimestamp(),
-    };
-
-    await mirrorSetDocToDefault('auditLogs', newEntry.id, logPayload);
-
     if (firebaseUser) {
-      const logPath = `auditLogs/${newEntry.id}`;
       try {
         await setDoc(doc(collection(db, 'auditLogs'), newEntry.id), {
-          ...logPayload,
+          action: newEntry.action,
+          dayId: newEntry.dayId,
+          dayLabel: newEntry.dayLabel,
+          details: newEntry.details,
           userId: firebaseUser.uid,
           userEmail: firebaseUser.email || PRIMARY_ADMIN_EMAIL,
+          userName: newEntry.userName.slice(0, 120),
+          createdAt: serverTimestamp(),
         });
       } catch (err) {
-        try {
-          handleFirestoreError(err, OperationType.CREATE, logPath);
-        } catch {
-          // Handled
-        }
+        console.warn('Non-blocking audit log error:', err);
       }
     }
   };
 
   /**
-   * Instant Save to Firestore:
-   * Immediately updates both draftRows and publishedRows so every edit is saved & live right away.
+   * Commit schedule edit to draftRows in schedules/{targetDayId}.
+   * Uses runTransaction for optimistic concurrency version check.
+   * On failure: rollbacks local state and displays error banner in Arabic.
    */
   const commitDayScheduleChange = async (
     targetDayId: DayId,
     newDraftRows: ScheduleRow[],
-    _newPublishedRows: ScheduleRow[],
     action: AuditAction,
     details: string,
     recordUndo = true
@@ -771,84 +644,335 @@ export default function App() {
       }));
     }
 
-    const sanitizedRows = normalizeSortOrders(newDraftRows).map((r, i) =>
+    const sanitizedDraft = normalizeSortOrders(newDraftRows).map((r, i) =>
       sanitizeRowForFirestore(r, i)
     );
-    const nextVersion = (currentDay.version || 1) + 1;
-    localVersionRef.current[targetDayId] = nextVersion;
+    const baseVersion =
+      localVersionRef.current[targetDayId] || currentDay.version || 1;
 
-    const updatedDay: DailyScheduleData = {
+    const optimisticDay: DailyScheduleData = {
       ...currentDay,
-      draftRows: sanitizedRows,
-      publishedRows: sanitizedRows,
-      hasUnpublishedChanges: false,
-      version: nextVersion,
-      updatedBy: firebaseUser?.uid || 'local-admin',
+      draftRows: sanitizedDraft,
+      hasUnpublishedChanges: true,
+      version: baseVersion + 1,
+      updatedBy: firebaseUser?.uid || 'local-staff',
       updatedByEmail: firebaseUser?.email || PRIMARY_ADMIN_EMAIL,
       updatedByName:
         firebaseUser?.displayName ||
         (activeRole === 'ADMIN' ? 'مدير النظام' : 'محرر الجداول'),
-      publishedAt: new Date().toISOString(),
     };
 
     setSaveStatus('saving');
+    saveStatusRef.current = 'saving';
     setSchedules((prev) => ({
       ...prev,
-      [targetDayId]: updatedDay,
+      [targetDayId]: optimisticDay,
     }));
 
-    await appendAuditLog(action, targetDayId, currentDay.dayLabel, details);
+    if (!firebaseUser) {
+      setSaveStatus('saved');
+      saveStatusRef.current = 'saved';
+      return;
+    }
 
-    const firestorePayload = {
-      dayId: updatedDay.dayId,
-      dayLabel: updatedDay.dayLabel,
-      dayOrder: updatedDay.dayOrder,
-      isPublic: true,
-      hasUnpublishedChanges: false,
-      version: updatedDay.version,
-      draftRows: updatedDay.draftRows,
-      publishedRows: updatedDay.publishedRows,
-      updatedBy: firebaseUser?.uid || 'local-admin',
-      updatedByEmail: firebaseUser?.email || PRIMARY_ADMIN_EMAIL,
-      updatedByName: updatedDay.updatedByName.slice(0, 120),
-      updatedAt: serverTimestamp(),
-      publishedAt: updatedDay.publishedAt,
-    };
+    const scheduleDocRef = doc(db, 'schedules', targetDayId);
 
-    // Always mirror immediately to (default) database in mitazoun-schedule
-    await mirrorSetDocToDefault('schedules', targetDayId, firestorePayload);
+    try {
+      let finalVersion = baseVersion + 1;
 
-    if (firebaseUser) {
-      const path = `schedules/${targetDayId}`;
-      try {
-        await setDoc(doc(db, 'schedules', targetDayId), {
-          ...firestorePayload,
+      await runTransaction(db, async (transaction) => {
+        const remoteSnap = await transaction.get(scheduleDocRef);
+        if (remoteSnap.exists()) {
+          const remoteData = remoteSnap.data() as DailyScheduleData;
+          const remoteVer = remoteData.version || 1;
+          if (
+            remoteVer > baseVersion &&
+            remoteData.updatedByEmail !== firebaseUser.email
+          ) {
+            throw new Error(`CONCURRENT_CONFLICT:${JSON.stringify(remoteData)}`);
+          }
+          finalVersion = remoteVer + 1;
+        }
+
+        transaction.set(scheduleDocRef, {
+          dayId: optimisticDay.dayId,
+          dayLabel: optimisticDay.dayLabel,
+          dayOrder: optimisticDay.dayOrder,
+          isPublic: true,
+          hasUnpublishedChanges: true,
+          version: finalVersion,
+          draftRows: sanitizedDraft,
+          publishedRows: currentDay.publishedRows || [],
           updatedBy: firebaseUser.uid,
           updatedByEmail: firebaseUser.email || PRIMARY_ADMIN_EMAIL,
+          updatedByName: optimisticDay.updatedByName.slice(0, 120),
+          updatedAt: serverTimestamp(),
+          publishedAt: currentDay.publishedAt,
         });
-      } catch (err) {
-        try {
-          handleFirestoreError(err, OperationType.WRITE, path);
-        } catch {
-          // Handled
-        }
+      });
+
+      localVersionRef.current[targetDayId] = finalVersion;
+      setSaveStatus('saved');
+      saveStatusRef.current = 'saved';
+
+      try {
+        await appendAuditLog(action, targetDayId, currentDay.dayLabel, details);
+      } catch {
+        // Non-blocking
+      }
+    } catch (err: unknown) {
+      console.error('Schedule commit failed:', err);
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (errMsg.startsWith('CONCURRENT_CONFLICT:')) {
+        const remoteData = JSON.parse(
+          errMsg.slice('CONCURRENT_CONFLICT:'.length)
+        ) as DailyScheduleData;
+        setConflict({
+          dayId: targetDayId,
+          baseRows: currentDay.draftRows,
+          localRows: sanitizedDraft,
+          remoteSchedule: remoteData,
+          detectedAt: new Date().toISOString(),
+        });
+        setSaveStatus('conflict');
+        saveStatusRef.current = 'conflict';
+      } else {
+        // Rollback local state
+        setSchedules((prev) => ({
+          ...prev,
+          [targetDayId]: currentDay,
+        }));
+        setSaveStatus('error');
+        saveStatusRef.current = 'error';
+        setAuthErrorBanner(
+          'حدث خطأ أثناء حفظ التعديلات في قاعدة البيانات. تم استرجاع النسخة السابقة، يرجى إعادة المحاولة.'
+        );
       }
     }
+  };
 
-    if (action === 'PUBLISH_DAY') {
-      await showLocalNotification(
-        `تحديث جدول يوم ${currentDay.dayLabel}`,
-        `تم حفظ ونشر جدول عيادات يوم ${currentDay.dayLabel} (${sanitizedRows.length} عيادات) بنجاح.`
-      );
+  /**
+   * "اعتماد ونشر التعديلات":
+   * Copies draftRows to publishedRows, sets hasUnpublishedChanges: false,
+   * and commits both schedules/{selectedDay} and publicSchedules/{selectedDay} via transaction.
+   */
+  const handlePublishDay = async () => {
+    if (!userCanEditSelectedDay) return;
+    const currentDay = schedules[selectedDay];
+    if (!currentDay) return;
+
+    const sanitizedRows = normalizeSortOrders(currentDay.draftRows).map((r, i) =>
+      sanitizeRowForFirestore(r, i)
+    );
+    const publishTimestamp = new Date().toISOString();
+    const baseVersion =
+      localVersionRef.current[selectedDay] || currentDay.version || 1;
+
+    const publishedDay: DailyScheduleData = {
+      ...currentDay,
+      publishedRows: sanitizedRows,
+      hasUnpublishedChanges: false,
+      version: baseVersion + 1,
+      publishedAt: publishTimestamp,
+      updatedBy: firebaseUser?.uid || 'local-staff',
+      updatedByEmail: firebaseUser?.email || PRIMARY_ADMIN_EMAIL,
+      updatedByName:
+        firebaseUser?.displayName ||
+        (activeRole === 'ADMIN' ? 'مدير النظام' : 'محرر الجداول'),
+    };
+
+    setSaveStatus('saving');
+    saveStatusRef.current = 'saving';
+    setSchedules((prev) => ({
+      ...prev,
+      [selectedDay]: publishedDay,
+    }));
+
+    if (!firebaseUser) {
+      setSaveStatus('saved');
+      saveStatusRef.current = 'saved';
+      return;
     }
 
-    setTimeout(() => {
+    const scheduleDocRef = doc(db, 'schedules', selectedDay);
+    const publicDocRef = doc(db, 'publicSchedules', selectedDay);
+
+    try {
+      let finalVersion = baseVersion + 1;
+
+      await runTransaction(db, async (transaction) => {
+        const remoteSnap = await transaction.get(scheduleDocRef);
+        if (remoteSnap.exists()) {
+          const remoteData = remoteSnap.data() as DailyScheduleData;
+          finalVersion = (remoteData.version || 1) + 1;
+        }
+
+        // 1. Write staff schedule
+        transaction.set(scheduleDocRef, {
+          dayId: publishedDay.dayId,
+          dayLabel: publishedDay.dayLabel,
+          dayOrder: publishedDay.dayOrder,
+          isPublic: true,
+          hasUnpublishedChanges: false,
+          version: finalVersion,
+          draftRows: sanitizedRows,
+          publishedRows: sanitizedRows,
+          updatedBy: firebaseUser.uid,
+          updatedByEmail: firebaseUser.email || PRIMARY_ADMIN_EMAIL,
+          updatedByName: publishedDay.updatedByName.slice(0, 120),
+          updatedAt: serverTimestamp(),
+          publishedAt: publishTimestamp,
+        });
+
+        // 2. Write visitor public schedule
+        transaction.set(publicDocRef, {
+          dayId: publishedDay.dayId,
+          dayLabel: publishedDay.dayLabel,
+          dayOrder: publishedDay.dayOrder,
+          isPublic: true,
+          publishedRows: sanitizedRows,
+          publishedAt: publishTimestamp,
+          updatedAt: serverTimestamp(),
+        });
+      });
+
+      localVersionRef.current[selectedDay] = finalVersion;
       setSaveStatus('saved');
-    }, 180);
+      saveStatusRef.current = 'saved';
+
+      await showLocalNotification(
+        `تحديث جدول يوم ${currentDay.dayLabel}`,
+        `تم اعتماد ونشر جدول عيادات يوم ${currentDay.dayLabel} (${sanitizedRows.length} عيادات) للجمهور بنجاح.`
+      );
+
+      try {
+        await appendAuditLog(
+          'PUBLISH_DAY',
+          selectedDay,
+          currentDay.dayLabel,
+          `اعتماد ونشر جدول يوم ${currentDay.dayLabel} للجمهور (${sanitizedRows.length} عيادات)`
+        );
+      } catch {
+        // Non-blocking
+      }
+    } catch (err) {
+      console.error('Publish failed:', err);
+      setSchedules((prev) => ({
+        ...prev,
+        [selectedDay]: currentDay,
+      }));
+      setSaveStatus('error');
+      saveStatusRef.current = 'error';
+      setAuthErrorBanner(
+        'حدث خطأ أثناء اعتماد ونشر الجدول للجمهور في قاعدة البيانات.'
+      );
+    }
+  };
+
+  /**
+   * Super Admin Explicit First-Time Database Seeding (Requirement 1.2):
+   * Checks existence using getDoc first and never overwrites existing documents.
+   */
+  const handleSeedDatabaseFirstTime = async () => {
+    if (
+      !firebaseUser ||
+      firebaseUser.email?.trim().toLowerCase() !== PRIMARY_ADMIN_EMAIL
+    ) {
+      return;
+    }
+
+    setSeedLoading(true);
+    setSeedSuccessMessage(null);
+
+    try {
+      const userEmail = firebaseUser.email.trim().toLowerCase();
+      const userName = firebaseUser.displayName || 'مدير مجمع ميت عزون الطبي';
+
+      // 1. Settings
+      const settingsSnap = await getDoc(doc(db, 'settings', 'center'));
+      if (!settingsSnap.exists()) {
+        await setDoc(doc(db, 'settings', 'center'), {
+          ...settings,
+          updatedBy: firebaseUser.uid,
+          updatedByEmail: userEmail,
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      // 2. Primary Admin User
+      const adminDocId = emailToDocId(PRIMARY_ADMIN_EMAIL);
+      const userSnap = await getDoc(doc(db, 'users', adminDocId));
+      if (!userSnap.exists()) {
+        await setDoc(doc(db, 'users', adminDocId), {
+          uid: adminDocId,
+          email: PRIMARY_ADMIN_EMAIL,
+          displayName: userName.slice(0, 120),
+          role: 'ADMIN',
+          allowedDays: DAYS_LIST.map((d) => d.id),
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      // 3. Schedules & PublicSchedules for all 7 days
+      for (const day of DAYS_LIST) {
+        const scheduleSnap = await getDoc(doc(db, 'schedules', day.id));
+        const daySched = schedules[day.id];
+        const draftRows = normalizeSortOrders(daySched?.draftRows || []).map(
+          (r, i) => sanitizeRowForFirestore(r, i)
+        );
+
+        if (!scheduleSnap.exists()) {
+          await setDoc(doc(db, 'schedules', day.id), {
+            dayId: day.id,
+            dayLabel: day.label,
+            dayOrder: day.order,
+            isPublic: true,
+            hasUnpublishedChanges: false,
+            version: 1,
+            draftRows,
+            publishedRows: draftRows,
+            updatedBy: firebaseUser.uid,
+            updatedByEmail: userEmail,
+            updatedByName: userName.slice(0, 120),
+            updatedAt: serverTimestamp(),
+            publishedAt: new Date().toISOString(),
+          });
+        }
+
+        const publicSnap = await getDoc(doc(db, 'publicSchedules', day.id));
+        if (!publicSnap.exists()) {
+          await setDoc(doc(db, 'publicSchedules', day.id), {
+            dayId: day.id,
+            dayLabel: day.label,
+            dayOrder: day.order,
+            isPublic: true,
+            publishedRows: draftRows,
+            publishedAt: new Date().toISOString(),
+            updatedAt: serverTimestamp(),
+          });
+        }
+      }
+
+      await appendAuditLog(
+        'SEED_DATA',
+        'system',
+        'قاعدة البيانات',
+        'تهيئة قاعدة البيانات لأول مرة بنجاح والتحقق من سلامة الجداول'
+      );
+
+      setSeedSuccessMessage('تمت تهيئة وفحص قاعدة البيانات بنجاح!');
+    } catch (err) {
+      console.error('Seed database error:', err);
+      setAuthErrorBanner('حدث خطأ أثناء تهيئة قاعدة البيانات.');
+    } finally {
+      setSeedLoading(false);
+    }
   };
 
   const currentSchedule = schedules[selectedDay];
-  // Strictly require authenticated user login to edit — visitors see pure read-only schedule
+
+  // Strictly require authenticated user login to edit
   const userCanEditSelectedDay =
     Boolean(firebaseUser) &&
     !isStrictPublicUrl &&
@@ -865,7 +989,6 @@ export default function App() {
     const nextRows = addScheduleRow(currentSchedule.draftRows, input);
     commitDayScheduleChange(
       selectedDay,
-      nextRows,
       nextRows,
       'CREATE_ROW',
       `إضافة عيادة «${input.clinicName}» (${input.doctorName})`
@@ -885,7 +1008,6 @@ export default function App() {
     commitDayScheduleChange(
       selectedDay,
       nextRows,
-      nextRows,
       'UPDATE_ROW',
       `تعديل بيانات عيادة في يوم ${currentSchedule.dayLabel}`
     );
@@ -897,7 +1019,6 @@ export default function App() {
     const nextRows = deleteScheduleRow(currentSchedule.draftRows, rowId);
     commitDayScheduleChange(
       selectedDay,
-      nextRows,
       nextRows,
       'DELETE_ROW',
       `حذف عيادة «${target?.clinicName || rowId}»`
@@ -914,7 +1035,6 @@ export default function App() {
     commitDayScheduleChange(
       selectedDay,
       nextRows,
-      nextRows,
       'REORDER_ROWS',
       `تحريك موعد ${direction === 'up' ? 'لأعلى' : 'لأسفل'}`
     );
@@ -930,7 +1050,6 @@ export default function App() {
     commitDayScheduleChange(
       selectedDay,
       nextRows,
-      nextRows,
       'REORDER_ROWS',
       `إعادة ترتيب الصفوف من #${fromIndex + 1} إلى #${toIndex + 1}`
     );
@@ -942,7 +1061,6 @@ export default function App() {
     const nextTargetRows = copyRowToDay(targetSchedule.draftRows, row);
     commitDayScheduleChange(
       targetDayId,
-      nextTargetRows,
       nextTargetRows,
       'COPY_ROW',
       `نسخ عيادة «${row.clinicName}» من يوم ${currentSchedule.dayLabel} إلى يوم ${targetSchedule.dayLabel}`
@@ -958,7 +1076,6 @@ export default function App() {
     );
     commitDayScheduleChange(
       targetDayId,
-      copiedRows,
       copiedRows,
       'COPY_DAY',
       `نسخ جدول يوم ${currentSchedule.dayLabel} بالكامل (${copiedRows.length} عيادات) إلى يوم ${targetSchedule.dayLabel}`
@@ -976,21 +1093,9 @@ export default function App() {
     commitDayScheduleChange(
       selectedDay,
       previousRows,
-      previousRows,
       'UNDO',
       `التراجع عن آخر تعديل في جدول يوم ${currentSchedule.dayLabel}`,
       false
-    );
-  };
-
-  const handlePublishDay = () => {
-    if (!userCanEditSelectedDay) return;
-    commitDayScheduleChange(
-      selectedDay,
-      currentSchedule.draftRows,
-      currentSchedule.draftRows,
-      'PUBLISH_DAY',
-      `نشر جدول يوم ${currentSchedule.dayLabel} للجمهور (${currentSchedule.draftRows.length} عيادات)`
     );
   };
 
@@ -1004,21 +1109,13 @@ export default function App() {
       'تحديث إعدادات الهوية البصرية وأرقام التواصل للمركز'
     );
 
-    const payload = {
-      ...newSettings,
-      updatedBy: firebaseUser?.uid || 'local-admin',
-      updatedByEmail: firebaseUser?.email || PRIMARY_ADMIN_EMAIL,
-      updatedAt: serverTimestamp(),
-    };
-
-    await mirrorSetDocToDefault('settings', 'center', payload);
-
     if (firebaseUser) {
       try {
         await setDoc(doc(db, 'settings', 'center'), {
-          ...payload,
+          ...newSettings,
           updatedBy: firebaseUser.uid,
           updatedByEmail: firebaseUser.email || PRIMARY_ADMIN_EMAIL,
+          updatedAt: serverTimestamp(),
         });
       } catch (err) {
         try {
@@ -1030,7 +1127,7 @@ export default function App() {
     }
   };
 
-  // Add or update any email address as ADMIN or EDITOR
+  // Add or update permissions in users/{emailDocId} only (Requirement 1.3)
   const handleAddOrUpdateUserByEmail = async (input: {
     email: string;
     displayName?: string;
@@ -1041,7 +1138,12 @@ export default function App() {
     if (activeRole !== 'ADMIN') return;
 
     const cleanEmail = input.email.trim().toLowerCase();
-    const docId = input.uid?.trim() || emailToDocId(cleanEmail);
+    const docId = emailToDocId(cleanEmail);
+
+    const existingUser = usersList.find(
+      (u) => u.email.trim().toLowerCase() === cleanEmail
+    );
+
     const updatedList = upsertUserByEmail(usersList, {
       ...input,
       email: cleanEmail,
@@ -1049,35 +1151,38 @@ export default function App() {
     });
     setUsersList(updatedList);
 
-    const savedUser = updatedList.find(
-      (u) => u.email.trim().toLowerCase() === cleanEmail
-    );
-    if (!savedUser) return;
-
     await appendAuditLog(
       'UPDATE_ROLE',
       'users',
       'الصلاحيات',
       `تعيين صلاحية البريد (${cleanEmail}) إلى ${
-        savedUser.role === 'ADMIN' ? 'أدمن (ADMIN)' : 'محرر (EDITOR)'
+        input.role === 'ADMIN' ? 'أدمن (ADMIN)' : 'محرر (EDITOR)'
       }`
     );
 
-    const userPayload = {
-      uid: docId,
-      email: cleanEmail,
-      displayName: savedUser.displayName.slice(0, 120),
-      role: savedUser.role,
-      allowedDays: savedUser.allowedDays,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    };
-
-    await mirrorSetDocToDefault('users', docId, userPayload);
-
     if (firebaseUser) {
       try {
-        await setDoc(doc(db, 'users', docId), userPayload);
+        if (existingUser) {
+          // Do not touch createdAt on update
+          await updateDoc(doc(db, 'users', docId), {
+            email: cleanEmail,
+            displayName: (input.displayName || cleanEmail).slice(0, 120),
+            role: input.role,
+            allowedDays: input.allowedDays,
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          // New user
+          await setDoc(doc(db, 'users', docId), {
+            uid: docId,
+            email: cleanEmail,
+            displayName: (input.displayName || cleanEmail).slice(0, 120),
+            role: input.role,
+            allowedDays: input.allowedDays,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
       } catch (err) {
         try {
           handleFirestoreError(err, OperationType.WRITE, `users/${docId}`);
@@ -1088,7 +1193,7 @@ export default function App() {
     }
   };
 
-  // Delete user email from permissions list and Firestore
+  // Delete user from users/{emailDocId} only (Requirement 1.3)
   const handleDeleteUser = async (uidOrEmail: string) => {
     if (activeRole !== 'ADMIN') return;
     const result = deleteUserFromList(usersList, uidOrEmail);
@@ -1097,7 +1202,7 @@ export default function App() {
     setUsersList(result.updated);
 
     const deletedUser = result.deleted;
-    const emailDocId = emailToDocId(deletedUser.email);
+    const emailDocIdVal = emailToDocId(deletedUser.email);
 
     await appendAuditLog(
       'DELETE_USER',
@@ -1106,23 +1211,15 @@ export default function App() {
       `حذف البريد الإلكتروني (${deletedUser.email}) وإلغاء صلاحيته`
     );
 
-    await mirrorDeleteDocFromDefault('users', deletedUser.uid);
-    if (emailDocId !== deletedUser.uid) {
-      await mirrorDeleteDocFromDefault('users', emailDocId);
-    }
-
     if (firebaseUser) {
       try {
-        await deleteDoc(doc(db, 'users', deletedUser.uid));
-        if (emailDocId !== deletedUser.uid) {
-          await deleteDoc(doc(db, 'users', emailDocId));
-        }
+        await deleteDoc(doc(db, 'users', emailDocIdVal));
       } catch (err) {
         try {
           handleFirestoreError(
             err,
             OperationType.DELETE,
-            `users/${deletedUser.uid}`
+            `users/${emailDocIdVal}`
           );
         } catch {
           // Handled
@@ -1131,44 +1228,16 @@ export default function App() {
     }
   };
 
-  const handleSimulateConflict = () => {
-    const simulatedRemoteRow: ScheduleRow = {
-      id: `remote-${Date.now()}`,
-      clinicName: 'القلب',
-      doctorName: 'د/ خالد المنصوري',
-      startTime: '7:00 م',
-      endTime: '9:00 م',
-      icon: 'heart',
-      iconColor: '#e11d48',
-      sortOrder: currentSchedule.draftRows.length,
-    };
-
-    const remoteSchedule: DailyScheduleData = {
-      ...currentSchedule,
-      version: currentSchedule.version + 1,
-      draftRows: [...currentSchedule.draftRows, simulatedRemoteRow],
-      updatedBy: 'colleague-editor',
-      updatedByEmail: PRIMARY_ADMIN_EMAIL,
-      updatedByName: 'د/ محمود (محرر مشارك)',
-    };
-
-    setConflict({
-      dayId: selectedDay,
-      localRows: currentSchedule.draftRows,
-      remoteSchedule,
-      detectedAt: new Date().toISOString(),
-    });
-    setSaveStatus('conflict');
-  };
-
   const handleResolveConflict = (resolution: 'merge' | 'remote' | 'local') => {
     if (!conflict) return;
     let resolvedRows: ScheduleRow[] = currentSchedule.draftRows;
     if (resolution === 'merge') {
-      resolvedRows = mergeConflictingRows(
+      const mergeResult = mergeConflictingRowsThreeWay(
+        conflict.baseRows || [],
         conflict.localRows,
         conflict.remoteSchedule.draftRows
       );
+      resolvedRows = mergeResult.success ? mergeResult.rows : conflict.localRows;
     } else if (resolution === 'remote') {
       resolvedRows = conflict.remoteSchedule.draftRows;
     } else {
@@ -1178,29 +1247,44 @@ export default function App() {
     commitDayScheduleChange(
       selectedDay,
       resolvedRows,
-      resolvedRows,
       'UPDATE_ROW',
       `حل تعارض التعديلات المتزامنة`
     );
   };
 
+  // Google sign in with popup blocked fallback (Requirement 3.5)
   const handleGoogleSignIn = async () => {
     try {
       await signInWithPopup(auth, googleProvider);
-    } catch (err) {
-      console.warn('Google sign-in popup closed or blocked:', err);
+    } catch (popupErr: unknown) {
+      const err = popupErr as { code?: string };
+      if (
+        err?.code === 'auth/popup-blocked' ||
+        err?.code === 'auth/popup-closed-by-user' ||
+        err?.code === 'auth/cancelled-popup-request'
+      ) {
+        try {
+          await signInWithRedirect(auth, googleProvider);
+        } catch (redirectErr) {
+          console.error('Redirect sign-in error:', redirectErr);
+        }
+      }
     }
   };
 
   const canUndo = (undoStacks[selectedDay]?.length || 0) > 0;
   const undoCount = undoStacks[selectedDay]?.length || 0;
 
+  const isSuperAdminUser =
+    Boolean(firebaseUser) &&
+    firebaseUser?.email?.trim().toLowerCase() === PRIMARY_ADMIN_EMAIL;
+
   return (
     <div
       className="relative min-h-screen bg-gradient-to-b from-[#f3effb] via-slate-50 to-[#e8dff5] text-slate-900 flex flex-col overflow-x-hidden"
       dir="rtl"
     >
-      {/* Fixed App Watermark Background using the Official "مجمع ميت عزون الطبي" Logo */}
+      {/* App Watermark */}
       <div
         aria-hidden="true"
         className="pointer-events-none fixed inset-0 z-0 flex items-center justify-center overflow-hidden"
@@ -1213,10 +1297,10 @@ export default function App() {
 
       <OfflineIndicator />
 
-      {/* Compact Single-Row Top Bar: Sidebar Trigger (Admin Only) + 7-Day Navigation Tabs + Direct Login/Logout */}
+      {/* Top Bar: Navigation + Login/Logout */}
       <header className="sticky top-0 z-40 bg-gradient-to-r from-purple-950 via-indigo-950 to-purple-950 text-white border-b border-purple-800/60 shadow-md">
         <div className="mx-auto max-w-7xl px-2.5 sm:px-6 py-2 flex items-center justify-between gap-2 overflow-x-auto no-scrollbar">
-          {/* Sidebar Menu Button — Shown ONLY when LOGGED IN as ADMIN (Completely hidden for visitors and editors) */}
+          {/* Sidebar Menu Button — Shown ONLY when LOGGED IN as ADMIN */}
           {Boolean(firebaseUser) && activeRole === 'ADMIN' && !isStrictPublicUrl && (
             <button
               type="button"
@@ -1230,7 +1314,7 @@ export default function App() {
             </button>
           )}
 
-          {/* 7-Day Selector Tabs */}
+          {/* 7-Day Navigation Tabs */}
           <nav
             aria-label="اختيار يوم الجدول"
             className="flex items-center gap-1.5 sm:gap-2 flex-1 justify-start sm:justify-center overflow-x-auto no-scrollbar py-0.5"
@@ -1239,11 +1323,13 @@ export default function App() {
               const isSelected = selectedDay === day.id;
               const daySched = schedules[day.id];
               const rowCount =
-                viewMode === 'public' || isStrictPublicUrl
+                viewMode === 'public' || isStrictPublicUrl || !firebaseUser
                   ? daySched?.publishedRows?.length || 0
                   : daySched?.draftRows?.length || 0;
               const hasDraftDiff =
-                viewMode === 'manage' && daySched?.hasUnpublishedChanges;
+                viewMode === 'manage' &&
+                Boolean(firebaseUser) &&
+                daySched?.hasUnpublishedChanges;
 
               return (
                 <button
@@ -1282,7 +1368,7 @@ export default function App() {
             })}
           </nav>
 
-          {/* Direct Login / Logout Button in Top Bar (Compact Icon Button to preserve space for all 7 Days) */}
+          {/* Direct Login / Logout Button in Top Bar */}
           {!isStrictPublicUrl && (
             <div className="flex items-center gap-1.5 shrink-0">
               {firebaseUser ? (
@@ -1325,13 +1411,11 @@ export default function App() {
               : 'opacity-0 pointer-events-none'
           }`}
         >
-          {/* Backdrop */}
           <div
             onClick={() => setIsSidebarOpen(false)}
             className="absolute inset-0 bg-slate-950/60 backdrop-blur-xs"
           />
 
-          {/* Sidebar Drawer Panel (Right side in RTL) */}
           <aside
             data-testid="app-sidebar"
             aria-label="القائمة الجانبية للتعديل والصلاحيات"
@@ -1340,7 +1424,7 @@ export default function App() {
             }`}
           >
             <div className="p-4 space-y-5">
-              {/* 1. الشعار والاسم (Official Complex Logo & Name) */}
+              {/* 1. Official Complex Logo & Name */}
               <div className="flex items-start justify-between gap-2 pb-4 border-b border-slate-200">
                 <div className="flex items-center gap-3">
                   <div className="h-14 w-14 rounded-2xl bg-purple-50 p-1.5 border border-purple-200 flex items-center justify-center shrink-0 shadow-xs">
@@ -1369,13 +1453,12 @@ export default function App() {
                 </button>
               </div>
 
-              {/* 2. وضع التعديل وإدارة الجدول (Schedule Editing Controls) */}
+              {/* 2. Schedule Editing Controls */}
               <div className="space-y-3">
                 <h2 className="text-xs font-black text-slate-500 uppercase tracking-wider">
                   التعديل وإدارة الجدول
                 </h2>
 
-                {/* Mode Switcher */}
                 <div className="grid grid-cols-2 gap-1.5 rounded-xl bg-slate-100 p-1 border border-slate-200">
                   <button
                     type="button"
@@ -1405,7 +1488,6 @@ export default function App() {
                   </button>
                 </div>
 
-                {/* Firestore Instant Save Status + Publish */}
                 {userCanEditSelectedDay && (
                   <div className="rounded-xl bg-emerald-50/70 border border-emerald-200 p-2.5 space-y-2">
                     <div
@@ -1416,6 +1498,8 @@ export default function App() {
                       <span>
                         {saveStatus === 'saving'
                           ? 'جارٍ الحفظ الفوري...'
+                          : saveStatus === 'error'
+                          ? 'تعذر الحفظ (راجع الاتصال)'
                           : 'حفظ فوري تلقائي على Firestore'}
                       </span>
                     </div>
@@ -1435,14 +1519,13 @@ export default function App() {
                       <Send className="w-3.5 h-3.5 shrink-0" />
                       <span>
                         {currentSchedule.hasUnpublishedChanges
-                          ? 'اعتماد ونشر التعديلات'
-                          : 'معتمد ومنشور'}
+                          ? 'اعتماد ونشر التعديلات للجمهور'
+                          : 'معتمد ومنشور للجمهور'}
                       </span>
                     </button>
                   </div>
                 )}
 
-                {/* Edit Action Buttons */}
                 {userCanEditSelectedDay && (
                   <div className="grid grid-cols-1 gap-2">
                     <button
@@ -1493,7 +1576,7 @@ export default function App() {
                 )}
               </div>
 
-              {/* 3. الصلاحيات والحساب (Permissions & Account) */}
+              {/* 3. Permissions & Account */}
               <div className="space-y-2.5 pt-3 border-t border-slate-200">
                 <h2 className="text-xs font-black text-slate-500 uppercase tracking-wider">
                   الصلاحيات وإدارة المستخدمين
@@ -1576,9 +1659,28 @@ export default function App() {
                     </span>
                   </button>
                 )}
+
+                {/* Explicit Super Admin First-Time Database Seed Button (Requirement 1.2) */}
+                {isSuperAdminUser && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowSeedModal(true);
+                      setIsSidebarOpen(false);
+                    }}
+                    data-testid="open-seed-btn"
+                    aria-label="تهيئة قاعدة البيانات لأول مرة"
+                    className="w-full inline-flex items-center justify-between rounded-xl border border-amber-300 bg-amber-50 px-3 py-2.5 text-xs font-extrabold text-amber-950 hover:bg-amber-100 transition cursor-pointer"
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      <Database className="w-4 h-4 text-amber-600" />
+                      <span>تهيئة قاعدة البيانات لأول مرة</span>
+                    </span>
+                  </button>
+                )}
               </div>
 
-              {/* 4. الإشعارات وتثبيت التطبيق وحساب جوجل */}
+              {/* 4. App & Account */}
               <div className="space-y-2.5 pt-3 border-t border-slate-200">
                 <h2 className="text-xs font-black text-slate-500 uppercase tracking-wider">
                   التطبيق والحساب
@@ -1619,9 +1721,9 @@ export default function App() {
         </div>
       )}
 
-      {/* Main Content Area: Clean Page showing only Share Buttons above the Schedule Poster */}
+      {/* Main Content Area */}
       <main className="relative z-10 mx-auto w-full max-w-7xl flex-1 px-2 sm:px-6 py-3 sm:py-5 space-y-3">
-        {/* Unauthorized Email Rejection Banner */}
+        {/* Error Banner */}
         {authErrorBanner && (
           <div
             role="alert"
@@ -1635,7 +1737,7 @@ export default function App() {
             <button
               type="button"
               onClick={() => setAuthErrorBanner(null)}
-              aria-label="إغلاق تنبيه رفض الدخول"
+              aria-label="إغلاق تنبيه الخطأ"
               className="rounded-lg p-1 text-rose-600 hover:bg-rose-100 shrink-0"
             >
               <X className="w-4 h-4" />
@@ -1668,21 +1770,21 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => handleResolveConflict('merge')}
-                    className="rounded-lg bg-rose-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-rose-800"
+                    className="rounded-lg bg-rose-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-rose-800 cursor-pointer"
                   >
                     دمج التعديلات معًا بدون فقدان
                   </button>
                   <button
                     type="button"
                     onClick={() => handleResolveConflict('remote')}
-                    className="rounded-lg bg-white border border-rose-300 px-3 py-1.5 text-xs font-bold text-rose-900 hover:bg-rose-100"
+                    className="rounded-lg bg-white border border-rose-300 px-3 py-1.5 text-xs font-bold text-rose-900 hover:bg-rose-100 cursor-pointer"
                   >
                     اعتماد نسخة الزميل الأحدث
                   </button>
                   <button
                     type="button"
                     onClick={() => handleResolveConflict('local')}
-                    className="rounded-lg bg-white border border-rose-300 px-3 py-1.5 text-xs font-bold text-rose-900 hover:bg-rose-100"
+                    className="rounded-lg bg-white border border-rose-300 px-3 py-1.5 text-xs font-bold text-rose-900 hover:bg-rose-100 cursor-pointer"
                   >
                     الاحتفاظ بتعديلاتي فقط
                   </button>
@@ -1701,7 +1803,7 @@ export default function App() {
           posterRef={exportPosterRef}
         />
 
-        {/* Main Workspace: Interactive Poster Table (+ Optional Side Panel) */}
+        {/* Main Workspace: Interactive Poster Table */}
         <div
           className={
             showAdvancedPanel && userCanEditSelectedDay
@@ -1733,7 +1835,6 @@ export default function App() {
                 onPublishDay={handlePublishDay}
                 conflict={conflict}
                 onResolveConflict={handleResolveConflict}
-                onSimulateConflict={handleSimulateConflict}
               />
             </div>
           )}
@@ -1786,18 +1887,19 @@ export default function App() {
         </div>
       </main>
 
-      {/* Copy Full Day Modal */}
+      {/* Copy Full Day Confirmation Modal (Requirement 3.3) */}
       {showCopyDayModal && (
         <div
           role="dialog"
           aria-modal="true"
-          aria-label="نسخ جدول اليوم إلى يوم آخر"
+          aria-label="تأكيد نسخ جدول اليوم"
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs"
         >
           <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl border border-slate-200">
             <div className="flex items-center justify-between mb-3">
-              <h4 className="text-base font-extrabold text-slate-900">
-                نسخ جدول يوم {currentSchedule.dayLabel} بالكامل
+              <h4 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
+                <Copy className="w-5 h-5 text-indigo-600" />
+                <span>تأكيد نسخ جدول يوم {currentSchedule.dayLabel}</span>
               </h4>
               <button
                 type="button"
@@ -1807,27 +1909,39 @@ export default function App() {
                 <X className="w-5 h-5" />
               </button>
             </div>
+
+            <p className="text-xs font-semibold text-slate-600 mb-4 leading-relaxed">
+              سيتم نسخ جميع عيادات ومواعيد يوم{' '}
+              <strong className="text-slate-900">
+                {currentSchedule.dayLabel} ({currentSchedule.draftRows.length} عيادات)
+              </strong>{' '}
+              إلى مسودة اليوم المختار أدناه، مع استبدال عياداته الحالية (
+              {schedules[copyDayTarget]?.draftRows?.length || 0} عيادات):
+            </p>
+
             <div className="mb-4">
               <label className="block text-xs font-bold text-slate-700 mb-1.5">
-                اختر اليوم المستهدف لنسخ المواعيد إليه:
+                اختر اليوم المستهدف للنسخ إليه:
               </label>
               <select
+                aria-label="اليوم المستهدف لنسخ الجدول"
                 value={copyDayTarget}
                 onChange={(e) => setCopyDayTarget(e.target.value as DayId)}
                 className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-bold text-slate-900"
               >
                 {DAYS_LIST.filter((d) => d.id !== selectedDay).map((d) => (
                   <option key={d.id} value={d.id}>
-                    {d.label}
+                    {d.label} (حالياً {schedules[d.id]?.draftRows?.length || 0} عيادات)
                   </option>
                 ))}
               </select>
             </div>
+
             <div className="flex items-center justify-end gap-2">
               <button
                 type="button"
                 onClick={() => setShowCopyDayModal(false)}
-                className="rounded-xl border border-slate-300 px-4 py-2 text-xs font-bold text-slate-700"
+                className="rounded-xl border border-slate-300 px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 cursor-pointer"
               >
                 إلغاء
               </button>
@@ -1837,10 +1951,67 @@ export default function App() {
                   handleCopyDayToDay(copyDayTarget);
                   setShowCopyDayModal(false);
                 }}
-                className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-extrabold text-white hover:bg-indigo-700"
+                className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-extrabold text-white hover:bg-indigo-700 cursor-pointer shadow-xs"
               >
-                تأكيد النسخ
+                تأكيد النسخ الآن
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Super Admin Database Initial Seed Confirmation Modal (Requirement 1.2) */}
+      {showSeedModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="تأكيد تهيئة قاعدة البيانات لأول مرة"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs"
+        >
+          <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl border border-slate-200">
+            <div className="flex items-center justify-between mb-3">
+              <h4 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
+                <Database className="w-5 h-5 text-amber-600" />
+                <span>تهيئة قاعدة البيانات لأول مرة</span>
+              </h4>
+              <button
+                type="button"
+                onClick={() => setShowSeedModal(false)}
+                className="text-slate-500 hover:text-slate-800"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs font-semibold text-slate-600 mb-4 leading-relaxed">
+              هذا الإجراء مخصص لمدير المجمع الأعلى لتهيئة وفحص مجموعات Firestore لأول مرة.
+              يقوم الإجراء بفحص وجود المستندات الحالية (الإعدادات، أيام الأسبوع السبعة، وحساب المدير) ولا يقوم بالكتابة فوق أي مستند موجود بالفعل.
+            </p>
+
+            {seedSuccessMessage && (
+              <div className="mb-4 rounded-xl bg-emerald-50 border border-emerald-300 p-3 text-xs font-bold text-emerald-900">
+                {seedSuccessMessage}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowSeedModal(false)}
+                className="rounded-xl border border-slate-300 px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 cursor-pointer"
+              >
+                إغلاق
+              </button>
+              {!seedSuccessMessage && (
+                <button
+                  type="button"
+                  disabled={seedLoading}
+                  onClick={handleSeedDatabaseFirstTime}
+                  className="rounded-xl bg-amber-600 px-4 py-2 text-xs font-extrabold text-white hover:bg-amber-700 disabled:opacity-50 cursor-pointer shadow-xs"
+                >
+                  {seedLoading ? 'جارٍ الفحص والتهيئة...' : 'تأكيد التهيئة'}
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -1863,8 +2034,6 @@ export default function App() {
           currentUserRole={activeRole}
           onAddOrUpdateUserByEmail={handleAddOrUpdateUserByEmail}
           onDeleteUser={handleDeleteUser}
-          onSyncAllToFirestore={() => syncAllDataToFirestore(firebaseUser)}
-          onSimulateConflict={handleSimulateConflict}
           onClose={() => setShowUsersAuditModal(null)}
         />
       )}

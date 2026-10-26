@@ -236,6 +236,57 @@
         "publishedAt"
       ]
     },
+    "PublicDailySchedule": {
+      "title": "PublicDailySchedule",
+      "description": "Publicly readable published schedule document for visitors containing only approved rows",
+      "type": "object",
+      "properties": {
+        "dayId": {
+          "type": "string",
+          "description": "Day identifier",
+          "enum": ["saturday", "sunday", "monday", "tuesday", "wednesday", "thursday", "friday"],
+          "minLength": 6,
+          "maxLength": 12
+        },
+        "dayLabel": {
+          "type": "string",
+          "description": "Arabic display name of the day",
+          "minLength": 3,
+          "maxLength": 30
+        },
+        "dayOrder": {
+          "type": "number",
+          "description": "Numeric order of the day (0 to 6)"
+        },
+        "isPublic": {
+          "type": "boolean",
+          "description": "Whether the schedule is public"
+        },
+        "publishedRows": {
+          "type": "array",
+          "description": "List of published clinic rows (max 60)"
+        },
+        "publishedAt": {
+          "type": "string",
+          "description": "ISO timestamp string of when the schedule was published",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the publish operation"
+        }
+      },
+      "required": [
+        "dayId",
+        "dayLabel",
+        "dayOrder",
+        "isPublic",
+        "publishedRows",
+        "publishedAt"
+      ]
+    },
     "UserProfile": {
       "title": "UserProfile",
       "description": "User account role and permissions record",
@@ -375,6 +426,10 @@
     "/schedules/{dayId}": {
       "schema": { "$ref": "#/entities/DailySchedule" },
       "description": "Daily clinic schedules for Saturday through Friday"
+    },
+    "/publicSchedules/{dayId}": {
+      "schema": { "$ref": "#/entities/PublicDailySchedule" },
+      "description": "Public published schedules for visitors"
     },
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserProfile" },

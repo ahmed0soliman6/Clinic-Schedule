@@ -120,7 +120,18 @@ export interface AuditLogEntry {
 
 export interface ConflictInfo {
   dayId: DayId;
+  baseRows?: ScheduleRow[];
   localRows: ScheduleRow[];
   remoteSchedule: DailyScheduleData;
   detectedAt: string;
 }
+
+export interface PublicDailyScheduleData {
+  dayId: DayId;
+  dayLabel: string;
+  dayOrder: number;
+  isPublic: boolean;
+  publishedRows: ScheduleRow[];
+  publishedAt: string;
+}
+
