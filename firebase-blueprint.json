@@ -1,0 +1,388 @@
+{
+  "entities": {
+    "CenterSettings": {
+      "title": "CenterSettings",
+      "description": "Configuration and visual branding settings for Meet Azzoun Medical Complex",
+      "type": "object",
+      "properties": {
+        "complexName": {
+          "type": "string",
+          "description": "Name of the medical complex",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "associationName": {
+          "type": "string",
+          "description": "Name of the community association",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "registrationNumber": {
+          "type": "string",
+          "description": "Official registration number of the association",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "rightLogoUrl": {
+          "type": "string",
+          "description": "URL or path for the top-right medical complex logo",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "leftLogoUrl": {
+          "type": "string",
+          "description": "URL or path for the top-left association logo",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "address": {
+          "type": "string",
+          "description": "Physical address displayed in the footer bar",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "whatsappPhone": {
+          "type": "string",
+          "description": "WhatsApp phone number in the footer",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "landlinePhone": {
+          "type": "string",
+          "description": "Landline phone number in the footer",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "dentalPhone": {
+          "type": "string",
+          "description": "Dental clinic phone number in the footer",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "dentalLabel": {
+          "type": "string",
+          "description": "Label under the dental phone number",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "bgStartColor": {
+          "type": "string",
+          "description": "Poster background gradient start color",
+          "minLength": 4,
+          "maxLength": 30
+        },
+        "bgEndColor": {
+          "type": "string",
+          "description": "Poster background gradient end color",
+          "minLength": 4,
+          "maxLength": 30
+        },
+        "clinicHeaderColor": {
+          "type": "string",
+          "description": "Header color for the Clinic column",
+          "minLength": 4,
+          "maxLength": 30
+        },
+        "doctorHeaderColor": {
+          "type": "string",
+          "description": "Header color for the Doctor column",
+          "minLength": 4,
+          "maxLength": 30
+        },
+        "fromHeaderColor": {
+          "type": "string",
+          "description": "Header color for the From Time column",
+          "minLength": 4,
+          "maxLength": 30
+        },
+        "toHeaderColor": {
+          "type": "string",
+          "description": "Header color for the To Time column",
+          "minLength": 4,
+          "maxLength": 30
+        },
+        "footerBgColor": {
+          "type": "string",
+          "description": "Footer dark blue background color",
+          "minLength": 4,
+          "maxLength": 30
+        },
+        "updatedBy": {
+          "type": "string",
+          "description": "UID of the user who last updated settings",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "updatedByEmail": {
+          "type": "string",
+          "description": "Email of the user who last updated settings",
+          "minLength": 3,
+          "maxLength": 160
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the last update"
+        }
+      },
+      "required": [
+        "complexName",
+        "associationName",
+        "registrationNumber",
+        "rightLogoUrl",
+        "leftLogoUrl",
+        "address",
+        "whatsappPhone",
+        "landlinePhone",
+        "dentalPhone",
+        "dentalLabel",
+        "bgStartColor",
+        "bgEndColor",
+        "clinicHeaderColor",
+        "doctorHeaderColor",
+        "fromHeaderColor",
+        "toHeaderColor",
+        "footerBgColor",
+        "updatedBy",
+        "updatedByEmail",
+        "updatedAt"
+      ]
+    },
+    "DailySchedule": {
+      "title": "DailySchedule",
+      "description": "Schedule document for one day of the week containing both draft and published clinic rows",
+      "type": "object",
+      "properties": {
+        "dayId": {
+          "type": "string",
+          "description": "Day identifier",
+          "enum": ["saturday", "sunday", "monday", "tuesday", "wednesday", "thursday", "friday"],
+          "minLength": 6,
+          "maxLength": 12
+        },
+        "dayLabel": {
+          "type": "string",
+          "description": "Arabic display name of the day",
+          "minLength": 3,
+          "maxLength": 30
+        },
+        "dayOrder": {
+          "type": "number",
+          "description": "Numeric order of the day (0 to 6)"
+        },
+        "isPublic": {
+          "type": "boolean",
+          "description": "Whether the published schedule is visible to the public"
+        },
+        "hasUnpublishedChanges": {
+          "type": "boolean",
+          "description": "Whether draftRows differ from publishedRows"
+        },
+        "version": {
+          "type": "number",
+          "description": "Monotonically increasing revision number for concurrency conflict detection"
+        },
+        "draftRows": {
+          "type": "array",
+          "description": "List of clinic schedule rows in draft mode (max 60)"
+        },
+        "publishedRows": {
+          "type": "array",
+          "description": "List of clinic schedule rows currently published for public view (max 60)"
+        },
+        "updatedBy": {
+          "type": "string",
+          "description": "UID of the last editor",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "updatedByEmail": {
+          "type": "string",
+          "description": "Email of the last editor",
+          "minLength": 3,
+          "maxLength": 160
+        },
+        "updatedByName": {
+          "type": "string",
+          "description": "Display name of the last editor",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the last edit"
+        },
+        "publishedAt": {
+          "type": "string",
+          "description": "ISO timestamp string of the last publish action",
+          "minLength": 1,
+          "maxLength": 60
+        }
+      },
+      "required": [
+        "dayId",
+        "dayLabel",
+        "dayOrder",
+        "isPublic",
+        "hasUnpublishedChanges",
+        "version",
+        "draftRows",
+        "publishedRows",
+        "updatedBy",
+        "updatedByEmail",
+        "updatedByName",
+        "updatedAt",
+        "publishedAt"
+      ]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User account role and permissions record",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "description": "User email address",
+          "minLength": 3,
+          "maxLength": 160
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User full name",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "role": {
+          "type": "string",
+          "description": "Assigned role in the system",
+          "enum": ["ADMIN", "EDITOR", "VIEWER"]
+        },
+        "allowedDays": {
+          "type": "array",
+          "description": "Days the editor is allowed to modify (max 7)"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when user profile was created"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when user profile was last updated"
+        }
+      },
+      "required": [
+        "uid",
+        "email",
+        "displayName",
+        "role",
+        "allowedDays",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable audit trail entry for schedule and system changes",
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "description": "Action code performed",
+          "enum": [
+            "CREATE_ROW",
+            "UPDATE_ROW",
+            "DELETE_ROW",
+            "REORDER_ROWS",
+            "COPY_ROW",
+            "COPY_DAY",
+            "PUBLISH_DAY",
+            "UPDATE_SETTINGS",
+            "UPDATE_ROLE",
+            "DELETE_USER",
+            "SEED_DATA",
+            "UNDO"
+          ]
+        },
+        "dayId": {
+          "type": "string",
+          "description": "Affected day ID or system scope",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "dayLabel": {
+          "type": "string",
+          "description": "Arabic label of affected day or section",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "details": {
+          "type": "string",
+          "description": "Human-readable Arabic summary of the change",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "userId": {
+          "type": "string",
+          "description": "UID of the user who performed the action",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "userEmail": {
+          "type": "string",
+          "description": "Email of the user who performed the action",
+          "minLength": 3,
+          "maxLength": 160
+        },
+        "userName": {
+          "type": "string",
+          "description": "Display name of the user who performed the action",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the audit event"
+        }
+      },
+      "required": [
+        "action",
+        "dayId",
+        "dayLabel",
+        "details",
+        "userId",
+        "userEmail",
+        "userName",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/CenterSettings" },
+      "description": "Global center configuration and visual branding settings"
+    },
+    "/schedules/{dayId}": {
+      "schema": { "$ref": "#/entities/DailySchedule" },
+      "description": "Daily clinic schedules for Saturday through Friday"
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User accounts and role assignments (ADMIN, EDITOR, VIEWER)"
+    },
+    "/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Immutable audit log entries for modifications"
+    }
+  }
+}

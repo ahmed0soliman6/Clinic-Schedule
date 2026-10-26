@@ -1,0 +1,24 @@
+node_modules/
+dist/
+build/
+.env
+.env.local
+.env.*.local
+*.log
+.DS_Store
+
+# Prevent uploading any screenshots or temporary chat explanation images to GitHub
+public/assets/
+public/assets/aistudio/
+.playwright-cli/
+**/Screenshot*
+**/IMG-*
+verify-*.png
+
+# Keep official logos and PWA icons tracked in GitHub
+!public/logos/**
+!public/pwa-192x192.png
+!public/pwa-512x512.png
+!public/pwa-maskable-512x512.png
+!public/apple-touch-icon.png
+!public/icon.svg

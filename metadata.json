@@ -1,0 +1,6 @@
+{
+  "name": "مجمع ميت عزون الطبي - إدارة الجداول",
+  "description": "منصة احترافية لإدارة ونشر وتصدير جداول عيادات مجمع ميت عزون الطبي بجمعية تنمية المجتمع المحلي",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

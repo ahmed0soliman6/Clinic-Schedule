@@ -1,0 +1,1607 @@
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  onAuthStateChanged,
+  signInWithPopup,
+  signOut,
+  User as FirebaseUser,
+} from 'firebase/auth';
+import {
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocs,
+  onSnapshot,
+  serverTimestamp,
+  setDoc,
+} from 'firebase/firestore';
+import {
+  AlertTriangle,
+  Calendar,
+  Copy,
+  Edit3,
+  Eye,
+  History,
+  ListOrdered,
+  LogIn,
+  LogOut,
+  RotateCcw,
+  Send,
+  Settings,
+  Shield,
+  Users,
+  X,
+} from 'lucide-react';
+import {
+  auth,
+  db,
+  googleProvider,
+  handleFirestoreError,
+  mirrorDeleteDocFromDefault,
+  mirrorSetDocToDefault,
+  OperationType,
+  showLocalNotification,
+} from './firebase';
+import {
+  AuditAction,
+  AuditLogEntry,
+  CenterSettings,
+  ConflictInfo,
+  DailyScheduleData,
+  DayId,
+  SaveStatus,
+  ScheduleRow,
+  UserProfile,
+  UserRole,
+} from './types/schedule';
+import {
+  DAYS_LIST,
+  PRIMARY_ADMIN_EMAIL,
+  addScheduleRow,
+  areRowsEqual,
+  canUserEditDay,
+  copyFullDayRows,
+  copyRowToDay,
+  deleteScheduleRow,
+  deleteUserFromList,
+  detectConcurrentConflict,
+  emailToDocId,
+  mergeConflictingRows,
+  moveScheduleRow,
+  normalizeSortOrders,
+  reorderScheduleRows,
+  sanitizeRowForFirestore,
+  updateScheduleRow,
+  upsertUserByEmail,
+} from './utils/scheduleLogic';
+import { SchedulePoster } from './components/SchedulePoster';
+import { ScheduleEditorPanel } from './components/ScheduleEditorPanel';
+import { ShareAndExportBar } from './components/ShareAndExportBar';
+import { CenterSettingsModal } from './components/CenterSettingsModal';
+import { UsersAndAuditModal } from './components/UsersAndAuditModal';
+import { ComplexBrandLogo } from './components/BrandLogos';
+import {
+  NotificationToggleButton,
+  OfflineIndicator,
+  PWAInstallButton,
+} from './components/PWAInstallAndNotifications';
+
+const FALLBACK_SETTINGS: CenterSettings = {
+  complexName: 'مجمع ميت عزون الطبي',
+  associationName: 'جمعية تنمية المجتمع المحلي',
+  registrationNumber: 'مشهرة برقم 2406',
+  rightLogoUrl: '/logos/complex-logo.svg',
+  leftLogoUrl: '/logos/association-logo.svg',
+  address: 'ميت عزون - بجوار المسجد الكبير',
+  whatsappPhone: '01202027567',
+  landlinePhone: '0502053187',
+  dentalPhone: '01515674347',
+  dentalLabel: 'عيادة الأسنان',
+  bgStartColor: '#f3effb',
+  bgEndColor: '#e8dff5',
+  clinicHeaderColor: '#f59e0b',
+  doctorHeaderColor: '#0d9456',
+  fromHeaderColor: '#f59e0b',
+  toHeaderColor: '#0088cc',
+  footerBgColor: '#1e295b',
+};
+
+const STORAGE_KEY = 'meet_azzoun_medical_schedules_v7';
+
+const DEFAULT_USERS_LIST: UserProfile[] = [
+  {
+    uid: emailToDocId(PRIMARY_ADMIN_EMAIL),
+    email: PRIMARY_ADMIN_EMAIL,
+    displayName: 'مدير مجمع ميت عزون الطبي',
+    role: 'ADMIN',
+    allowedDays: DAYS_LIST.map((d) => d.id),
+  },
+  {
+    uid: emailToDocId('editor@meetazzoun.org'),
+    email: 'editor@meetazzoun.org',
+    displayName: 'مسؤول تحديث المواعيد',
+    role: 'EDITOR',
+    allowedDays: DAYS_LIST.map((d) => d.id),
+  },
+];
+
+export default function App() {
+  const urlParams = new URLSearchParams(window.location.search);
+  const initialDayParam = urlParams.get('day') as DayId | null;
+  const isStrictPublicUrl = urlParams.get('view') === 'public';
+
+  const [selectedDay, setSelectedDay] = useState<DayId>(
+    initialDayParam && DAYS_LIST.some((d) => d.id === initialDayParam)
+      ? initialDayParam
+      : 'saturday'
+  );
+
+  const [viewMode, setViewMode] = useState<'public' | 'manage'>(
+    isStrictPublicUrl ? 'public' : 'manage'
+  );
+  const [showAdvancedPanel, setShowAdvancedPanel] = useState(false);
+
+  // Copy full day modal state
+  const [showCopyDayModal, setShowCopyDayModal] = useState(false);
+  const [copyDayTarget, setCopyDayTarget] = useState<DayId>('sunday');
+
+  // Auth & RBAC state
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [activeRole, setActiveRole] = useState<UserRole>('ADMIN');
+  const [allowedDays, setAllowedDays] = useState<DayId[]>(
+    DAYS_LIST.map((d) => d.id)
+  );
+  const [usersList, setUsersList] = useState<UserProfile[]>(DEFAULT_USERS_LIST);
+
+  const [settings, setSettings] = useState<CenterSettings>(FALLBACK_SETTINGS);
+  const [defaultSettings, setDefaultSettings] =
+    useState<CenterSettings>(FALLBACK_SETTINGS);
+  const [schedules, setSchedules] = useState<Record<DayId, DailyScheduleData>>(
+    () => {
+      const emptyMap = {} as Record<DayId, DailyScheduleData>;
+      DAYS_LIST.forEach((d) => {
+        emptyMap[d.id] = {
+          dayId: d.id,
+          dayLabel: d.label,
+          dayOrder: d.order,
+          isPublic: true,
+          hasUnpublishedChanges: false,
+          version: 1,
+          draftRows: [],
+          publishedRows: [],
+          updatedBy: 'system',
+          updatedByEmail: PRIMARY_ADMIN_EMAIL,
+          updatedByName: 'إدارة المجمع',
+          publishedAt: new Date().toISOString(),
+        };
+      });
+      return emptyMap;
+    }
+  );
+  const [isLoaded, setIsLoaded] = useState(false);
+
+  const [undoStacks, setUndoStacks] = useState<Record<DayId, ScheduleRow[][]>>({
+    saturday: [],
+    sunday: [],
+    monday: [],
+    tuesday: [],
+    wednesday: [],
+    thursday: [],
+    friday: [],
+  });
+
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved');
+  const [conflict, setConflict] = useState<ConflictInfo | null>(null);
+  const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
+
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showUsersAuditModal, setShowUsersAuditModal] = useState<
+    'audit' | 'users' | null
+  >(null);
+  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
+
+  const posterRef = useRef<HTMLDivElement | null>(null);
+  const exportPosterRef = useRef<HTMLDivElement | null>(null);
+  const hasSeededFirestoreRef = useRef(false);
+  const localVersionRef = useRef<Record<DayId, number>>({
+    saturday: 1,
+    sunday: 1,
+    monday: 1,
+    tuesday: 1,
+    wednesday: 1,
+    thursday: 1,
+    friday: 1,
+  });
+
+  // 1. Load initial schedules from external JSON or local cache
+  useEffect(() => {
+    let mounted = true;
+    async function loadInitialJson() {
+      try {
+        const res = await fetch('/data/initial-schedules.json');
+        const json = await res.json();
+        if (!mounted) return;
+
+        if (json.settings) {
+          setDefaultSettings(json.settings);
+        }
+
+        const cachedRaw = localStorage.getItem(STORAGE_KEY);
+        if (cachedRaw) {
+          try {
+            const cached = JSON.parse(cachedRaw);
+            if (cached.settings) setSettings(cached.settings);
+            if (cached.schedules) setSchedules(cached.schedules);
+            if (cached.auditLogs) setAuditLogs(cached.auditLogs);
+            if (Array.isArray(cached.usersList) && cached.usersList.length > 0) {
+              setUsersList(cached.usersList);
+            }
+            setIsLoaded(true);
+            return;
+          } catch {
+            // Fall through
+          }
+        }
+
+        if (json.settings) {
+          setSettings(json.settings);
+        }
+        if (json.schedules) {
+          const built = {} as Record<DayId, DailyScheduleData>;
+          DAYS_LIST.forEach((d) => {
+            const dayData = json.schedules[d.id];
+            const rows: ScheduleRow[] = normalizeSortOrders(dayData?.rows || []);
+            built[d.id] = {
+              dayId: d.id,
+              dayLabel: d.label,
+              dayOrder: d.order,
+              isPublic: true,
+              hasUnpublishedChanges: false,
+              version: 1,
+              draftRows: rows,
+              publishedRows: rows,
+              updatedBy: 'system',
+              updatedByEmail: PRIMARY_ADMIN_EMAIL,
+              updatedByName: 'إدارة مجمع ميت عزون',
+              publishedAt: new Date().toISOString(),
+            };
+          });
+          setSchedules(built);
+        }
+        setIsLoaded(true);
+      } catch (err) {
+        console.error('Error loading initial schedules JSON:', err);
+        setIsLoaded(true);
+      }
+    }
+    loadInitialJson();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    try {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ settings, schedules, auditLogs, usersList })
+      );
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, [settings, schedules, auditLogs, usersList, isLoaded]);
+
+  // Helper to seed/sync all data to Firestore (both primary db and defaultDb)
+  const syncAllDataToFirestore = async (
+    currentUserOverride?: FirebaseUser | null
+  ) => {
+    const activeUser = currentUserOverride ?? firebaseUser ?? auth.currentUser;
+    const uid = activeUser?.uid || 'admin-seed';
+    const userEmail = activeUser?.email || PRIMARY_ADMIN_EMAIL;
+    const userName = activeUser?.displayName || 'مدير مجمع ميت عزون الطبي';
+
+    setSaveStatus('saving');
+
+    // 1. Save Center Settings
+    const settingsPayload = {
+      ...settings,
+      updatedBy: uid,
+      updatedByEmail: userEmail,
+      updatedAt: serverTimestamp(),
+    };
+    await mirrorSetDocToDefault('settings', 'center', settingsPayload);
+    if (activeUser) {
+      try {
+        await setDoc(doc(db, 'settings', 'center'), settingsPayload);
+      } catch {
+        // Non-blocking if user lacks admin role
+      }
+    }
+
+    // 2. Save all 7 Daily Schedules for instant persistence
+    for (const day of DAYS_LIST) {
+      const daySched = schedules[day.id];
+      if (!daySched) continue;
+      const sanitizedDraft = normalizeSortOrders(daySched.draftRows).map(
+        (r, i) => sanitizeRowForFirestore(r, i)
+      );
+      const sanitizedPublished = normalizeSortOrders(
+        daySched.publishedRows.length > 0
+          ? daySched.publishedRows
+          : sanitizedDraft
+      ).map((r, i) => sanitizeRowForFirestore(r, i));
+
+      const dayPayload = {
+        dayId: day.id,
+        dayLabel: day.label,
+        dayOrder: day.order,
+        isPublic: true,
+        hasUnpublishedChanges: false,
+        version: daySched.version || 1,
+        draftRows: sanitizedDraft,
+        publishedRows: sanitizedPublished,
+        updatedBy: uid,
+        updatedByEmail: userEmail,
+        updatedByName: userName.slice(0, 120),
+        updatedAt: serverTimestamp(),
+        publishedAt: daySched.publishedAt || new Date().toISOString(),
+      };
+
+      await mirrorSetDocToDefault('schedules', day.id, dayPayload);
+      if (activeUser) {
+        try {
+          await setDoc(doc(db, 'schedules', day.id), dayPayload);
+        } catch {
+          // Non-blocking
+        }
+      }
+    }
+
+    // 3. Save Users / Email Permissions List
+    for (const u of usersList) {
+      const docId = u.uid || emailToDocId(u.email);
+      const userPayload = {
+        uid: docId,
+        email: u.email.trim().toLowerCase(),
+        displayName: (u.displayName || u.email).slice(0, 120),
+        role: u.role,
+        allowedDays: u.allowedDays || DAYS_LIST.map((d) => d.id),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      };
+      await mirrorSetDocToDefault('users', docId, userPayload);
+      if (activeUser) {
+        try {
+          await setDoc(doc(db, 'users', docId), userPayload);
+        } catch {
+          // Non-blocking
+        }
+      }
+    }
+
+    setSaveStatus('saved');
+  };
+
+  // 2. Firebase Authentication listener & Email-Based Role Resolution
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      setFirebaseUser(user);
+      setAuthReady(true);
+
+      if (user && user.email) {
+        const cleanEmail = user.email.trim().toLowerCase();
+        const isPrimaryAdmin = cleanEmail === PRIMARY_ADMIN_EMAIL;
+        const emailDocId = emailToDocId(cleanEmail);
+
+        let resolvedRole: UserRole = isPrimaryAdmin ? 'ADMIN' : 'VIEWER';
+        let resolvedDays: DayId[] = isPrimaryAdmin
+          ? DAYS_LIST.map((d) => d.id)
+          : [];
+
+        // Check local usersList first
+        const localMatch = usersList.find(
+          (u) => u.email.trim().toLowerCase() === cleanEmail
+        );
+        if (localMatch) {
+          resolvedRole = isPrimaryAdmin ? 'ADMIN' : localMatch.role;
+          resolvedDays =
+            localMatch.allowedDays?.length > 0
+              ? localMatch.allowedDays
+              : DAYS_LIST.map((d) => d.id);
+        }
+
+        try {
+          // Check pre-assigned email document in Firestore (/users/{emailDocId})
+          const emailSnap = await getDoc(doc(db, 'users', emailDocId));
+          if (emailSnap.exists()) {
+            const emailData = emailSnap.data() as UserProfile;
+            resolvedRole = isPrimaryAdmin ? 'ADMIN' : emailData.role;
+            resolvedDays =
+              emailData.allowedDays?.length > 0
+                ? emailData.allowedDays
+                : DAYS_LIST.map((d) => d.id);
+          } else {
+            // Also check /users/{user.uid}
+            const uidSnap = await getDoc(doc(db, 'users', user.uid));
+            if (uidSnap.exists()) {
+              const uidData = uidSnap.data() as UserProfile;
+              resolvedRole = isPrimaryAdmin ? 'ADMIN' : uidData.role;
+              resolvedDays =
+                uidData.allowedDays?.length > 0
+                  ? uidData.allowedDays
+                  : DAYS_LIST.map((d) => d.id);
+            }
+          }
+
+          // If Admin, load full users list from Firestore so any added/deleted emails are synced
+          if (isPrimaryAdmin || resolvedRole === 'ADMIN') {
+            try {
+              const allUsersSnap = await getDocs(collection(db, 'users'));
+              if (!allUsersSnap.empty) {
+                const remoteUsers: UserProfile[] = [];
+                allUsersSnap.forEach((docSnap) => {
+                  const data = docSnap.data() as UserProfile;
+                  if (data.email) {
+                    remoteUsers.push({
+                      uid: docSnap.id,
+                      email: data.email.trim().toLowerCase(),
+                      displayName: data.displayName || data.email,
+                      role:
+                        data.email.trim().toLowerCase() === PRIMARY_ADMIN_EMAIL
+                          ? 'ADMIN'
+                          : data.role,
+                      allowedDays: data.allowedDays || DAYS_LIST.map((d) => d.id),
+                    });
+                  }
+                });
+                if (remoteUsers.length > 0) {
+                  setUsersList(remoteUsers);
+                }
+              }
+            } catch {
+              // Ignore list error if collection not yet created
+            }
+          }
+        } catch {
+          // Fallback to local role
+        }
+
+        setActiveRole(resolvedRole);
+        setAllowedDays(resolvedDays);
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  // Automatically initialize/seed Firestore collections when loaded
+  useEffect(() => {
+    if (!isLoaded || !authReady || hasSeededFirestoreRef.current) return;
+    hasSeededFirestoreRef.current = true;
+
+    async function ensureFirestoreInitialized() {
+      try {
+        const satSnap = await getDoc(doc(db, 'schedules', 'saturday'));
+        if (!satSnap.exists()) {
+          await syncAllDataToFirestore(auth.currentUser);
+        } else {
+          // Still mirror to defaultDb so (default) in mitazoun-schedule stays populated
+          await syncAllDataToFirestore(auth.currentUser);
+        }
+      } catch {
+        // Mirror to defaultDb even if unauthenticated
+        await syncAllDataToFirestore(null);
+      }
+    }
+    ensureFirestoreInitialized();
+  }, [isLoaded, authReady]);
+
+  // 3. Single bounded Firestore onSnapshot listener
+  useEffect(() => {
+    if (!authReady || !isLoaded) return;
+
+    const settingsRef = doc(db, 'settings', 'center');
+    const unsubSettings = onSnapshot(
+      settingsRef,
+      (snap) => {
+        if (snap.exists()) {
+          const remoteSettings = snap.data() as CenterSettings;
+          setSettings((prev) => ({ ...prev, ...remoteSettings }));
+        }
+      },
+      (error) => {
+        if (auth.currentUser) {
+          try {
+            handleFirestoreError(error, OperationType.GET, 'settings/center');
+          } catch {
+            // Handled
+          }
+        }
+      }
+    );
+
+    const scheduleRef = doc(db, 'schedules', selectedDay);
+    const unsubSchedule = onSnapshot(
+      scheduleRef,
+      (snap) => {
+        if (snap.exists()) {
+          const remoteDoc = snap.data() as DailyScheduleData;
+          setSchedules((prev) => {
+            const currentLocal = prev[selectedDay];
+            const conflictCheck = detectConcurrentConflict({
+              localBaseVersion: localVersionRef.current[selectedDay] || 1,
+              incomingRemoteSchedule: remoteDoc,
+              currentUserId: auth.currentUser?.uid,
+              hasLocalUnsavedChanges: saveStatus === 'unsaved',
+              localDraftRows: currentLocal?.draftRows || [],
+            });
+
+            if (conflictCheck.hasConflict) {
+              setConflict({
+                dayId: selectedDay,
+                localRows: currentLocal.draftRows,
+                remoteSchedule: remoteDoc,
+                detectedAt: new Date().toISOString(),
+              });
+              setSaveStatus('conflict');
+              return prev;
+            }
+
+            localVersionRef.current[selectedDay] = remoteDoc.version || 1;
+            return {
+              ...prev,
+              [selectedDay]: remoteDoc,
+            };
+          });
+        }
+      },
+      (error) => {
+        if (auth.currentUser) {
+          try {
+            handleFirestoreError(
+              error,
+              OperationType.GET,
+              `schedules/${selectedDay}`
+            );
+          } catch {
+            // Handled
+          }
+        }
+      }
+    );
+
+    return () => {
+      unsubSettings();
+      unsubSchedule();
+    };
+  }, [authReady, isLoaded, selectedDay, saveStatus]);
+
+  const appendAuditLog = async (
+    action: AuditAction,
+    dayId: string,
+    dayLabel: string,
+    details: string
+  ) => {
+    const userId = firebaseUser?.uid || 'local-admin';
+    const userEmail = firebaseUser?.email || PRIMARY_ADMIN_EMAIL;
+    const userName =
+      firebaseUser?.displayName ||
+      (activeRole === 'ADMIN' ? 'مدير النظام' : 'محرر الجداول');
+
+    const newEntry: AuditLogEntry = {
+      id: `audit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      action,
+      dayId,
+      dayLabel,
+      details: details.slice(0, 500),
+      userId,
+      userEmail,
+      userName,
+      createdAtIso: new Date().toISOString(),
+    };
+
+    setAuditLogs((prev) => [newEntry, ...prev.slice(0, 99)]);
+
+    const logPayload = {
+      action: newEntry.action,
+      dayId: newEntry.dayId,
+      dayLabel: newEntry.dayLabel,
+      details: newEntry.details,
+      userId,
+      userEmail,
+      userName: newEntry.userName.slice(0, 120),
+      createdAt: serverTimestamp(),
+    };
+
+    await mirrorSetDocToDefault('auditLogs', newEntry.id, logPayload);
+
+    if (firebaseUser) {
+      const logPath = `auditLogs/${newEntry.id}`;
+      try {
+        await setDoc(doc(collection(db, 'auditLogs'), newEntry.id), {
+          ...logPayload,
+          userId: firebaseUser.uid,
+          userEmail: firebaseUser.email || PRIMARY_ADMIN_EMAIL,
+        });
+      } catch (err) {
+        try {
+          handleFirestoreError(err, OperationType.CREATE, logPath);
+        } catch {
+          // Handled
+        }
+      }
+    }
+  };
+
+  /**
+   * Instant Save to Firestore:
+   * Immediately updates both draftRows and publishedRows so every edit is saved & live right away.
+   */
+  const commitDayScheduleChange = async (
+    targetDayId: DayId,
+    newDraftRows: ScheduleRow[],
+    _newPublishedRows: ScheduleRow[],
+    action: AuditAction,
+    details: string,
+    recordUndo = true
+  ) => {
+    const currentDay = schedules[targetDayId];
+    if (!currentDay) return;
+
+    if (recordUndo) {
+      setUndoStacks((prev) => ({
+        ...prev,
+        [targetDayId]: [
+          ...(prev[targetDayId] || []).slice(-19),
+          currentDay.draftRows,
+        ],
+      }));
+    }
+
+    const sanitizedRows = normalizeSortOrders(newDraftRows).map((r, i) =>
+      sanitizeRowForFirestore(r, i)
+    );
+    const nextVersion = (currentDay.version || 1) + 1;
+    localVersionRef.current[targetDayId] = nextVersion;
+
+    const updatedDay: DailyScheduleData = {
+      ...currentDay,
+      draftRows: sanitizedRows,
+      publishedRows: sanitizedRows,
+      hasUnpublishedChanges: false,
+      version: nextVersion,
+      updatedBy: firebaseUser?.uid || 'local-admin',
+      updatedByEmail: firebaseUser?.email || PRIMARY_ADMIN_EMAIL,
+      updatedByName:
+        firebaseUser?.displayName ||
+        (activeRole === 'ADMIN' ? 'مدير النظام' : 'محرر الجداول'),
+      publishedAt: new Date().toISOString(),
+    };
+
+    setSaveStatus('saving');
+    setSchedules((prev) => ({
+      ...prev,
+      [targetDayId]: updatedDay,
+    }));
+
+    await appendAuditLog(action, targetDayId, currentDay.dayLabel, details);
+
+    const firestorePayload = {
+      dayId: updatedDay.dayId,
+      dayLabel: updatedDay.dayLabel,
+      dayOrder: updatedDay.dayOrder,
+      isPublic: true,
+      hasUnpublishedChanges: false,
+      version: updatedDay.version,
+      draftRows: updatedDay.draftRows,
+      publishedRows: updatedDay.publishedRows,
+      updatedBy: firebaseUser?.uid || 'local-admin',
+      updatedByEmail: firebaseUser?.email || PRIMARY_ADMIN_EMAIL,
+      updatedByName: updatedDay.updatedByName.slice(0, 120),
+      updatedAt: serverTimestamp(),
+      publishedAt: updatedDay.publishedAt,
+    };
+
+    // Always mirror immediately to (default) database in mitazoun-schedule
+    await mirrorSetDocToDefault('schedules', targetDayId, firestorePayload);
+
+    if (firebaseUser) {
+      const path = `schedules/${targetDayId}`;
+      try {
+        await setDoc(doc(db, 'schedules', targetDayId), {
+          ...firestorePayload,
+          updatedBy: firebaseUser.uid,
+          updatedByEmail: firebaseUser.email || PRIMARY_ADMIN_EMAIL,
+        });
+      } catch (err) {
+        try {
+          handleFirestoreError(err, OperationType.WRITE, path);
+        } catch {
+          // Handled
+        }
+      }
+    }
+
+    if (action === 'PUBLISH_DAY') {
+      await showLocalNotification(
+        `تحديث جدول يوم ${currentDay.dayLabel}`,
+        `تم حفظ ونشر جدول عيادات يوم ${currentDay.dayLabel} (${sanitizedRows.length} عيادات) بنجاح.`
+      );
+    }
+
+    setTimeout(() => {
+      setSaveStatus('saved');
+    }, 180);
+  };
+
+  const currentSchedule = schedules[selectedDay];
+  const userCanEditSelectedDay =
+    viewMode === 'manage' &&
+    canUserEditDay(activeRole, allowedDays, selectedDay);
+
+  const displayedRows =
+    viewMode === 'public' || activeRole === 'VIEWER'
+      ? currentSchedule.publishedRows
+      : currentSchedule.draftRows;
+
+  const handleAddRow = (input: Omit<ScheduleRow, 'id' | 'sortOrder'>) => {
+    if (!userCanEditSelectedDay) return;
+    const nextRows = addScheduleRow(currentSchedule.draftRows, input);
+    commitDayScheduleChange(
+      selectedDay,
+      nextRows,
+      nextRows,
+      'CREATE_ROW',
+      `إضافة عيادة «${input.clinicName}» (${input.doctorName})`
+    );
+  };
+
+  const handleUpdateRow = (
+    rowId: string,
+    patch: Partial<Omit<ScheduleRow, 'id' | 'sortOrder'>>
+  ) => {
+    if (!userCanEditSelectedDay) return;
+    const nextRows = updateScheduleRow(
+      currentSchedule.draftRows,
+      rowId,
+      patch
+    );
+    commitDayScheduleChange(
+      selectedDay,
+      nextRows,
+      nextRows,
+      'UPDATE_ROW',
+      `تعديل بيانات عيادة في يوم ${currentSchedule.dayLabel}`
+    );
+  };
+
+  const handleDeleteRow = (rowId: string) => {
+    if (!userCanEditSelectedDay) return;
+    const target = currentSchedule.draftRows.find((r) => r.id === rowId);
+    const nextRows = deleteScheduleRow(currentSchedule.draftRows, rowId);
+    commitDayScheduleChange(
+      selectedDay,
+      nextRows,
+      nextRows,
+      'DELETE_ROW',
+      `حذف عيادة «${target?.clinicName || rowId}»`
+    );
+  };
+
+  const handleMoveRow = (rowId: string, direction: 'up' | 'down') => {
+    if (!userCanEditSelectedDay) return;
+    const nextRows = moveScheduleRow(
+      currentSchedule.draftRows,
+      rowId,
+      direction
+    );
+    commitDayScheduleChange(
+      selectedDay,
+      nextRows,
+      nextRows,
+      'REORDER_ROWS',
+      `تحريك موعد ${direction === 'up' ? 'لأعلى' : 'لأسفل'}`
+    );
+  };
+
+  const handleReorderRows = (fromIndex: number, toIndex: number) => {
+    if (!userCanEditSelectedDay) return;
+    const nextRows = reorderScheduleRows(
+      currentSchedule.draftRows,
+      fromIndex,
+      toIndex
+    );
+    commitDayScheduleChange(
+      selectedDay,
+      nextRows,
+      nextRows,
+      'REORDER_ROWS',
+      `إعادة ترتيب الصفوف من #${fromIndex + 1} إلى #${toIndex + 1}`
+    );
+  };
+
+  const handleCopyRowToDay = (row: ScheduleRow, targetDayId: DayId) => {
+    if (!canUserEditDay(activeRole, allowedDays, targetDayId)) return;
+    const targetSchedule = schedules[targetDayId];
+    const nextTargetRows = copyRowToDay(targetSchedule.draftRows, row);
+    commitDayScheduleChange(
+      targetDayId,
+      nextTargetRows,
+      nextTargetRows,
+      'COPY_ROW',
+      `نسخ عيادة «${row.clinicName}» من يوم ${currentSchedule.dayLabel} إلى يوم ${targetSchedule.dayLabel}`
+    );
+  };
+
+  const handleCopyDayToDay = (targetDayId: DayId) => {
+    if (!canUserEditDay(activeRole, allowedDays, targetDayId)) return;
+    const targetSchedule = schedules[targetDayId];
+    const copiedRows = copyFullDayRows(
+      currentSchedule.draftRows,
+      targetDayId
+    );
+    commitDayScheduleChange(
+      targetDayId,
+      copiedRows,
+      copiedRows,
+      'COPY_DAY',
+      `نسخ جدول يوم ${currentSchedule.dayLabel} بالكامل (${copiedRows.length} عيادات) إلى يوم ${targetSchedule.dayLabel}`
+    );
+  };
+
+  const handleUndo = () => {
+    const stack = undoStacks[selectedDay] || [];
+    if (stack.length === 0) return;
+    const previousRows = stack[stack.length - 1];
+    setUndoStacks((prev) => ({
+      ...prev,
+      [selectedDay]: prev[selectedDay].slice(0, -1),
+    }));
+    commitDayScheduleChange(
+      selectedDay,
+      previousRows,
+      previousRows,
+      'UNDO',
+      `التراجع عن آخر تعديل في جدول يوم ${currentSchedule.dayLabel}`,
+      false
+    );
+  };
+
+  const handlePublishDay = () => {
+    if (!userCanEditSelectedDay) return;
+    commitDayScheduleChange(
+      selectedDay,
+      currentSchedule.draftRows,
+      currentSchedule.draftRows,
+      'PUBLISH_DAY',
+      `نشر جدول يوم ${currentSchedule.dayLabel} للجمهور (${currentSchedule.draftRows.length} عيادات)`
+    );
+  };
+
+  const handleSaveSettings = async (newSettings: CenterSettings) => {
+    if (activeRole !== 'ADMIN') return;
+    setSettings(newSettings);
+    await appendAuditLog(
+      'UPDATE_SETTINGS',
+      'center',
+      'إعدادات المركز',
+      'تحديث إعدادات الهوية البصرية وأرقام التواصل للمركز'
+    );
+
+    const payload = {
+      ...newSettings,
+      updatedBy: firebaseUser?.uid || 'local-admin',
+      updatedByEmail: firebaseUser?.email || PRIMARY_ADMIN_EMAIL,
+      updatedAt: serverTimestamp(),
+    };
+
+    await mirrorSetDocToDefault('settings', 'center', payload);
+
+    if (firebaseUser) {
+      try {
+        await setDoc(doc(db, 'settings', 'center'), {
+          ...payload,
+          updatedBy: firebaseUser.uid,
+          updatedByEmail: firebaseUser.email || PRIMARY_ADMIN_EMAIL,
+        });
+      } catch (err) {
+        try {
+          handleFirestoreError(err, OperationType.WRITE, 'settings/center');
+        } catch {
+          // Handled
+        }
+      }
+    }
+  };
+
+  // Add or update any email address as ADMIN or EDITOR
+  const handleAddOrUpdateUserByEmail = async (input: {
+    email: string;
+    displayName?: string;
+    role: UserRole;
+    allowedDays: DayId[];
+    uid?: string;
+  }) => {
+    if (activeRole !== 'ADMIN') return;
+
+    const cleanEmail = input.email.trim().toLowerCase();
+    const docId = input.uid?.trim() || emailToDocId(cleanEmail);
+    const updatedList = upsertUserByEmail(usersList, {
+      ...input,
+      email: cleanEmail,
+      uid: docId,
+    });
+    setUsersList(updatedList);
+
+    const savedUser = updatedList.find(
+      (u) => u.email.trim().toLowerCase() === cleanEmail
+    );
+    if (!savedUser) return;
+
+    await appendAuditLog(
+      'UPDATE_ROLE',
+      'users',
+      'الصلاحيات',
+      `تعيين صلاحية البريد (${cleanEmail}) إلى ${
+        savedUser.role === 'ADMIN'
+          ? 'أدمن (ADMIN)'
+          : savedUser.role === 'EDITOR'
+          ? 'محرر (EDITOR)'
+          : 'مشاهد (VIEWER)'
+      }`
+    );
+
+    const userPayload = {
+      uid: docId,
+      email: cleanEmail,
+      displayName: savedUser.displayName.slice(0, 120),
+      role: savedUser.role,
+      allowedDays: savedUser.allowedDays,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    };
+
+    await mirrorSetDocToDefault('users', docId, userPayload);
+
+    if (firebaseUser) {
+      try {
+        await setDoc(doc(db, 'users', docId), userPayload);
+      } catch (err) {
+        try {
+          handleFirestoreError(err, OperationType.WRITE, `users/${docId}`);
+        } catch {
+          // Handled
+        }
+      }
+    }
+  };
+
+  // Delete user email from permissions list and Firestore
+  const handleDeleteUser = async (uidOrEmail: string) => {
+    if (activeRole !== 'ADMIN') return;
+    const result = deleteUserFromList(usersList, uidOrEmail);
+    if (result.error || !result.deleted) return;
+
+    setUsersList(result.updated);
+
+    const deletedUser = result.deleted;
+    const emailDocId = emailToDocId(deletedUser.email);
+
+    await appendAuditLog(
+      'DELETE_USER',
+      'users',
+      'الصلاحيات',
+      `حذف البريد الإلكتروني (${deletedUser.email}) وإلغاء صلاحيته`
+    );
+
+    await mirrorDeleteDocFromDefault('users', deletedUser.uid);
+    if (emailDocId !== deletedUser.uid) {
+      await mirrorDeleteDocFromDefault('users', emailDocId);
+    }
+
+    if (firebaseUser) {
+      try {
+        await deleteDoc(doc(db, 'users', deletedUser.uid));
+        if (emailDocId !== deletedUser.uid) {
+          await deleteDoc(doc(db, 'users', emailDocId));
+        }
+      } catch (err) {
+        try {
+          handleFirestoreError(
+            err,
+            OperationType.DELETE,
+            `users/${deletedUser.uid}`
+          );
+        } catch {
+          // Handled
+        }
+      }
+    }
+  };
+
+  const handleSimulateConflict = () => {
+    const simulatedRemoteRow: ScheduleRow = {
+      id: `remote-${Date.now()}`,
+      clinicName: 'القلب',
+      doctorName: 'د/ خالد المنصوري',
+      startTime: '7:00 م',
+      endTime: '9:00 م',
+      icon: 'heart',
+      iconColor: '#e11d48',
+      sortOrder: currentSchedule.draftRows.length,
+    };
+
+    const remoteSchedule: DailyScheduleData = {
+      ...currentSchedule,
+      version: currentSchedule.version + 1,
+      draftRows: [...currentSchedule.draftRows, simulatedRemoteRow],
+      updatedBy: 'colleague-editor',
+      updatedByEmail: 'editor2@meetazzoun.org',
+      updatedByName: 'د/ محمود (محرر مشارك)',
+    };
+
+    setConflict({
+      dayId: selectedDay,
+      localRows: currentSchedule.draftRows,
+      remoteSchedule,
+      detectedAt: new Date().toISOString(),
+    });
+    setSaveStatus('conflict');
+  };
+
+  const handleResolveConflict = (resolution: 'merge' | 'remote' | 'local') => {
+    if (!conflict) return;
+    let resolvedRows: ScheduleRow[] = currentSchedule.draftRows;
+    if (resolution === 'merge') {
+      resolvedRows = mergeConflictingRows(
+        conflict.localRows,
+        conflict.remoteSchedule.draftRows
+      );
+    } else if (resolution === 'remote') {
+      resolvedRows = conflict.remoteSchedule.draftRows;
+    } else {
+      resolvedRows = conflict.localRows;
+    }
+    setConflict(null);
+    commitDayScheduleChange(
+      selectedDay,
+      resolvedRows,
+      resolvedRows,
+      'UPDATE_ROW',
+      `حل تعارض التعديلات المتزامنة`
+    );
+  };
+
+  const handleGoogleSignIn = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (err) {
+      console.warn('Google sign-in popup closed or blocked:', err);
+    }
+  };
+
+  const canUndo = (undoStacks[selectedDay]?.length || 0) > 0;
+  const undoCount = undoStacks[selectedDay]?.length || 0;
+
+  return (
+    <div
+      className="relative min-h-screen bg-gradient-to-b from-[#f3effb] via-slate-50 to-[#e8dff5] text-slate-900 flex flex-col overflow-x-hidden"
+      dir="rtl"
+    >
+      {/* Fixed App Watermark Background using the Official "مجمع ميت عزون الطبي" Logo */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none fixed inset-0 z-0 flex items-center justify-center overflow-hidden"
+      >
+        <ComplexBrandLogo
+          className="w-[540px] max-w-[85vw] h-auto opacity-[0.04]"
+          idSuffix="app-watermark"
+        />
+      </div>
+
+      <OfflineIndicator />
+
+      {/* Top Navigation & Control Header */}
+      <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-purple-200/80 shadow-xs">
+        <div className="mx-auto max-w-7xl px-3 sm:px-6 py-2.5 flex flex-wrap items-center justify-between gap-2.5">
+          {/* Brand Identity with Official Complex Logo */}
+          <div className="flex items-center gap-2.5">
+            <div className="h-10 w-10 sm:h-11 sm:w-11 rounded-xl bg-purple-50/80 p-1 border border-purple-200/70 flex items-center justify-center shrink-0 shadow-2xs">
+              <ComplexBrandLogo
+                className="h-full w-auto object-contain"
+                idSuffix="navbar-logo"
+              />
+            </div>
+            <div>
+              <h1 className="text-xs sm:text-base font-black text-slate-900 leading-tight">
+                {settings.complexName}
+              </h1>
+              <p className="text-[10px] sm:text-[11px] font-bold text-purple-700">
+                {settings.associationName} • {settings.registrationNumber}
+              </p>
+            </div>
+          </div>
+
+          {!isStrictPublicUrl && (
+            <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+              <PWAInstallButton />
+              <NotificationToggleButton />
+
+              <div className="inline-flex rounded-xl bg-slate-100 p-1 border border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setViewMode('manage')}
+                  data-testid="mode-manage-btn"
+                  className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-extrabold transition cursor-pointer ${
+                    viewMode === 'manage'
+                      ? 'bg-purple-700 text-white shadow-xs'
+                      : 'text-slate-700 hover:text-slate-900'
+                  }`}
+                >
+                  <Edit3 className="w-3.5 h-3.5" />
+                  <span>التعديل السريع</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewMode('public')}
+                  data-testid="mode-public-btn"
+                  className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-extrabold transition cursor-pointer ${
+                    viewMode === 'public'
+                      ? 'bg-emerald-600 text-white shadow-xs'
+                      : 'text-slate-700 hover:text-slate-900'
+                  }`}
+                >
+                  <Eye className="w-3.5 h-3.5" />
+                  <span>العرض العام</span>
+                </button>
+              </div>
+
+              {viewMode === 'manage' && (
+                <>
+                  <div className="flex items-center gap-1 rounded-xl border border-purple-200 bg-purple-50/70 px-2 py-1">
+                    <Shield className="w-3.5 h-3.5 text-purple-700" />
+                    <select
+                      id="role-switcher"
+                      aria-label="تبديل دور الصلاحية"
+                      value={activeRole}
+                      onChange={(e) => setActiveRole(e.target.value as UserRole)}
+                      className="bg-transparent text-xs font-extrabold text-purple-950 focus:outline-none cursor-pointer"
+                    >
+                      <option value="ADMIN">ADMIN (أدمن)</option>
+                      <option value="EDITOR">EDITOR (محرر)</option>
+                      <option value="VIEWER">VIEWER (مشاهد)</option>
+                    </select>
+                  </div>
+
+                  {activeRole === 'ADMIN' && (
+                    <button
+                      type="button"
+                      onClick={() => setShowUsersAuditModal('users')}
+                      data-testid="open-users-btn"
+                      aria-label="إدارة البريد والصلاحيات"
+                      className="inline-flex items-center gap-1 rounded-xl border border-purple-200 bg-purple-50 px-2.5 py-1.5 text-xs font-extrabold text-purple-900 hover:bg-purple-100 transition cursor-pointer"
+                    >
+                      <Users className="w-3.5 h-3.5 text-purple-700" />
+                      <span className="hidden sm:inline">البريد والصلاحيات</span>
+                    </button>
+                  )}
+
+                  {(activeRole === 'ADMIN' || activeRole === 'EDITOR') && (
+                    <button
+                      type="button"
+                      onClick={() => setShowUsersAuditModal('audit')}
+                      data-testid="open-audit-btn"
+                      aria-label="سجل التدقيق"
+                      className="inline-flex items-center gap-1 rounded-xl border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-800 hover:bg-slate-50 transition cursor-pointer"
+                    >
+                      <History className="w-3.5 h-3.5 text-purple-700" />
+                      <span className="hidden sm:inline">سجل التدقيق</span>
+                    </button>
+                  )}
+
+                  {activeRole === 'ADMIN' && (
+                    <button
+                      type="button"
+                      onClick={() => setShowSettingsModal(true)}
+                      data-testid="open-settings-btn"
+                      aria-label="إعدادات المركز"
+                      className="inline-flex items-center gap-1 rounded-xl border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-800 hover:bg-slate-50 transition cursor-pointer"
+                    >
+                      <Settings className="w-3.5 h-3.5 text-purple-700" />
+                      <span className="hidden sm:inline">الإعدادات</span>
+                    </button>
+                  )}
+
+                  {firebaseUser ? (
+                    <button
+                      type="button"
+                      onClick={() => signOut(auth)}
+                      className="inline-flex items-center gap-1 rounded-xl border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs font-bold text-rose-800 hover:bg-rose-100 transition cursor-pointer"
+                    >
+                      <LogOut className="w-3.5 h-3.5" />
+                      <span>خروج</span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleGoogleSignIn}
+                      className="inline-flex items-center gap-1 rounded-xl bg-slate-900 px-2.5 py-1.5 text-xs font-bold text-white hover:bg-slate-800 transition cursor-pointer"
+                    >
+                      <LogIn className="w-3.5 h-3.5" />
+                      <span>دخول جوجل</span>
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* 7-Day Navigation Bar */}
+        <div className="border-t border-slate-200/80 bg-gradient-to-r from-purple-950 via-indigo-950 to-purple-950 text-white">
+          <div className="mx-auto max-w-7xl px-3 sm:px-6 py-2 flex items-center justify-between gap-2 overflow-x-auto no-scrollbar">
+            <div className="flex items-center gap-1.5 shrink-0 text-xs font-bold text-purple-200">
+              <Calendar className="w-4 h-4 text-amber-400" />
+              <span>اليوم:</span>
+            </div>
+
+            <nav
+              aria-label="اختيار يوم الجدول"
+              className="flex items-center gap-1.5 sm:gap-2 flex-1 justify-start sm:justify-center overflow-x-auto no-scrollbar py-0.5"
+            >
+              {DAYS_LIST.map((day) => {
+                const isSelected = selectedDay === day.id;
+                const daySched = schedules[day.id];
+                const rowCount =
+                  viewMode === 'public' || activeRole === 'VIEWER'
+                    ? daySched?.publishedRows?.length || 0
+                    : daySched?.draftRows?.length || 0;
+                const hasDraftDiff =
+                  viewMode === 'manage' && daySched?.hasUnpublishedChanges;
+
+                return (
+                  <button
+                    key={day.id}
+                    type="button"
+                    onClick={() => {
+                      setSelectedDay(day.id);
+                      setSelectedRowId(null);
+                    }}
+                    data-testid={`day-tab-${day.id}`}
+                    aria-current={isSelected ? 'page' : undefined}
+                    className={`relative inline-flex items-center gap-1.5 rounded-xl px-3 sm:px-4 py-1.5 text-xs sm:text-sm font-extrabold transition shrink-0 cursor-pointer ${
+                      isSelected
+                        ? 'bg-amber-400 text-slate-950 shadow-md scale-105'
+                        : 'bg-white/10 text-white hover:bg-white/20'
+                    }`}
+                  >
+                    <span>{day.label}</span>
+                    <span
+                      className={`rounded-full px-1.5 py-0.2 text-[10px] font-black ${
+                        isSelected
+                          ? 'bg-slate-950/15 text-slate-950'
+                          : 'bg-white/15 text-purple-100'
+                      }`}
+                    >
+                      {rowCount}
+                    </span>
+                    {hasDraftDiff && (
+                      <span
+                        title="توجد مسودة غير منشورة لهذا اليوم"
+                        className="absolute -top-1 -left-1 h-2.5 w-2.5 rounded-full bg-emerald-400 ring-2 ring-purple-950"
+                      />
+                    )}
+                  </button>
+                );
+              })}
+            </nav>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Content Area */}
+      <main className="relative z-10 mx-auto w-full max-w-7xl flex-1 px-2 sm:px-6 py-4 sm:py-6 space-y-4">
+        {/* Concurrent Conflict Resolution Banner */}
+        {conflict && (
+          <div
+            role="alert"
+            data-testid="conflict-banner"
+            className="mx-auto max-w-[780px] rounded-2xl bg-rose-50 border-2 border-rose-300 p-4 text-rose-950 shadow-sm"
+          >
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="w-6 h-6 text-rose-600 shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <h4 className="font-extrabold text-sm">
+                  تنبيه: تم اكتشاف تعديل متزامن على جدول يوم {currentSchedule.dayLabel}!
+                </h4>
+                <p className="text-xs text-rose-800 mt-1 leading-relaxed">
+                  قام المستخدم{' '}
+                  <strong>
+                    {conflict.remoteSchedule.updatedByName ||
+                      conflict.remoteSchedule.updatedByEmail}
+                  </strong>{' '}
+                  بحفظ نسخة أحدث أثناء عملك على الجدول. اختر طريقة المعالجة:
+                </p>
+                <div className="flex flex-wrap gap-2 mt-3">
+                  <button
+                    type="button"
+                    onClick={() => handleResolveConflict('merge')}
+                    className="rounded-lg bg-rose-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-rose-800"
+                  >
+                    دمج التعديلات معًا بدون فقدان
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleResolveConflict('remote')}
+                    className="rounded-lg bg-white border border-rose-300 px-3 py-1.5 text-xs font-bold text-rose-900 hover:bg-rose-100"
+                  >
+                    اعتماد نسخة الزميل الأحدث
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleResolveConflict('local')}
+                    className="rounded-lg bg-white border border-rose-300 px-3 py-1.5 text-xs font-bold text-rose-900 hover:bg-rose-100"
+                  >
+                    الاحتفاظ بتعديلاتي فقط
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Quick Simplified Action Toolbar for Editors */}
+        {userCanEditSelectedDay && (
+          <div className="mx-auto max-w-[780px] rounded-2xl bg-white/95 backdrop-blur-xs p-3 sm:p-4 shadow-xs border border-purple-100 space-y-2.5">
+            {/* Row 1: Save Status Badge + Primary Publish Action */}
+            <div className="flex items-center justify-between gap-2">
+              <span
+                data-testid="save-status-indicator"
+                className="inline-flex items-center gap-1.5 text-[11px] sm:text-xs font-extrabold text-emerald-700 bg-emerald-50 px-3 py-1.5 rounded-full border border-emerald-200 whitespace-nowrap"
+              >
+                <span className="h-2 w-2 rounded-full bg-emerald-500 shrink-0" />
+                <span>
+                  {saveStatus === 'saving'
+                    ? 'جارٍ الحفظ الفوري...'
+                    : 'حفظ فوري تلقائي على Firestore'}
+                </span>
+              </span>
+
+              <button
+                type="button"
+                onClick={handlePublishDay}
+                className={`inline-flex items-center justify-center gap-1.5 rounded-xl px-3.5 py-1.5 text-[11px] sm:text-xs font-extrabold text-white whitespace-nowrap shadow-xs transition cursor-pointer ${
+                  currentSchedule.hasUnpublishedChanges
+                    ? 'bg-emerald-600 hover:bg-emerald-700 ring-2 ring-emerald-300'
+                    : 'bg-purple-700 hover:bg-purple-800'
+                }`}
+              >
+                <Send className="w-3.5 h-3.5 shrink-0" />
+                <span>
+                  {currentSchedule.hasUnpublishedChanges
+                    ? 'اعتماد ونشر التعديلات'
+                    : 'معتمد ومنشور'}
+                </span>
+              </button>
+            </div>
+
+            {/* Row 2: 3 Equal Columns (Undo | Copy Day | Toggle Rows Panel) */}
+            <div className="grid grid-cols-3 gap-2">
+              <button
+                type="button"
+                onClick={handleUndo}
+                disabled={!canUndo}
+                className="w-full inline-flex items-center justify-center gap-1 rounded-xl border border-slate-300 bg-white px-2 py-2 text-[11px] sm:text-xs font-extrabold text-slate-700 whitespace-nowrap hover:bg-slate-50 disabled:opacity-40 transition cursor-pointer"
+              >
+                <RotateCcw className="w-3.5 h-3.5 shrink-0" />
+                <span>تراجع ({undoCount})</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setCopyDayTarget(
+                    selectedDay === 'saturday' ? 'sunday' : 'saturday'
+                  );
+                  setShowCopyDayModal(true);
+                }}
+                className="w-full inline-flex items-center justify-center gap-1 rounded-xl border border-indigo-200 bg-indigo-50 px-2 py-2 text-[11px] sm:text-xs font-extrabold text-indigo-900 whitespace-nowrap hover:bg-indigo-100 transition cursor-pointer"
+              >
+                <Copy className="w-3.5 h-3.5 shrink-0" />
+                <span>نسخ اليوم</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowAdvancedPanel(!showAdvancedPanel)}
+                className="w-full inline-flex items-center justify-center gap-1 rounded-xl border border-slate-300 bg-slate-50 px-2 py-2 text-[11px] sm:text-xs font-extrabold text-slate-700 whitespace-nowrap hover:bg-slate-100 transition cursor-pointer"
+              >
+                <ListOrdered className="w-3.5 h-3.5 shrink-0" />
+                <span>
+                  {showAdvancedPanel ? 'إخفاء القائمة' : 'قائمة الصفوف'}
+                </span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Export & Share Bar (2 rows x 3 columns grid + 4:5 fixed image export) */}
+        <ShareAndExportBar
+          dayId={selectedDay}
+          dayLabel={currentSchedule.dayLabel}
+          rows={displayedRows}
+          settings={settings}
+          posterRef={exportPosterRef}
+        />
+
+        {/* Main Workspace: Interactive Poster Table (+ Optional Side Panel) */}
+        <div
+          className={
+            showAdvancedPanel && userCanEditSelectedDay
+              ? 'grid grid-cols-1 lg:grid-cols-12 gap-6 items-start'
+              : 'mx-auto max-w-[780px]'
+          }
+        >
+          {showAdvancedPanel && userCanEditSelectedDay && (
+            <div className="lg:col-span-5 order-2 lg:order-1">
+              <ScheduleEditorPanel
+                dayId={selectedDay}
+                dayLabel={currentSchedule.dayLabel}
+                draftRows={currentSchedule.draftRows}
+                publishedRows={currentSchedule.publishedRows}
+                hasUnpublishedChanges={currentSchedule.hasUnpublishedChanges}
+                saveStatus={saveStatus}
+                canUndo={canUndo}
+                undoCount={undoCount}
+                selectedRowId={selectedRowId}
+                onSelectRow={setSelectedRowId}
+                onAddRow={handleAddRow}
+                onUpdateRow={handleUpdateRow}
+                onDeleteRow={handleDeleteRow}
+                onMoveRow={handleMoveRow}
+                onReorderRows={handleReorderRows}
+                onCopyRowToDay={handleCopyRowToDay}
+                onCopyDayToDay={handleCopyDayToDay}
+                onUndo={handleUndo}
+                onPublishDay={handlePublishDay}
+                conflict={conflict}
+                onResolveConflict={handleResolveConflict}
+                onSimulateConflict={handleSimulateConflict}
+              />
+            </div>
+          )}
+
+          <div
+            className={
+              showAdvancedPanel && userCanEditSelectedDay
+                ? 'lg:col-span-7 order-1 lg:order-2'
+                : 'w-full'
+            }
+          >
+            <SchedulePoster
+              dayId={selectedDay}
+              dayLabel={currentSchedule.dayLabel}
+              rows={displayedRows}
+              settings={settings}
+              posterRef={posterRef}
+              isEditable={userCanEditSelectedDay}
+              isExporting={false}
+              onUpdateRow={handleUpdateRow}
+              onAddRow={handleAddRow}
+              onDeleteRow={handleDeleteRow}
+              onMoveRow={handleMoveRow}
+              onCopyRowToDay={handleCopyRowToDay}
+            />
+          </div>
+        </div>
+
+        {/* Dedicated 780x975 (4:5) Pure Export Poster Node */}
+        <div
+          aria-hidden="true"
+          style={{
+            position: 'fixed',
+            left: '-9999px',
+            top: '0',
+            width: '780px',
+            pointerEvents: 'none',
+            zIndex: -50,
+          }}
+        >
+          <SchedulePoster
+            dayId={selectedDay}
+            dayLabel={currentSchedule.dayLabel}
+            rows={displayedRows}
+            settings={settings}
+            posterRef={exportPosterRef}
+            isEditable={false}
+            isExporting={true}
+          />
+        </div>
+      </main>
+
+      {/* Copy Full Day Modal */}
+      {showCopyDayModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="نسخ جدول اليوم إلى يوم آخر"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs"
+        >
+          <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl border border-slate-200">
+            <div className="flex items-center justify-between mb-3">
+              <h4 className="text-base font-extrabold text-slate-900">
+                نسخ جدول يوم {currentSchedule.dayLabel} بالكامل
+              </h4>
+              <button
+                type="button"
+                onClick={() => setShowCopyDayModal(false)}
+                className="text-slate-500 hover:text-slate-800"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="mb-4">
+              <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                اختر اليوم المستهدف لنسخ المواعيد إليه:
+              </label>
+              <select
+                value={copyDayTarget}
+                onChange={(e) => setCopyDayTarget(e.target.value as DayId)}
+                className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm font-bold text-slate-900"
+              >
+                {DAYS_LIST.filter((d) => d.id !== selectedDay).map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowCopyDayModal(false)}
+                className="rounded-xl border border-slate-300 px-4 py-2 text-xs font-bold text-slate-700"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  handleCopyDayToDay(copyDayTarget);
+                  setShowCopyDayModal(false);
+                }}
+                className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-extrabold text-white hover:bg-indigo-700"
+              >
+                تأكيد النسخ
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showSettingsModal && activeRole === 'ADMIN' && (
+        <CenterSettingsModal
+          settings={settings}
+          defaultSettings={defaultSettings}
+          onSave={handleSaveSettings}
+          onClose={() => setShowSettingsModal(false)}
+        />
+      )}
+
+      {showUsersAuditModal && (
+        <UsersAndAuditModal
+          initialTab={showUsersAuditModal}
+          auditLogs={auditLogs}
+          users={usersList}
+          currentUserRole={activeRole}
+          onAddOrUpdateUserByEmail={handleAddOrUpdateUserByEmail}
+          onDeleteUser={handleDeleteUser}
+          onSyncAllToFirestore={() => syncAllDataToFirestore(firebaseUser)}
+          onSimulateConflict={handleSimulateConflict}
+          onClose={() => setShowUsersAuditModal(null)}
+        />
+      )}
+    </div>
+  );
+}

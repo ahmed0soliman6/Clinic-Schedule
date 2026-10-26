@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="112" fill="#ffffff" />
+  <g transform="translate(6, -10)">
+    <defs>
+      <mask id="iconCrossCutout">
+        <rect x="0" y="0" width="500" height="540" fill="white" />
+        <rect x="130" y="102" width="84" height="230" rx="26" fill="black" />
+        <rect x="20" y="182" width="282" height="96" rx="26" fill="black" />
+      </mask>
+    </defs>
+    <g mask="url(#iconCrossCutout)">
+      <path
+        d="M 250 335
+           C 250 335, 42 220, 42 112
+           C 42 46, 95 10, 154 10
+           C 198 10, 232 34, 250 66
+           C 268 34, 302 10, 346 10
+           C 405 10, 458 46, 458 112
+           C 458 220, 250 335, 250 335 Z"
+        fill="#68e8b7"
+      />
+      <path
+        d="M 250 335
+           C 250 335, 86 236, 86 142
+           C 86 88, 130 58, 178 58
+           C 214 58, 238 78, 250 105
+           C 262 78, 286 58, 322 58
+           C 370 58, 414 88, 414 142
+           C 414 236, 250 335, 250 335 Z"
+        fill="#2aa4df"
+      />
+    </g>
+    <text x="212" y="246" text-anchor="middle" fill="#194299" font-family="'Cairo', sans-serif" font-weight="900" font-size="68">مجمع</text>
+    <text x="250" y="404" text-anchor="middle" fill="#194299" font-family="'Cairo', sans-serif" font-weight="900" font-size="72">ميت عزون الطبي</text>
+    <text x="250" y="475" text-anchor="middle" fill="#234fa2" font-family="'Cairo', sans-serif" font-weight="600" font-size="33">جمعية تنمية المجتمع المحلي</text>
+    <text x="250" y="516" text-anchor="middle" fill="#234fa2" font-family="'Cairo', sans-serif" font-weight="600" font-size="32">مشهرة برقم 2406</text>
+  </g>
+</svg>

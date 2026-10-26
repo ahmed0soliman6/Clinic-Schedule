@@ -1,0 +1,267 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net: Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Connection health check endpoint
+    match /test/connection {
+      allow get: if true;
+      allow list, write: if false;
+    }
+
+    // 2. Hardened Global Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isSuperAdminEmail() {
+      return isSignedIn() && request.auth.token.email == 'ahmed0soliman6@gmail.com';
+    }
+
+    function isAdmin() {
+      return isSuperAdminEmail() ||
+        (isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid))) ||
+        (isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'ADMIN');
+    }
+
+    function isEditorForDay(dayId) {
+      return isAdmin() ||
+        (isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'EDITOR' &&
+          dayId in get(/databases/$(database)/documents/users/$(request.auth.uid)).data.allowedDays);
+    }
+
+    function isStaff() {
+      return isAdmin() ||
+        (isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['ADMIN', 'EDITOR']);
+    }
+
+    // 3. Entity Validation Blueprints
+    function isValidCenterSettings(data) {
+      return data.keys().hasAll([
+          'complexName', 'associationName', 'registrationNumber',
+          'rightLogoUrl', 'leftLogoUrl', 'address',
+          'whatsappPhone', 'landlinePhone', 'dentalPhone', 'dentalLabel',
+          'bgStartColor', 'bgEndColor', 'clinicHeaderColor',
+          'doctorHeaderColor', 'fromHeaderColor', 'toHeaderColor',
+          'footerBgColor', 'updatedBy', 'updatedByEmail', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'complexName', 'associationName', 'registrationNumber',
+          'rightLogoUrl', 'leftLogoUrl', 'address',
+          'whatsappPhone', 'landlinePhone', 'dentalPhone', 'dentalLabel',
+          'bgStartColor', 'bgEndColor', 'clinicHeaderColor',
+          'doctorHeaderColor', 'fromHeaderColor', 'toHeaderColor',
+          'footerBgColor', 'updatedBy', 'updatedByEmail', 'updatedAt'
+        ]) &&
+        data.complexName is string && data.complexName.size() >= 1 && data.complexName.size() <= 120 &&
+        data.associationName is string && data.associationName.size() >= 1 && data.associationName.size() <= 160 &&
+        data.registrationNumber is string && data.registrationNumber.size() >= 1 && data.registrationNumber.size() <= 60 &&
+        data.rightLogoUrl is string && data.rightLogoUrl.size() >= 1 && data.rightLogoUrl.size() <= 500 &&
+        data.leftLogoUrl is string && data.leftLogoUrl.size() >= 1 && data.leftLogoUrl.size() <= 500 &&
+        data.address is string && data.address.size() >= 1 && data.address.size() <= 200 &&
+        data.whatsappPhone is string && data.whatsappPhone.size() >= 1 && data.whatsappPhone.size() <= 40 &&
+        data.landlinePhone is string && data.landlinePhone.size() >= 1 && data.landlinePhone.size() <= 40 &&
+        data.dentalPhone is string && data.dentalPhone.size() >= 1 && data.dentalPhone.size() <= 40 &&
+        data.dentalLabel is string && data.dentalLabel.size() >= 1 && data.dentalLabel.size() <= 60 &&
+        data.bgStartColor is string && data.bgStartColor.size() >= 4 && data.bgStartColor.size() <= 30 &&
+        data.bgEndColor is string && data.bgEndColor.size() >= 4 && data.bgEndColor.size() <= 30 &&
+        data.clinicHeaderColor is string && data.clinicHeaderColor.size() >= 4 && data.clinicHeaderColor.size() <= 30 &&
+        data.doctorHeaderColor is string && data.doctorHeaderColor.size() >= 4 && data.doctorHeaderColor.size() <= 30 &&
+        data.fromHeaderColor is string && data.fromHeaderColor.size() >= 4 && data.fromHeaderColor.size() <= 30 &&
+        data.toHeaderColor is string && data.toHeaderColor.size() >= 4 && data.toHeaderColor.size() <= 30 &&
+        data.footerBgColor is string && data.footerBgColor.size() >= 4 && data.footerBgColor.size() <= 30 &&
+        data.updatedBy is string && data.updatedBy.size() >= 1 && data.updatedBy.size() <= 128 &&
+        data.updatedBy == request.auth.uid &&
+        data.updatedByEmail is string && data.updatedByEmail.size() >= 3 && data.updatedByEmail.size() <= 160 &&
+        data.updatedAt is timestamp && data.updatedAt == request.time;
+    }
+
+    function isValidRowItem(row) {
+      return row is map &&
+        row.keys().hasAll(['id', 'clinicName', 'doctorName', 'startTime', 'endTime', 'icon', 'iconColor', 'sortOrder']) &&
+        row.keys().hasOnly(['id', 'clinicName', 'doctorName', 'startTime', 'endTime', 'icon', 'iconColor', 'sortOrder']) &&
+        row.id is string && row.id.size() >= 1 && row.id.size() <= 80 &&
+        row.clinicName is string && row.clinicName.size() >= 1 && row.clinicName.size() <= 120 &&
+        row.doctorName is string && row.doctorName.size() >= 1 && row.doctorName.size() <= 120 &&
+        row.startTime is string && row.startTime.size() >= 1 && row.startTime.size() <= 40 &&
+        row.endTime is string && row.endTime.size() >= 1 && row.endTime.size() <= 40 &&
+        row.icon is string && row.icon.size() >= 1 && row.icon.size() <= 40 &&
+        row.iconColor is string && row.iconColor.size() >= 4 && row.iconColor.size() <= 30 &&
+        row.sortOrder is int && row.sortOrder >= 0 && row.sortOrder <= 500;
+    }
+
+    function isValidRowsList(rows) {
+      return rows is list &&
+        rows.size() <= 60 &&
+        (rows.size() == 0 || isValidRowItem(rows[0]));
+    }
+
+    function isValidDailySchedule(data) {
+      return data.keys().hasAll([
+          'dayId', 'dayLabel', 'dayOrder', 'isPublic', 'hasUnpublishedChanges',
+          'version', 'draftRows', 'publishedRows', 'updatedBy',
+          'updatedByEmail', 'updatedByName', 'updatedAt', 'publishedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'dayId', 'dayLabel', 'dayOrder', 'isPublic', 'hasUnpublishedChanges',
+          'version', 'draftRows', 'publishedRows', 'updatedBy',
+          'updatedByEmail', 'updatedByName', 'updatedAt', 'publishedAt'
+        ]) &&
+        data.dayId is string && data.dayId in ['saturday', 'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday'] &&
+        data.dayLabel is string && data.dayLabel.size() >= 3 && data.dayLabel.size() <= 30 &&
+        data.dayOrder is int && data.dayOrder >= 0 && data.dayOrder <= 6 &&
+        data.isPublic is bool &&
+        data.hasUnpublishedChanges is bool &&
+        data.version is int && data.version >= 1 && data.version <= 1000000 &&
+        isValidRowsList(data.draftRows) &&
+        isValidRowsList(data.publishedRows) &&
+        data.updatedBy is string && data.updatedBy.size() >= 1 && data.updatedBy.size() <= 128 &&
+        data.updatedBy == request.auth.uid &&
+        data.updatedByEmail is string && data.updatedByEmail.size() >= 3 && data.updatedByEmail.size() <= 160 &&
+        data.updatedByName is string && data.updatedByName.size() >= 1 && data.updatedByName.size() <= 120 &&
+        data.updatedAt is timestamp && data.updatedAt == request.time &&
+        data.publishedAt is string && data.publishedAt.size() >= 1 && data.publishedAt.size() <= 60;
+    }
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'allowedDays', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'allowedDays', 'createdAt', 'updatedAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
+        data.role is string && data.role in ['ADMIN', 'EDITOR', 'VIEWER'] &&
+        data.allowedDays is list && data.allowedDays.size() <= 7 &&
+        (data.allowedDays.size() == 0 || (data.allowedDays[0] is string && data.allowedDays[0].size() <= 20)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp && data.updatedAt == request.time;
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['action', 'dayId', 'dayLabel', 'details', 'userId', 'userEmail', 'userName', 'createdAt']) &&
+        data.keys().hasOnly(['action', 'dayId', 'dayLabel', 'details', 'userId', 'userEmail', 'userName', 'createdAt']) &&
+        data.action is string && data.action in [
+          'CREATE_ROW', 'UPDATE_ROW', 'DELETE_ROW', 'REORDER_ROWS',
+          'COPY_ROW', 'COPY_DAY', 'PUBLISH_DAY', 'UPDATE_SETTINGS',
+          'UPDATE_ROLE', 'DELETE_USER', 'SEED_DATA', 'UNDO'
+        ] &&
+        data.dayId is string && data.dayId.size() >= 1 && data.dayId.size() <= 40 &&
+        data.dayLabel is string && data.dayLabel.size() >= 1 && data.dayLabel.size() <= 60 &&
+        data.details is string && data.details.size() >= 1 && data.details.size() <= 500 &&
+        data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+        data.userId == request.auth.uid &&
+        data.userEmail is string && data.userEmail.size() >= 3 && data.userEmail.size() <= 160 &&
+        data.userName is string && data.userName.size() >= 1 && data.userName.size() <= 120 &&
+        data.createdAt is timestamp && data.createdAt == request.time;
+    }
+
+    // 4. Collection Rules
+    match /admins/{adminId} {
+      allow get: if isValidId(adminId) && (isOwner(adminId) || isAdmin());
+      allow list: if isSuperAdminEmail();
+      allow create, update, delete: if isValidId(adminId) && isSuperAdminEmail();
+    }
+
+    match /settings/{settingId} {
+      // Public visitors can read the center branding document 'center'
+      allow get: if isValidId(settingId) && (settingId == 'center' || isStaff());
+      allow list: if false;
+      allow create: if isSignedIn() && isValidId(settingId) && isValidCenterSettings(incoming()) && isAdmin();
+      allow update: if isSignedIn() && isValidId(settingId) && isValidCenterSettings(incoming()) && (
+        isAdmin() &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'complexName', 'associationName', 'registrationNumber',
+          'rightLogoUrl', 'leftLogoUrl', 'address',
+          'whatsappPhone', 'landlinePhone', 'dentalPhone', 'dentalLabel',
+          'bgStartColor', 'bgEndColor', 'clinicHeaderColor',
+          'doctorHeaderColor', 'fromHeaderColor', 'toHeaderColor',
+          'footerBgColor', 'updatedBy', 'updatedByEmail', 'updatedAt'
+        ])
+      );
+      allow delete: if false;
+    }
+
+    match /schedules/{dayId} {
+      // Public can read individual day schedule docs; list requires resource.data.isPublic == true
+      allow get: if isValidId(dayId) && (resource == null || existing().isPublic == true || isStaff());
+      allow list: if existing().isPublic == true || isSuperAdminEmail();
+      allow create: if isSignedIn() && isValidId(dayId) && isValidDailySchedule(incoming()) &&
+        incoming().dayId == dayId && isEditorForDay(dayId);
+      allow update: if isSignedIn() && isValidId(dayId) && isValidDailySchedule(incoming()) &&
+        incoming().dayId == existing().dayId &&
+        incoming().dayOrder == existing().dayOrder && (
+          isAdmin() || (
+            isEditorForDay(dayId) &&
+            incoming().version == existing().version + 1 &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'dayLabel', 'isPublic', 'hasUnpublishedChanges', 'version',
+              'draftRows', 'publishedRows', 'updatedBy', 'updatedByEmail',
+              'updatedByName', 'updatedAt', 'publishedAt'
+            ])
+          )
+        );
+      allow delete: if false;
+    }
+
+    match /users/{userId} {
+      // Strict PII Isolation: only profile owner (by uid or verified email) or Admin can read
+      allow get: if isValidId(userId) && (
+        isOwner(userId) ||
+        isAdmin() ||
+        (isSignedIn() && resource != null && existing().email == request.auth.token.email)
+      );
+      allow list: if isSuperAdminEmail() || (isSignedIn() && existing().uid == request.auth.uid);
+      allow create: if isSignedIn() && isValidId(userId) && isValidUserProfile(incoming()) &&
+        incoming().uid == userId &&
+        incoming().createdAt == request.time && (
+          isAdmin() ||
+          (isOwner(userId) && incoming().role == 'VIEWER' && incoming().allowedDays.size() == 0)
+        );
+      allow update: if isSignedIn() && isValidId(userId) && isValidUserProfile(incoming()) && (
+        (
+          isAdmin() &&
+          incoming().uid == existing().uid &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName', 'role', 'allowedDays', 'updatedAt'])
+        ) ||
+        (
+          isOwner(userId) &&
+          incoming().uid == existing().uid &&
+          incoming().role == existing().role &&
+          incoming().allowedDays == existing().allowedDays &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'updatedAt'])
+        )
+      );
+      allow delete: if isValidId(userId) && isAdmin();
+    }
+
+    match /auditLogs/{logId} {
+      allow get: if isValidId(logId) && isStaff();
+      allow list: if isSuperAdminEmail() || (isSignedIn() && existing().userId == request.auth.uid);
+      allow create: if isSignedIn() && isValidId(logId) && isValidAuditLog(incoming()) && isStaff();
+      allow update, delete: if false;
+    }
+  }
+}
