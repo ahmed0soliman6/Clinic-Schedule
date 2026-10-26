@@ -87,28 +87,28 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
   const getExportClinicFontSize = (text: string): string => {
     const len = (text || '').trim().length;
     const base =
-      rowCount <= 4 ? 30 : rowCount <= 6 ? 27 : rowCount <= 8 ? 25 : rowCount <= 10 ? 22 : 20;
-    if (len >= 16) return `${Math.min(base, 18.5)}px`;
-    if (len >= 13) return `${Math.min(base, 20.5)}px`;
-    if (len >= 10) return `${Math.min(base, 24)}px`;
+      rowCount <= 4 ? 36 : rowCount <= 6 ? 33 : rowCount <= 8 ? 30 : rowCount <= 10 ? 26 : 23;
+    if (len >= 18) return `${Math.min(base, 22)}px`;
+    if (len >= 14) return `${Math.min(base, 25)}px`;
+    if (len >= 10) return `${Math.min(base, 29)}px`;
     return `${base}px`;
   };
 
   const getExportDoctorFontSize = (text: string): string => {
     const len = (text || '').trim().length;
     const base =
-      rowCount <= 4 ? 34 : rowCount <= 6 ? 31 : rowCount <= 8 ? 29 : rowCount <= 10 ? 26 : 23;
-    if (len >= 22) return `${Math.min(base, 21)}px`;
-    if (len >= 18) return `${Math.min(base, 24.5)}px`;
-    if (len >= 15) return `${Math.min(base, 27.5)}px`;
+      rowCount <= 4 ? 40 : rowCount <= 6 ? 36 : rowCount <= 8 ? 33 : rowCount <= 10 ? 29 : 26;
+    if (len >= 22) return `${Math.min(base, 25)}px`;
+    if (len >= 18) return `${Math.min(base, 28)}px`;
+    if (len >= 14) return `${Math.min(base, 32)}px`;
     return `${base}px`;
   };
 
   const getExportTimeFontSize = (text: string): string => {
     const len = (text || '').trim().length;
     const base =
-      rowCount <= 4 ? 28 : rowCount <= 6 ? 26 : rowCount <= 8 ? 24 : rowCount <= 10 ? 22 : 19;
-    if (len >= 8) return `${Math.min(base, 20)}px`;
+      rowCount <= 4 ? 32 : rowCount <= 6 ? 29 : rowCount <= 8 ? 27 : rowCount <= 10 ? 24 : 21;
+    if (len >= 9) return `${Math.min(base, 22)}px`;
     return `${base}px`;
   };
 
@@ -512,7 +512,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                         className={`min-w-0 flex-1 text-center text-slate-950 flex items-center justify-center ${
                           isExporting
                             ? 'font-black leading-tight whitespace-nowrap overflow-hidden'
-                            : 'font-extrabold text-[11px] sm:text-base leading-snug'
+                            : 'font-extrabold text-xs sm:text-lg lg:text-xl leading-snug'
                         }`}
                       >
                         {row.clinicName ? (
@@ -548,7 +548,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                       className={`min-w-0 overflow-hidden bg-[#f1f5f2] flex items-center justify-center text-center text-slate-950 relative ${
                         isExporting
                           ? 'px-1.5 py-0.5 h-full font-black leading-tight whitespace-nowrap'
-                          : 'px-1 sm:px-2.5 py-2 sm:py-2.5 font-extrabold text-[11px] sm:text-base leading-snug'
+                          : 'px-1.5 sm:px-3 py-2 sm:py-2.5 font-extrabold text-xs sm:text-lg lg:text-xl leading-snug'
                       } ${
                         showControls
                           ? 'cursor-pointer hover:bg-emerald-50/90 hover:ring-2 hover:ring-inset hover:ring-emerald-500 transition'
@@ -635,7 +635,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                       className={`min-w-0 overflow-hidden bg-[#fdf9f2] flex items-center justify-center px-1 text-center text-slate-950 tracking-tight whitespace-nowrap relative ${
                         isExporting
                           ? 'py-0.5 h-full font-black leading-none'
-                          : 'py-2 sm:py-2.5 font-extrabold text-[11px] sm:text-base leading-none'
+                          : 'py-2 sm:py-2.5 font-extrabold text-xs sm:text-base lg:text-lg leading-none'
                       } ${
                         showControls
                           ? 'cursor-pointer hover:bg-amber-50/90 hover:ring-2 hover:ring-inset hover:ring-amber-400 transition'
@@ -672,7 +672,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                       className={`min-w-0 overflow-hidden bg-[#eef6fc] flex items-center justify-center px-1 text-center text-slate-950 tracking-tight whitespace-nowrap relative ${
                         isExporting
                           ? 'py-0.5 h-full font-black leading-none'
-                          : 'py-2 sm:py-2.5 font-extrabold text-[11px] sm:text-base leading-none'
+                          : 'py-2 sm:py-2.5 font-extrabold text-xs sm:text-base lg:text-lg leading-none'
                       } ${
                         showControls
                           ? 'cursor-pointer hover:bg-sky-50/90 hover:ring-2 hover:ring-inset hover:ring-sky-400 transition'
@@ -692,23 +692,8 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                       {showControls && (
                         <div
                           data-export-ignore="true"
-                          className="absolute left-0.5 top-0.5 flex items-center gap-0.5"
+                          className="absolute left-0.5 top-0.5 flex items-center"
                         >
-                          {onDeleteRow && (
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                onDeleteRow(row.id);
-                              }}
-                              data-testid={`quick-delete-row-${idx}`}
-                              aria-label={`حذف صف ${row.clinicName || idx + 1}`}
-                              title="حذف هذا الصف مباشرة"
-                              className="flex items-center justify-center rounded bg-rose-50/90 border border-rose-200 p-[2px] text-rose-600 hover:bg-rose-600 hover:text-white transition"
-                            >
-                              <Trash2 className="w-3 h-3" />
-                            </button>
-                          )}
                           <button
                             type="button"
                             onClick={(e) => {

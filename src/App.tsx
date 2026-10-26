@@ -117,13 +117,6 @@ const DEFAULT_USERS_LIST: UserProfile[] = [
     role: 'ADMIN',
     allowedDays: DAYS_LIST.map((d) => d.id),
   },
-  {
-    uid: emailToDocId('editor@meetazzoun.org'),
-    email: 'editor@meetazzoun.org',
-    displayName: 'مسؤول تحديث المواعيد',
-    role: 'EDITOR',
-    allowedDays: DAYS_LIST.map((d) => d.id),
-  },
 ];
 
 export default function App() {
@@ -150,7 +143,7 @@ export default function App() {
   // Auth & RBAC state
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [authReady, setAuthReady] = useState(false);
-  const [activeRole, setActiveRole] = useState<UserRole>('ADMIN');
+  const [activeRole, setActiveRole] = useState<UserRole>('EDITOR');
   const [allowedDays, setAllowedDays] = useState<DayId[]>(
     DAYS_LIST.map((d) => d.id)
   );
@@ -735,13 +728,15 @@ export default function App() {
   };
 
   const currentSchedule = schedules[selectedDay];
+  // Strictly require authenticated user login to edit — visitors see pure read-only schedule
   const userCanEditSelectedDay =
+    Boolean(firebaseUser) &&
     !isStrictPublicUrl &&
     viewMode === 'manage' &&
     canUserEditDay(activeRole, allowedDays, selectedDay);
 
   const displayedRows =
-    viewMode === 'public' || isStrictPublicUrl
+    viewMode === 'public' || isStrictPublicUrl || !firebaseUser
       ? currentSchedule.publishedRows
       : currentSchedule.draftRows;
 
@@ -1101,8 +1096,8 @@ export default function App() {
       {/* Compact Single-Row Top Bar: Sidebar Trigger (Admin Only) + 7-Day Navigation Tabs + Direct Login/Logout */}
       <header className="sticky top-0 z-40 bg-gradient-to-r from-purple-950 via-indigo-950 to-purple-950 text-white border-b border-purple-800/60 shadow-md">
         <div className="mx-auto max-w-7xl px-2.5 sm:px-6 py-2 flex items-center justify-between gap-2 overflow-x-auto no-scrollbar">
-          {/* Sidebar Menu Button — Shown ONLY for ADMIN (Hidden for EDITOR as requested) */}
-          {!isStrictPublicUrl && activeRole === 'ADMIN' && (
+          {/* Sidebar Menu Button — Shown ONLY when LOGGED IN as ADMIN (Completely hidden for visitors and editors) */}
+          {Boolean(firebaseUser) && activeRole === 'ADMIN' && !isStrictPublicUrl && (
             <button
               type="button"
               onClick={() => setIsSidebarOpen(true)}
@@ -1196,8 +1191,8 @@ export default function App() {
         </div>
       </header>
 
-      {/* Slide-Over RTL Sidebar Menu — Rendered ONLY for ADMIN */}
-      {!isStrictPublicUrl && activeRole === 'ADMIN' && (
+      {/* Slide-Over RTL Sidebar Menu — Rendered ONLY when LOGGED IN as ADMIN */}
+      {Boolean(firebaseUser) && activeRole === 'ADMIN' && !isStrictPublicUrl && (
         <div
           aria-hidden={!isSidebarOpen}
           className={`fixed inset-0 z-50 transition-opacity duration-200 ${

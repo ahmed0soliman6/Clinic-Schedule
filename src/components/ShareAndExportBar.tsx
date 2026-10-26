@@ -3,9 +3,7 @@ import {
   Check,
   Copy,
   Download,
-  Instagram,
   MessageSquareText,
-  Share2,
   Smartphone,
 } from 'lucide-react';
 import { CenterSettings, DayId, ScheduleRow } from '../types/schedule';
@@ -21,7 +19,7 @@ import {
 } from '../utils/scheduleLogic';
 
 interface ShareAndExportBarProps {
-  dayId: DayId;
+  dayId?: DayId;
   dayLabel: string;
   rows: ScheduleRow[];
   settings: CenterSettings;
@@ -135,39 +133,6 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
     }
   };
 
-  // Synchronous click handler on native <a> links so the browser NEVER blocks opening WhatsApp/Facebook/Instagram
-  const handlePlatformAnchorClick = (
-    platform: 'whatsapp' | 'facebook' | 'instagram'
-  ) => {
-    // 1. Synchronously copy the daily post text to clipboard
-    copyTextToClipboardSync(postText);
-    setCopiedPost(true);
-    setTimeout(() => setCopiedPost(false), 3000);
-
-    // 2. Synchronously trigger the 4:5 PNG image download if pre-cached, or start export immediately
-    if (cachedPoster && cachedPoster.dayLabel === dayLabel) {
-      triggerInstantPngDownload(cachedPoster.dataUrl, dayLabel);
-    } else {
-      exportPosterAsPng(dayLabel, rows, settings, posterRef.current)
-        .then((assets) => setCachedPoster({ ...assets, dayLabel }))
-        .catch(() => {});
-    }
-
-    if (platform === 'whatsapp') {
-      setStatusBanner(
-        `✅ تم فتح واتساب مع بوست يوم ${dayLabel} الجاهز وتحميل صورة الجدول (4:5) — أرفق الصورة المحفوظة وأرسل!`
-      );
-    } else if (platform === 'facebook') {
-      setStatusBanner(
-        `✅ تم فتح فيسبوك ونسخ بوست يوم ${dayLabel} وتحميل صورة الجدول (4:5) — الصق البوست (Ctrl+V / لصق) وأرفق الصورة!`
-      );
-    } else {
-      setStatusBanner(
-        `✅ تم فتح إنستجرام ونسخ بوست يوم ${dayLabel} وتحميل صورة الجدول (4:5) — ارفع الصورة والصق البوست!`
-      );
-    }
-  };
-
   // Synchronous Web Share API handler for mobile phones (shares the actual 4:5 PNG File + Post Text)
   const handleNativeMobileShare = async () => {
     copyTextToClipboardSync(postText);
@@ -208,99 +173,52 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
     await handleDownload4x5Png();
   };
 
-  const whatsappPostHref = `https://api.whatsapp.com/send?text=${encodeURIComponent(
-    postText
-  )}`;
-  const facebookHref = 'https://www.facebook.com/';
-  const instagramHref = 'https://www.instagram.com/mit.azzoun.medical/';
-
   return (
     <div
       dir="rtl"
       className="mx-auto w-full max-w-[780px] rounded-2xl bg-white p-3 sm:p-4 shadow-sm border border-purple-100 space-y-3"
     >
-      {/* 2 Rows × 3 Equal Columns Action Grid (6 Buttons Total) */}
+      {/* 3 Main Action Buttons in a Single Clean Row */}
       <div
         data-testid="share-buttons-grid"
-        className="grid grid-cols-3 gap-2 sm:gap-2.5"
+        className="grid grid-cols-3 gap-2 sm:gap-3"
       >
-        {/* Row 1, Column 1: Save 4:5 PNG Image */}
+        {/* Button 1: Save 4:5 PNG Image */}
         <button
           type="button"
           onClick={handleDownload4x5Png}
           disabled={isExporting}
           data-testid="export-png-btn"
           title="حفظ صورة الجدول PNG بأبعاد 4:5 ثابتة"
-          className="w-full inline-flex items-center justify-center gap-1 sm:gap-1.5 rounded-xl bg-purple-700 px-2 sm:px-3 py-2.5 text-[11px] sm:text-xs font-extrabold text-white whitespace-nowrap shadow-xs hover:bg-purple-800 disabled:opacity-60 transition cursor-pointer"
+          className="w-full inline-flex items-center justify-center gap-1 sm:gap-2 rounded-xl bg-purple-700 px-2 sm:px-3 py-2.5 sm:py-3 text-xs sm:text-sm font-black text-white whitespace-nowrap shadow-xs hover:bg-purple-800 disabled:opacity-60 transition cursor-pointer"
         >
-          <Download className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
+          <Download className="w-4 h-4 shrink-0" />
           <span>{isExporting ? 'جارٍ الحفظ...' : 'حفظ الصورة 4:5'}</span>
         </button>
 
-        {/* Row 1, Column 2: Quick Native Phone Share */}
+        {/* Button 2: Quick Native Phone Share */}
         <button
           type="button"
           onClick={handleNativeMobileShare}
           data-testid="share-native-btn"
           title="مشاركة ملف الصورة مع البوست مباشرة عبر تطبيقات الهاتف"
-          className="w-full inline-flex items-center justify-center gap-1 sm:gap-1.5 rounded-xl bg-indigo-600 px-2 sm:px-3 py-2.5 text-[11px] sm:text-xs font-extrabold text-white whitespace-nowrap shadow-xs hover:bg-indigo-700 transition cursor-pointer"
+          className="w-full inline-flex items-center justify-center gap-1 sm:gap-2 rounded-xl bg-indigo-600 px-2 sm:px-3 py-2.5 sm:py-3 text-xs sm:text-sm font-black text-white whitespace-nowrap shadow-xs hover:bg-indigo-700 transition cursor-pointer"
         >
-          <Smartphone className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
+          <Smartphone className="w-4 h-4 shrink-0" />
           <span>مشاركة للهاتف</span>
         </button>
 
-        {/* Row 1, Column 3: Toggle Daily Post Text Box */}
+        {/* Button 3: Toggle Daily Post Text Box */}
         <button
           type="button"
           onClick={() => setShowPostBox((prev) => !prev)}
           data-testid="toggle-post-caption-btn"
-          className="w-full inline-flex items-center justify-center gap-1 sm:gap-1.5 rounded-xl border border-purple-200 bg-purple-50 px-2 sm:px-3 py-2.5 text-[11px] sm:text-xs font-extrabold text-purple-900 whitespace-nowrap shadow-xs hover:bg-purple-100 transition cursor-pointer"
+          title="عرض ونسخ النص الترويجي لجدول اليوم"
+          className="w-full inline-flex items-center justify-center gap-1 sm:gap-2 rounded-xl border-2 border-purple-300 bg-purple-50 px-2 sm:px-3 py-2.5 sm:py-3 text-xs sm:text-sm font-black text-purple-950 whitespace-nowrap shadow-xs hover:bg-purple-100 transition cursor-pointer"
         >
-          <MessageSquareText className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-purple-700 shrink-0" />
+          <MessageSquareText className="w-4 h-4 text-purple-700 shrink-0" />
           <span>{showPostBox ? 'إخفاء البوست' : `بوست ${dayLabel}`}</span>
         </button>
-
-        {/* Row 2, Column 1: WhatsApp Share (Image + Post) */}
-        <a
-          href={whatsappPostHref}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={() => handlePlatformAnchorClick('whatsapp')}
-          data-testid="share-whatsapp-btn"
-          aria-label="حفظ الصورة 4:5 وفتح واتساب مع نص البوست الجاهز"
-          className="w-full inline-flex items-center justify-center gap-1 sm:gap-1.5 rounded-xl bg-[#16a34a] px-2 sm:px-3 py-2.5 text-[11px] sm:text-xs font-extrabold text-white whitespace-nowrap shadow-xs hover:bg-[#15803d] transition cursor-pointer"
-        >
-          <Share2 className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
-          <span>واتساب</span>
-        </a>
-
-        {/* Row 2, Column 2: Facebook Share (Image + Post) */}
-        <a
-          href={facebookHref}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={() => handlePlatformAnchorClick('facebook')}
-          data-testid="share-facebook-btn"
-          aria-label="حفظ الصورة 4:5 ونسخ البوست وفتح فيسبوك"
-          className="w-full inline-flex items-center justify-center gap-1 sm:gap-1.5 rounded-xl bg-[#1877f2] px-2 sm:px-3 py-2.5 text-[11px] sm:text-xs font-extrabold text-white whitespace-nowrap shadow-xs hover:bg-[#166fe5] transition cursor-pointer"
-        >
-          <Share2 className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
-          <span>فيسبوك</span>
-        </a>
-
-        {/* Row 2, Column 3: Instagram Share (Image + Post) */}
-        <a
-          href={instagramHref}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={() => handlePlatformAnchorClick('instagram')}
-          data-testid="share-instagram-btn"
-          aria-label="حفظ الصورة 4:5 ونسخ البوست وفتح إنستجرام"
-          className="w-full inline-flex items-center justify-center gap-1 sm:gap-1.5 rounded-xl bg-gradient-to-r from-pink-600 to-purple-600 px-2 sm:px-3 py-2.5 text-[11px] sm:text-xs font-extrabold text-white whitespace-nowrap shadow-xs hover:opacity-95 transition cursor-pointer"
-        >
-          <Instagram className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
-          <span>إنستجرام</span>
-        </a>
       </div>
 
       {/* Confirmation Banner when Image + Post are Prepared */}
