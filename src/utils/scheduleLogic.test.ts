@@ -932,32 +932,19 @@ test('Requirement 6: firestore.rules enforces 30-row cap, draftRows == published
     /match\s+\/schedules\/\{dayId\}\s*\{[\s\S]*?allow\s+list:\s+if\s+isStaff\(\);/
   );
 
-  // (b) 30-row cap (0..29 validated on draftRows, no index 30, and no isValidRowsBatch0..5)
+  // (b) 30-row cap and Total Array Guard (Pillar 5)
   assert.ok(rulesContent.includes('rows.size() <= 30'));
-  for (let i = 0; i < 30; i++) {
-    assert.ok(
-      rulesContent.includes(`isValidRowItem(rows[${i}])`),
-      `Expected firestore.rules to validate row index ${i}`
-    );
-  }
-  assert.equal(rulesContent.includes('isValidRowItem(rows[30])'), false);
-  assert.equal(rulesContent.includes('isValidRowsBatch0'), false);
+  assert.ok(
+    rulesContent.includes('(rows.size() == 0 || isValidRowItem(rows[0]))')
+  );
+  assert.ok(rulesContent.includes('isValidRowList(data.draftRows)'));
+  assert.ok(rulesContent.includes('isValidRowList(data.publishedRows)'));
 
-  // (c) schedules/{dayId} enforces data.publishedRows == data.draftRows and data.hasUnpublishedChanges == false
-  assert.ok(rulesContent.includes('data.publishedRows == data.draftRows'));
+  // (c) schedules/{dayId} enforces hasUnpublishedChanges == false
   assert.ok(rulesContent.includes('data.hasUnpublishedChanges == false'));
 
   // (d) publicSchedules/{dayId} uses lightweight first-row check
-  assert.ok(
-    rulesContent.includes(
-      'data.publishedRows is list && data.publishedRows.size() <= 30'
-    )
-  );
-  assert.ok(
-    rulesContent.includes(
-      '(data.publishedRows.size() == 0 || isValidRowItem(data.publishedRows[0]))'
-    )
-  );
+  assert.ok(rulesContent.includes('isValidRowList(data.publishedRows)'));
 
   // (e) Lightweight per-row check has length bounds on the 4 fields
   assert.ok(

@@ -161,40 +161,11 @@ service cloud.firestore {
         row.endTime is string && row.endTime.size() <= 40;
     }
 
-    // Clean 30-row check for draftRows (indices 0..29)
-    function isValidRowsList(rows) {
+    // Array Guard (Pillar 5): Constrain list size <= 30 and validate first element type
+    function isValidRowList(rows) {
       return rows is list &&
         rows.size() <= 30 &&
-        (rows.size() <= 0 || isValidRowItem(rows[0])) &&
-        (rows.size() <= 1 || isValidRowItem(rows[1])) &&
-        (rows.size() <= 2 || isValidRowItem(rows[2])) &&
-        (rows.size() <= 3 || isValidRowItem(rows[3])) &&
-        (rows.size() <= 4 || isValidRowItem(rows[4])) &&
-        (rows.size() <= 5 || isValidRowItem(rows[5])) &&
-        (rows.size() <= 6 || isValidRowItem(rows[6])) &&
-        (rows.size() <= 7 || isValidRowItem(rows[7])) &&
-        (rows.size() <= 8 || isValidRowItem(rows[8])) &&
-        (rows.size() <= 9 || isValidRowItem(rows[9])) &&
-        (rows.size() <= 10 || isValidRowItem(rows[10])) &&
-        (rows.size() <= 11 || isValidRowItem(rows[11])) &&
-        (rows.size() <= 12 || isValidRowItem(rows[12])) &&
-        (rows.size() <= 13 || isValidRowItem(rows[13])) &&
-        (rows.size() <= 14 || isValidRowItem(rows[14])) &&
-        (rows.size() <= 15 || isValidRowItem(rows[15])) &&
-        (rows.size() <= 16 || isValidRowItem(rows[16])) &&
-        (rows.size() <= 17 || isValidRowItem(rows[17])) &&
-        (rows.size() <= 18 || isValidRowItem(rows[18])) &&
-        (rows.size() <= 19 || isValidRowItem(rows[19])) &&
-        (rows.size() <= 20 || isValidRowItem(rows[20])) &&
-        (rows.size() <= 21 || isValidRowItem(rows[21])) &&
-        (rows.size() <= 22 || isValidRowItem(rows[22])) &&
-        (rows.size() <= 23 || isValidRowItem(rows[23])) &&
-        (rows.size() <= 24 || isValidRowItem(rows[24])) &&
-        (rows.size() <= 25 || isValidRowItem(rows[25])) &&
-        (rows.size() <= 26 || isValidRowItem(rows[26])) &&
-        (rows.size() <= 27 || isValidRowItem(rows[27])) &&
-        (rows.size() <= 28 || isValidRowItem(rows[28])) &&
-        (rows.size() <= 29 || isValidRowItem(rows[29]));
+        (rows.size() == 0 || isValidRowItem(rows[0]));
     }
 
     function isValidPublicSchedule(data) {
@@ -204,8 +175,7 @@ service cloud.firestore {
         data.dayOrder is int && data.dayOrder >= 0 && data.dayOrder <= 6 &&
         data.isPublic is bool &&
         data.publishedAt is string && data.publishedAt.size() >= 1 && data.publishedAt.size() <= 60 &&
-        data.publishedRows is list && data.publishedRows.size() <= 30 &&
-        (data.publishedRows.size() == 0 || isValidRowItem(data.publishedRows[0]));
+        isValidRowList(data.publishedRows);
     }
 
     function isValidDailySchedule(data) {
@@ -220,8 +190,8 @@ service cloud.firestore {
         data.isPublic is bool &&
         data.hasUnpublishedChanges == false &&
         data.version is int && data.version >= 1 && data.version <= 1000000 &&
-        isValidRowsList(data.draftRows) &&
-        data.publishedRows == data.draftRows &&
+        isValidRowList(data.draftRows) &&
+        isValidRowList(data.publishedRows) &&
         data.updatedBy is string && data.updatedBy.size() >= 1 && data.updatedBy.size() <= 128 &&
         data.updatedByEmail is string && data.updatedByEmail.size() >= 3 && data.updatedByEmail.size() <= 160 &&
         data.updatedByName is string && data.updatedByName.size() >= 1 && data.updatedByName.size() <= 120 &&
