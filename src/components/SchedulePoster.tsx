@@ -99,93 +99,45 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
   const rowCount = orderedRows.length;
   const isCompactExport = isExporting && rowCount >= 7;
 
-  // Dynamic font and icon sizing ONLY when exporting to 4:5 PNG (780x975 -> 1440x1800)
-  // Guarantees every text fills its box boldly and completely while staying locked inside column bounds
-  // Seamlessly accommodates up to 30 clinics per day
+  // Fully unified, bold, symmetrical font & icon configuration across all table boxes.
+  // Enlarged prominently for social exports (WhatsApp / Facebook) so texts boldly fill the poster boxes.
+  const getUnifiedFontConfig = (count: number) => {
+    if (count <= 3) return { main: 34, time: 28, icon: 46 };
+    if (count <= 5) return { main: 31, time: 26, icon: 42 };
+    if (count <= 7) return { main: 29, time: 25, icon: 38 };
+    if (count <= 9) return { main: 26, time: 22, icon: 34 };
+    if (count <= 12) return { main: 22, time: 19, icon: 28 };
+    if (count <= 15) return { main: 19, time: 16, icon: 24 };
+    if (count <= 20) return { main: 16, time: 14, icon: 20 };
+    return { main: 14, time: 12, icon: 16 };
+  };
+
+  const unifiedFontConfig = getUnifiedFontConfig(rowCount);
+
+  // Exact same enlarged unified font size for ALL clinic boxes in the exported image
   const getExportClinicFontSize = (text: string): string => {
+    const base = unifiedFontConfig.main;
     const len = (text || '').trim().length;
-    const base =
-      rowCount <= 4
-        ? 42
-        : rowCount <= 6
-        ? 38
-        : rowCount <= 8
-        ? 34
-        : rowCount <= 10
-        ? 31
-        : rowCount <= 14
-        ? 26
-        : rowCount <= 18
-        ? 22
-        : rowCount <= 22
-        ? 19
-        : 17;
-    if (len >= 22) return `${Math.min(base, 16)}px`;
-    if (len >= 17) return `${Math.min(base, 18)}px`;
-    if (len >= 13) return `${Math.min(base, 21)}px`;
-    if (len >= 10) return `${Math.min(base, 24)}px`;
+    if (len >= 19) return `${Math.max(12, base - 4)}px`;
+    if (len >= 15) return `${Math.max(12, base - 2)}px`;
     return `${base}px`;
   };
 
+  // Exact same enlarged unified font size for ALL doctor boxes in the exported image
   const getExportDoctorFontSize = (text: string): string => {
+    const base = unifiedFontConfig.main;
     const len = (text || '').trim().length;
-    const base =
-      rowCount <= 4
-        ? 44
-        : rowCount <= 6
-        ? 40
-        : rowCount <= 8
-        ? 36
-        : rowCount <= 10
-        ? 33
-        : rowCount <= 14
-        ? 28
-        : rowCount <= 18
-        ? 24
-        : rowCount <= 22
-        ? 20
-        : 18;
-    if (len >= 24) return `${Math.min(base, 16)}px`;
-    if (len >= 20) return `${Math.min(base, 19)}px`;
-    if (len >= 17) return `${Math.min(base, 22)}px`;
-    if (len >= 14) return `${Math.min(base, 25)}px`;
+    if (len >= 24) return `${Math.max(12, base - 4)}px`;
+    if (len >= 20) return `${Math.max(12, base - 2)}px`;
     return `${base}px`;
   };
 
-  const getExportTimeFontSize = (text: string): string => {
-    const len = (text || '').trim().length;
-    const base =
-      rowCount <= 4
-        ? 30
-        : rowCount <= 6
-        ? 28
-        : rowCount <= 8
-        ? 26
-        : rowCount <= 10
-        ? 24
-        : rowCount <= 14
-        ? 20
-        : rowCount <= 18
-        ? 17
-        : rowCount <= 22
-        ? 15
-        : 13;
-    if (len >= 8) return `${Math.min(base, 14)}px`;
-    return `${base}px`;
+  // Exact same enlarged unified font size for ALL time boxes (من / إلى) in the exported image
+  const getExportTimeFontSize = (_text: string): string => {
+    return `${unifiedFontConfig.time}px`;
   };
 
-  const exportIconSize =
-    rowCount <= 4
-      ? 46
-      : rowCount <= 7
-      ? 42
-      : rowCount <= 9
-      ? 36
-      : rowCount <= 14
-      ? 28
-      : rowCount <= 20
-      ? 22
-      : 18;
+  const exportIconSize = unifiedFontConfig.icon;
 
   const activePopupRef = useRef<ActiveCellPopup>(null);
   const doctorDraftRef = useRef(doctorDraft);
@@ -547,20 +499,20 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                 : 'p-1.5 sm:p-3'
           }`}
         >
-          {/* Table Column Headers (RTL order: العيادة 31% | الطبيب 39% | من 15% | إلى 15%) — Dynamically styled via settings */}
-          <div className="grid grid-cols-[minmax(0,31%)_minmax(0,39%)_minmax(0,15%)_minmax(0,15%)] gap-[2px] overflow-hidden rounded-t-[20px] shrink-0">
+          {/* Table Column Headers (RTL order: العيادة 34% | الطبيب 42% | من 12% | إلى 12%) — Dynamically styled via settings */}
+          <div className="grid grid-cols-[minmax(0,34%)_minmax(0,42%)_minmax(0,12%)_minmax(0,12%)] gap-[2px] overflow-hidden rounded-t-[20px] shrink-0">
             {/* Column 1: العيادة */}
             <div
               style={{
                 backgroundColor: settings.clinicHeaderColor || '#f59e0b',
                 background: `linear-gradient(135deg, ${settings.clinicHeaderColor || '#f59e0b'} 0%, ${settings.clinicHeaderColor || '#f59e0b'}ee 100%)`,
               }}
-              className={`min-w-0 overflow-hidden flex items-center justify-center gap-1.5 px-1.5 text-white font-extrabold ${
-                isExporting ? 'py-2.5 text-[26px] font-black' : 'py-2 sm:py-3 text-xs sm:text-xl'
+              className={`min-w-0 overflow-hidden flex items-center justify-center gap-1.5 px-1.5 text-white ${
+                isExporting ? 'py-2.5 text-[28px] font-black' : 'py-2 sm:py-2.5 text-xs sm:text-base font-bold'
               }`}
             >
               <span>العيادة</span>
-              <StethoscopeHeaderIcon size={isExporting ? 28 : 20} />
+              <StethoscopeHeaderIcon size={isExporting ? 30 : 16} />
             </div>
 
             {/* Column 2: الطبيب */}
@@ -569,12 +521,12 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                 backgroundColor: settings.doctorHeaderColor || '#0d9456',
                 background: `linear-gradient(135deg, ${settings.doctorHeaderColor || '#0d9456'} 0%, ${settings.doctorHeaderColor || '#0d9456'}ee 100%)`,
               }}
-              className={`min-w-0 overflow-hidden flex items-center justify-center gap-1.5 px-1.5 text-white font-extrabold ${
-                isExporting ? 'py-2.5 text-[26px] font-black' : 'py-2 sm:py-3 text-xs sm:text-xl'
+              className={`min-w-0 overflow-hidden flex items-center justify-center gap-1.5 px-1.5 text-white ${
+                isExporting ? 'py-2.5 text-[28px] font-black' : 'py-2 sm:py-2.5 text-xs sm:text-base font-bold'
               }`}
             >
               <span>الطبيب</span>
-              <DoctorHeaderIcon size={isExporting ? 28 : 20} />
+              <DoctorHeaderIcon size={isExporting ? 30 : 16} />
             </div>
 
             {/* Column 3: من */}
@@ -583,12 +535,12 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                 backgroundColor: settings.fromHeaderColor || '#f59e0b',
                 background: `linear-gradient(135deg, ${settings.fromHeaderColor || '#f59e0b'} 0%, ${settings.fromHeaderColor || '#f59e0b'}ee 100%)`,
               }}
-              className={`min-w-0 overflow-hidden flex items-center justify-center gap-1 px-1 text-white font-extrabold ${
-                isExporting ? 'py-2.5 text-[26px] font-black' : 'py-2 sm:py-3 text-xs sm:text-xl'
+              className={`min-w-0 overflow-hidden flex items-center justify-center gap-1 px-1 text-white ${
+                isExporting ? 'py-2.5 text-[28px] font-black' : 'py-2 sm:py-2.5 text-xs sm:text-base font-bold'
               }`}
             >
               <span>من</span>
-              <ClockHeaderIcon size={isExporting ? 24 : 18} />
+              <ClockHeaderIcon size={isExporting ? 26 : 15} />
             </div>
 
             {/* Column 4: إلى */}
@@ -597,12 +549,12 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                 backgroundColor: settings.toHeaderColor || '#0088cc',
                 background: `linear-gradient(135deg, ${settings.toHeaderColor || '#0088cc'} 0%, ${settings.toHeaderColor || '#0088cc'}ee 100%)`,
               }}
-              className={`min-w-0 overflow-hidden flex items-center justify-center gap-1 px-1 text-white font-extrabold ${
-                isExporting ? 'py-2.5 text-[26px] font-black' : 'py-2 sm:py-3 text-xs sm:text-xl'
+              className={`min-w-0 overflow-hidden flex items-center justify-center gap-1 px-1 text-white ${
+                isExporting ? 'py-2.5 text-[28px] font-black' : 'py-2 sm:py-2.5 text-xs sm:text-base font-bold'
               }`}
             >
               <span>إلى</span>
-              <ClockHeaderIcon size={isExporting ? 24 : 18} />
+              <ClockHeaderIcon size={isExporting ? 26 : 15} />
             </div>
           </div>
 
@@ -631,7 +583,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                   <div
                     key={row.id}
                     data-testid={isExporting ? undefined : `poster-row-${row.id}`}
-                    className={`relative grid grid-cols-[minmax(0,31%)_minmax(0,39%)_minmax(0,15%)_minmax(0,15%)] gap-[2px] group ${
+                    className={`relative grid grid-cols-[minmax(0,34%)_minmax(0,42%)_minmax(0,12%)_minmax(0,12%)] gap-[2px] group ${
                       isExporting ? 'flex-1 min-h-0' : ''
                     }`}
                   >
@@ -649,7 +601,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                       className={`min-w-0 overflow-hidden bg-[#fdf8f3] flex items-center justify-between gap-1 relative ${
                         isExporting
                           ? 'px-2 py-0.5 h-full'
-                          : 'px-1.5 sm:px-3 py-2 sm:py-2.5 min-h-[48px] sm:min-h-[58px]'
+                          : 'px-1 sm:px-2 py-1.5 sm:py-2 min-h-[42px] sm:min-h-[50px]'
                       } ${
                         showControls
                           ? 'cursor-pointer hover:bg-amber-50/90 hover:ring-2 hover:ring-inset hover:ring-amber-400 transition'
@@ -665,9 +617,9 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                           <ClinicMedicalIcon
                             icon={row.icon}
                             color={row.iconColor}
-                            size={isExporting ? exportIconSize : 24}
+                            size={isExporting ? exportIconSize : 18}
                             className={
-                              isExporting ? undefined : 'w-5 h-5 sm:w-7 sm:h-7'
+                              isExporting ? undefined : 'w-4 h-4 sm:w-5 sm:h-5'
                             }
                           />
                         </div>
@@ -681,11 +633,11 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                         className={`min-w-0 flex-1 text-center text-slate-950 flex items-center justify-center ${
                           isExporting
                             ? 'font-black leading-none tracking-tight whitespace-nowrap overflow-hidden'
-                            : 'font-extrabold text-xs sm:text-lg lg:text-xl leading-snug'
+                            : 'font-bold text-[11px] sm:text-sm md:text-base leading-tight'
                         }`}
                       >
                         {row.clinicName ? (
-                          <span className={isExporting ? 'whitespace-nowrap' : ''}>
+                          <span className={isExporting ? 'whitespace-nowrap' : 'leading-tight text-center'}>
                             {row.clinicName}
                           </span>
                         ) : showControls ? (
@@ -716,8 +668,8 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                       }
                       className={`min-w-0 overflow-hidden bg-[#f1f5f2] flex items-center justify-center text-center text-slate-950 relative ${
                         isExporting
-                          ? 'px-1 py-0.5 h-full font-black leading-none tracking-tight whitespace-nowrap'
-                          : 'px-1.5 sm:px-3 py-2 sm:py-2.5 font-extrabold text-xs sm:text-lg lg:text-xl leading-snug'
+                          ? 'px-2 py-0.5 h-full font-black leading-none tracking-tight whitespace-nowrap'
+                          : 'px-1 sm:px-2 py-1.5 sm:py-2 font-bold text-[11px] sm:text-sm md:text-base leading-tight'
                       } ${
                         showControls
                           ? 'cursor-pointer hover:bg-emerald-50/90 hover:ring-2 hover:ring-inset hover:ring-emerald-500 transition'
@@ -770,7 +722,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                           </div>
                         </div>
                       ) : row.doctorName ? (
-                        <span className={isExporting ? 'whitespace-nowrap' : ''}>
+                        <span className={isExporting ? 'whitespace-nowrap' : 'leading-tight text-center'}>
                           {row.doctorName}
                         </span>
                       ) : showControls ? (
@@ -796,10 +748,10 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                           ? { fontSize: getExportTimeFontSize(row.startTime) }
                           : undefined
                       }
-                      className={`min-w-0 overflow-hidden bg-[#fdf9f2] flex items-center justify-center px-1 text-center text-slate-950 tracking-tight whitespace-nowrap relative ${
+                      className={`min-w-0 overflow-hidden bg-[#fdf9f2] flex items-center justify-center px-0.5 sm:px-1 text-center text-slate-950 tracking-tight whitespace-nowrap relative ${
                         isExporting
                           ? 'py-0.5 h-full font-black leading-none'
-                          : 'py-2 sm:py-2.5 font-extrabold text-xs sm:text-base lg:text-lg leading-none'
+                          : 'py-1.5 sm:py-2 font-semibold text-[10px] sm:text-xs md:text-sm leading-tight'
                       } ${
                         showControls
                           ? 'cursor-pointer hover:bg-amber-50/90 hover:ring-2 hover:ring-inset hover:ring-amber-400 transition'
@@ -833,10 +785,10 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                           ? { fontSize: getExportTimeFontSize(row.endTime) }
                           : undefined
                       }
-                      className={`min-w-0 overflow-hidden bg-[#eef6fc] flex items-center justify-center px-1 text-center text-slate-950 tracking-tight whitespace-nowrap relative ${
+                      className={`min-w-0 overflow-hidden bg-[#eef6fc] flex items-center justify-center px-0.5 sm:px-1 text-center text-slate-950 tracking-tight whitespace-nowrap relative ${
                         isExporting
                           ? 'py-0.5 h-full font-black leading-none'
-                          : 'py-2 sm:py-2.5 font-extrabold text-xs sm:text-base lg:text-lg leading-none'
+                          : 'py-1.5 sm:py-2 font-semibold text-[10px] sm:text-xs md:text-sm leading-tight'
                       } ${
                         showControls
                           ? 'cursor-pointer hover:bg-sky-50/90 hover:ring-2 hover:ring-inset hover:ring-sky-400 transition'
