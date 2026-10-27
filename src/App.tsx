@@ -1651,11 +1651,24 @@ export default function App() {
 
       const data = await response.json().catch(() => ({}));
       if (!response.ok || !data.ok) {
+        const isLocalOrAiStudioPreview =
+          typeof window !== 'undefined' &&
+          (window.location.hostname === 'localhost' ||
+            window.location.hostname.includes('run.app'));
+
+        if (response.status === 404 && isLocalOrAiStudioPreview && !data.error) {
+          return {
+            ok: false,
+            message:
+              'تنبيه: أنت تضغط الزر من داخل معاينة AI Studio (حيث لا تعمل دوال Vercel Serverless). بعد رفع الكود إلى GitHub، افتح رابط موقعك على Vercel (mitazoun-schedule.vercel.app) واضغط الزر هناك ليتم النشر الفوري.',
+          };
+        }
+
         return {
           ok: false,
           message:
             data.error ||
-            `تعذر النشر على فيسبوك (${response.status}). تأكد من ضبط FB_PAGE_ID و FB_PAGE_ACCESS_TOKEN في إعدادات Vercel.`,
+            `تعذر النشر على فيسبوك (HTTP ${response.status}). تأكد من رفع آخر تحديث لملف api/send-reminders.ts إلى GitHub وعمل Redeploy على Vercel بعد إضافة FB_PAGE_ID و FB_PAGE_ACCESS_TOKEN.`,
         };
       }
 
@@ -1670,7 +1683,7 @@ export default function App() {
       return {
         ok: false,
         message:
-          'تعذر الوصول إلى نقطة النهاية (/api/facebook-post). يعمل النشر على فيسبوك عند الاستضافة على Vercel مع ضبط FB_PAGE_ID و FB_PAGE_ACCESS_TOKEN.',
+          'تعذر الوصول إلى خادم النشر (/api/send-reminders). يعمل النشر على فيسبوك على رابط موقعك في Vercel بعد ضبط FB_PAGE_ID و FB_PAGE_ACCESS_TOKEN.',
       };
     }
   };

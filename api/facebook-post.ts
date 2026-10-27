@@ -8,14 +8,12 @@ import type {
   PublicDailyScheduleData,
   ScheduleRow,
 } from '../src/types/schedule.js';
-import {
-  formatFacebookSchedulePost,
-  publishToFacebookPageGraphApi,
-  resolveDayMetaById,
-} from '../src/utils/facebookPostLogic.js';
 import { resolveTargetDayId } from '../src/utils/reminderLogic.js';
 import {
+  DAYS_LIST,
   DEFAULT_POST_TEMPLATE,
+  WHATSAPP_CHANNEL_SHORT_URL,
+  buildDailySocialPostText,
   emailToDocId,
   filterNonEmptyRows,
   PRIMARY_ADMIN_EMAIL,
@@ -54,19 +52,140 @@ const DEFAULT_CENTER_SETTINGS: CenterSettings = {
   postTemplate: DEFAULT_POST_TEMPLATE,
 };
 
-function getAdminAppOrNull() {
-  const existing = getApps();
-  if (existing.length > 0) {
-    return existing[0];
+function normalizeEnvSecret(raw?: string): string {
+  const trimmed = (raw || '').trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1).trim();
   }
-  const rawJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-  if (!rawJson) {
+  return trimmed;
+}
+
+function normalizeFacebookPageId(raw?: string): string {
+  const clean = normalizeEnvSecret(raw);
+  if (!clean) return '';
+  try {
+    if (clean.startsWith('http://') || clean.startsWith('https://')) {
+      const url = new URL(clean);
+      const idParam = url.searchParams.get('id');
+      if (idParam && idParam.trim()) {
+        return idParam.trim();
+      }
+      const segments = url.pathname
+        .split('/')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (segments.length > 0) {
+        return segments[segments.length - 1];
+      }
+    }
+  } catch {
+    // Ignore URL parse error
+  }
+  return clean;
+}
+
+function formatClinicRowForFacebook(row: ScheduleRow): string {
+  const rawClinic = (row.clinicName || '').trim();
+  const rawDoctor = (row.doctorName || '').trim();
+  const start = (row.startTime || '').trim();
+  const end = (row.endTime || '').trim();
+
+  const clinicLabel = rawClinic.startsWith('عيادة')
+    ? rawClinic
+    : `عيادة ${rawClinic}`;
+
+  const hasDoctorPrefix =
+    rawDoctor.startsWith('د.') ||
+    rawDoctor.startsWith('د/') ||
+    rawDoctor.startsWith('د ') ||
+    rawDoctor.startsWith('دكتور');
+  const doctorLabel = hasDoctorPrefix ? rawDoctor : `د/ ${rawDoctor}`;
+
+  return `🔹 ${clinicLabel} — ${doctorLabel} (من ${start} إلى ${end})`;
+}
+
+function formatFacebookSchedulePost(params: {
+  dayLabel: string;
+  rows: ScheduleRow[];
+  settings: CenterSettings;
+}): string {
+  const { dayLabel, rows, settings } = params;
+  const cleanRows = filterNonEmptyRows(rows || []);
+
+  const clinicsBlock =
+    cleanRows.length > 0
+      ? cleanRows.map((row) => formatClinicRowForFacebook(row)).join('\n')
+      : 'لا توجد عيادات مسجلة لهذا اليوم حالياً.';
+
+  const rawTemplate =
+    typeof settings.postTemplate === 'string' &&
+    settings.postTemplate.trim().length > 0
+      ? settings.postTemplate.trim()
+      : DEFAULT_POST_TEMPLATE;
+
+  if (rawTemplate.includes('{العيادات}')) {
+    const cleanWa = (settings.whatsappPhone || '').replace(/\D/g, '');
+    const waIntl = cleanWa.startsWith('2') ? cleanWa : `2${cleanWa}`;
+    const waUrl = `https://wa.me/${waIntl}`;
+    const dentalLabel = (settings.dentalLabel || 'عيادة الأسنان').trim();
+
+    return rawTemplate
+      .replace(/\{اليوم\}/g, dayLabel)
+      .replace(/\{المجمع\}/g, settings.complexName)
+      .replace(/\{الجمعية\}/g, settings.associationName)
+      .replace(/\{العنوان\}/g, settings.address)
+      .replace(/\{الواتساب\}/g, settings.whatsappPhone)
+      .replace(/\{الأرضي\}/g, settings.landlinePhone)
+      .replace(/\{الأسنان\}/g, settings.dentalPhone)
+      .replace(/\{تسمية_الأسنان\}/g, dentalLabel)
+      .replace(/\{رابط_الواتساب\}/g, waUrl)
+      .replace(/\{قناة_الواتساب\}/g, WHATSAPP_CHANNEL_SHORT_URL)
+      .replace(/\{العيادات\}/g, clinicsBlock);
+  }
+
+  const baseText = buildDailySocialPostText(dayLabel, settings, cleanRows);
+  const lines = baseText.split('\n');
+  if (lines.length <= 1) {
+    return `${baseText}\n\n${clinicsBlock}`;
+  }
+
+  const headerLine = lines[0];
+  const footerLines = lines.slice(1).join('\n');
+  return `${headerLine}\n\n${clinicsBlock}\n\n${footerLines}`;
+}
+
+function resolveDayMetaById(dayId?: string | null): {
+  dayId: DayId;
+  dayLabel: string;
+} {
+  const clean = (dayId || '').trim().toLowerCase() as DayId;
+  const match = DAYS_LIST.find((d) => d.id === clean);
+  if (match) {
+    return { dayId: match.id, dayLabel: match.label };
+  }
+  return { dayId: DAYS_LIST[0].id, dayLabel: DAYS_LIST[0].label };
+}
+
+function getAdminAppOrNull() {
+  try {
+    const existing = getApps();
+    if (existing.length > 0) {
+      return existing[0];
+    }
+    const rawJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+    if (!rawJson) {
+      return null;
+    }
+    const serviceAccount = JSON.parse(rawJson);
+    return initializeApp({
+      credential: cert(serviceAccount),
+    });
+  } catch {
     return null;
   }
-  const serviceAccount = JSON.parse(rawJson);
-  return initializeApp({
-    credential: cert(serviceAccount),
-  });
 }
 
 function extractBearerToken(
@@ -94,15 +213,6 @@ function parseRequestBody(body: unknown): Record<string, unknown> {
   return {};
 }
 
-/**
- * Serverless Endpoint: `/api/facebook-post` (also accessible via `/api/send-reminders?action=facebook-post`)
- * - Fetches the clinic schedule (automatically defaults to tomorrow's schedule in `Africa/Cairo`,
- *   or accepts a specific `dayId` / `targetMode: 'tomorrow' | 'today'` for manual publishing).
- * - Formats the clinic schedule into a clean, readable Arabic post using `formatFacebookSchedulePost`.
- * - Publishes the post to the Facebook Page via Meta Graph API v21.0 (`POST https://graph.facebook.com/v21.0/{FB_PAGE_ID}/feed`)
- *   using `process.env.FB_PAGE_ID` and `process.env.FB_PAGE_ACCESS_TOKEN`.
- * - Returns `{ ok: true, success: true, post_id, dayId, dayLabel, message }` or a descriptive Arabic error.
- */
 export default async function facebookPostHandler(
   req: VercelRequestLike,
   res: VercelResponseLike
@@ -120,12 +230,13 @@ export default async function facebookPostHandler(
     if (!bearer) {
       res.status(401).json({
         ok: false,
-        error: 'مطلوب تسجيل الدخول أو إرسال ترويسة Authorization: Bearer للنشر على فيسبوك.',
+        error:
+          'مطلوب تسجيل الدخول أو إرسال ترويسة Authorization: Bearer للنشر على فيسبوك.',
       });
       return;
     }
 
-    const cronSecret = process.env.CRON_SECRET;
+    const cronSecret = normalizeEnvSecret(process.env.CRON_SECRET);
     const isCronAuthorized = Boolean(cronSecret && bearer === cronSecret);
 
     const adminApp = getAdminAppOrNull();
@@ -163,8 +274,6 @@ export default async function facebookPostHandler(
         });
         return;
       }
-    } else if (!isCronAuthorized && !adminApp) {
-      // If FIREBASE_SERVICE_ACCOUNT_JSON is not set in local preview, still allow testing the Graph API check
     }
 
     const payload = parseRequestBody(req.body);
@@ -182,7 +291,6 @@ export default async function facebookPostHandler(
         ? 'today'
         : 'tomorrow';
 
-    // Default to tomorrow's schedule automatically unless a specific dayId was requested
     const now = new Date();
     const targetDayMeta = requestedDayId
       ? resolveDayMetaById(requestedDayId)
@@ -194,7 +302,6 @@ export default async function facebookPostHandler(
         ? payload.dayLabel.trim()
         : targetDayMeta.dayLabel;
 
-    // Fetch CenterSettings & Schedule rows from Firestore (or fallback to payload if provided)
     let centerSettings: CenterSettings = {
       ...DEFAULT_CENTER_SETTINGS,
       ...(payload.settings && typeof payload.settings === 'object'
@@ -246,34 +353,69 @@ export default async function facebookPostHandler(
         settings: centerSettings,
       });
 
-    const fbResult = await publishToFacebookPageGraphApi({
-      pageId: process.env.FB_PAGE_ID,
-      pageAccessToken: process.env.FB_PAGE_ACCESS_TOKEN,
-      message: formattedPostMessage,
-    });
+    const cleanPageId = normalizeFacebookPageId(process.env.FB_PAGE_ID);
+    const cleanToken = normalizeEnvSecret(process.env.FB_PAGE_ACCESS_TOKEN);
 
-    if (!fbResult.ok || !fbResult.post_id) {
-      res.status(fbResult.statusCode || 500).json({
+    if (!cleanPageId || !cleanToken) {
+      res.status(500).json({
         ok: false,
         success: false,
         dayId,
         dayLabel,
         error:
-          fbResult.error ||
-          'تعذر النشر على صفحة فيسبوك عبر Meta Graph API v21.0.',
+          'متغيرات فيسبوك (FB_PAGE_ID أو FB_PAGE_ACCESS_TOKEN) غير مضبوطة في إعدادات بيئة الخادم (Vercel Environment Variables) أو تحتاج إلى Redeploy لتفعيلها.',
       });
       return;
     }
 
+    const graphUrl = `https://graph.facebook.com/v21.0/${encodeURIComponent(
+      cleanPageId
+    )}/feed`;
+
+    const response = await fetch(graphUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        message: formattedPostMessage,
+        access_token: cleanToken,
+      }),
+    });
+
+    const data = (await response.json().catch(() => ({}))) as {
+      id?: string;
+      post_id?: string;
+      error?: {
+        message?: string;
+        code?: number;
+      };
+    };
+
+    if (!response.ok || data.error) {
+      const fbErrorMsg =
+        data.error?.message || `HTTP ${response.status} من خادم فيسبوك`;
+      const fbErrorCode = data.error?.code ? ` (كود ${data.error.code})` : '';
+      res.status(response.status || 502).json({
+        ok: false,
+        success: false,
+        dayId,
+        dayLabel,
+        error: `فشل النشر عبر Meta Graph API v21.0${fbErrorCode}: ${fbErrorMsg}`,
+      });
+      return;
+    }
+
+    const postId = String(data.post_id || data.id || '').trim();
     res.status(200).json({
       ok: true,
       success: true,
-      post_id: fbResult.post_id,
+      post_id: postId,
       dayId,
       dayLabel,
       rowCount: scheduleRows.length,
       postContent: formattedPostMessage,
-      message: `تم نشر جدول عيادات يوم ${dayLabel} على صفحة فيسبوك بنجاح! (معرف المنشور: ${fbResult.post_id})`,
+      message: `تم نشر جدول عيادات يوم ${dayLabel} على صفحة فيسبوك بنجاح! (معرف المنشور: ${postId})`,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

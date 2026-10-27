@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {
   formatClinicRowForFacebook,
   formatFacebookSchedulePost,
+  normalizeEnvSecret,
+  normalizeFacebookPageId,
   publishToFacebookPageGraphApi,
   resolveDayMetaById,
 } from './facebookPostLogic.js';
@@ -158,7 +160,7 @@ test('publishToFacebookPageGraphApi handles Meta Graph API error responses clean
   assert.ok(errRes.error?.includes('Invalid OAuth access token'));
 });
 
-test('resolveDayMetaById resolves valid DayId or falls back to saturday', () => {
+test('resolveDayMetaById and normalizeFacebookPageId handle URLs, quotes, and day IDs', () => {
   assert.deepEqual(resolveDayMetaById('tuesday'), {
     dayId: 'tuesday',
     dayLabel: 'الثلاثاء',
@@ -167,4 +169,13 @@ test('resolveDayMetaById resolves valid DayId or falls back to saturday', () => 
     dayId: 'saturday',
     dayLabel: 'السبت',
   });
+  assert.equal(normalizeEnvSecret(' "EAA123" '), 'EAA123');
+  assert.equal(
+    normalizeFacebookPageId('https://www.facebook.com/profile.php?id=6155001122'),
+    '6155001122'
+  );
+  assert.equal(
+    normalizeFacebookPageId('https://www.facebook.com/mitazoun.medical/'),
+    'mitazoun.medical'
+  );
 });
