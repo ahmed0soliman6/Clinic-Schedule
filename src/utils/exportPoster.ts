@@ -326,10 +326,39 @@ export async function renderHighResPosterDataUrl(
   ctx.fillText('من', xFrom + colFromW / 2, innerY + tableHeaderHeight / 2);
   ctx.fillText('إلى', xTo + colToW / 2, innerY + tableHeaderHeight / 2);
 
-  const fontSize = rowCount <= 4 ? 50 : rowCount <= 7 ? 45 : 40;
+  const fontSize =
+    rowCount <= 4
+      ? 50
+      : rowCount <= 6
+      ? 45
+      : rowCount <= 8
+      ? 40
+      : rowCount <= 10
+      ? 35
+      : rowCount <= 14
+      ? 29
+      : rowCount <= 18
+      ? 24
+      : rowCount <= 22
+      ? 20
+      : 18;
+
+  const canvasIconSize =
+    rowCount <= 4
+      ? 44
+      : rowCount <= 7
+      ? 40
+      : rowCount <= 10
+      ? 34
+      : rowCount <= 14
+      ? 28
+      : rowCount <= 20
+      ? 22
+      : 18;
+
   orderedRows.forEach((row, idx) => {
     const ry = innerY + tableHeaderHeight + 3 + idx * rowHeight;
-    const rh = rowHeight - 3;
+    const rh = Math.max(16, rowHeight - 3);
 
     ctx.fillStyle = '#fdf8f3';
     ctx.fillRect(xClinic + 2, ry, colClinicW - 2, rh);
@@ -347,16 +376,16 @@ export async function renderHighResPosterDataUrl(
       ctx,
       row.icon,
       row.iconColor,
-      xClinic + colClinicW - 42,
+      xClinic + colClinicW - (canvasIconSize + 4),
       ry + rh / 2,
-      44
+      canvasIconSize
     );
 
     ctx.fillStyle = '#0f172a';
     ctx.font = `900 ${fontSize}px 'Cairo', sans-serif`;
-    ctx.fillText(row.clinicName, xClinic + (colClinicW - 64) / 2, ry + rh / 2);
+    ctx.fillText(row.clinicName, xClinic + (colClinicW - (canvasIconSize + 16)) / 2, ry + rh / 2);
     ctx.fillText(row.doctorName, xDoctor + colDoctorW / 2, ry + rh / 2);
-    ctx.font = `900 ${Math.min(fontSize, 38)}px 'Cairo', sans-serif`;
+    ctx.font = `900 ${Math.min(fontSize, 36)}px 'Cairo', sans-serif`;
     ctx.fillText(row.startTime, xFrom + colFromW / 2, ry + rh / 2);
     ctx.fillText(row.endTime, xTo + colToW / 2, ry + rh / 2);
   });

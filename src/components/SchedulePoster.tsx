@@ -97,42 +97,107 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
       ? [...savedRows, { ...pendingNewRow, sortOrder: savedRows.length }]
       : savedRows;
   const rowCount = orderedRows.length;
-  const isCompactExport = isExporting && rowCount >= 8;
+  const isCompactExport = isExporting && rowCount >= 7;
 
   // Dynamic font and icon sizing ONLY when exporting to 4:5 PNG (780x975 -> 1440x1800)
   // Guarantees every text fills its box boldly and completely while staying locked inside column bounds
+  // Seamlessly accommodates up to 30 clinics per day
   const getExportClinicFontSize = (text: string): string => {
     const len = (text || '').trim().length;
     const base =
-      rowCount <= 4 ? 42 : rowCount <= 6 ? 38 : rowCount <= 8 ? 34 : rowCount <= 10 ? 31 : 27;
-    if (len >= 22) return `${Math.min(base, 23)}px`;
-    if (len >= 17) return `${Math.min(base, 26)}px`;
-    if (len >= 13) return `${Math.min(base, 29)}px`;
-    if (len >= 10) return `${Math.min(base, 31)}px`;
+      rowCount <= 4
+        ? 42
+        : rowCount <= 6
+        ? 38
+        : rowCount <= 8
+        ? 34
+        : rowCount <= 10
+        ? 31
+        : rowCount <= 14
+        ? 26
+        : rowCount <= 18
+        ? 22
+        : rowCount <= 22
+        ? 19
+        : 17;
+    if (len >= 22) return `${Math.min(base, 16)}px`;
+    if (len >= 17) return `${Math.min(base, 18)}px`;
+    if (len >= 13) return `${Math.min(base, 21)}px`;
+    if (len >= 10) return `${Math.min(base, 24)}px`;
     return `${base}px`;
   };
 
   const getExportDoctorFontSize = (text: string): string => {
     const len = (text || '').trim().length;
     const base =
-      rowCount <= 4 ? 44 : rowCount <= 6 ? 40 : rowCount <= 8 ? 36 : rowCount <= 10 ? 33 : 29;
-    if (len >= 24) return `${Math.min(base, 25)}px`;
-    if (len >= 20) return `${Math.min(base, 28)}px`;
-    if (len >= 17) return `${Math.min(base, 30)}px`;
-    if (len >= 14) return `${Math.min(base, 32)}px`;
+      rowCount <= 4
+        ? 44
+        : rowCount <= 6
+        ? 40
+        : rowCount <= 8
+        ? 36
+        : rowCount <= 10
+        ? 33
+        : rowCount <= 14
+        ? 28
+        : rowCount <= 18
+        ? 24
+        : rowCount <= 22
+        ? 20
+        : 18;
+    if (len >= 24) return `${Math.min(base, 16)}px`;
+    if (len >= 20) return `${Math.min(base, 19)}px`;
+    if (len >= 17) return `${Math.min(base, 22)}px`;
+    if (len >= 14) return `${Math.min(base, 25)}px`;
     return `${base}px`;
   };
 
   const getExportTimeFontSize = (text: string): string => {
     const len = (text || '').trim().length;
     const base =
-      rowCount <= 4 ? 30 : rowCount <= 6 ? 28 : rowCount <= 8 ? 26 : rowCount <= 10 ? 25 : 22;
-    if (len >= 8) return `${Math.min(base, 24)}px`;
+      rowCount <= 4
+        ? 30
+        : rowCount <= 6
+        ? 28
+        : rowCount <= 8
+        ? 26
+        : rowCount <= 10
+        ? 24
+        : rowCount <= 14
+        ? 20
+        : rowCount <= 18
+        ? 17
+        : rowCount <= 22
+        ? 15
+        : 13;
+    if (len >= 8) return `${Math.min(base, 14)}px`;
     return `${base}px`;
   };
 
   const exportIconSize =
-    rowCount <= 4 ? 46 : rowCount <= 7 ? 42 : rowCount <= 9 ? 38 : 34;
+    rowCount <= 4
+      ? 46
+      : rowCount <= 7
+      ? 42
+      : rowCount <= 9
+      ? 36
+      : rowCount <= 14
+      ? 28
+      : rowCount <= 20
+      ? 22
+      : 18;
+
+  const activePopupRef = useRef<ActiveCellPopup>(null);
+  const doctorDraftRef = useRef(doctorDraft);
+  const doctorDebounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    activePopupRef.current = activePopup;
+  }, [activePopup]);
+
+  useEffect(() => {
+    doctorDraftRef.current = doctorDraft;
+  }, [doctorDraft]);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -140,6 +205,15 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
         containerRef.current &&
         !containerRef.current.contains(e.target as Node)
       ) {
+        if (activePopupRef.current?.field === 'doctor') {
+          if (doctorDebounceTimerRef.current) {
+            clearTimeout(doctorDebounceTimerRef.current);
+            doctorDebounceTimerRef.current = null;
+          }
+          applyRowPatchOrCommitPending(activePopupRef.current.rowId, {
+            doctorName: doctorDraftRef.current.trim(),
+          });
+        }
         setActivePopup(null);
       }
     };
@@ -201,8 +275,43 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
     setActivePopup(null);
   };
 
+  const handleDoctorInputChange = (rowId: string, val: string) => {
+    setDoctorDraft(val);
+    doctorDraftRef.current = val;
+    if (doctorDebounceTimerRef.current) {
+      clearTimeout(doctorDebounceTimerRef.current);
+    }
+    doctorDebounceTimerRef.current = setTimeout(() => {
+      applyRowPatchOrCommitPending(rowId, { doctorName: val.trim() });
+    }, 350);
+  };
+
+  const handleDoctorBlur = (rowId: string) => {
+    if (doctorDebounceTimerRef.current) {
+      clearTimeout(doctorDebounceTimerRef.current);
+      doctorDebounceTimerRef.current = null;
+    }
+    applyRowPatchOrCommitPending(rowId, { doctorName: doctorDraftRef.current.trim() });
+  };
+
+  const handleDoctorPrefixSelect = (rowId: string, prefix: string) => {
+    const clean = doctorDraftRef.current.replace(/^(أ\.د\/|د\/|أ\/)\s*/, '');
+    const updated = `${prefix}${clean}`;
+    setDoctorDraft(updated);
+    doctorDraftRef.current = updated;
+    if (doctorDebounceTimerRef.current) {
+      clearTimeout(doctorDebounceTimerRef.current);
+      doctorDebounceTimerRef.current = null;
+    }
+    applyRowPatchOrCommitPending(rowId, { doctorName: updated.trim() });
+  };
+
   const handleSaveDoctorName = (rowId: string) => {
-    const trimmed = doctorDraft.trim();
+    if (doctorDebounceTimerRef.current) {
+      clearTimeout(doctorDebounceTimerRef.current);
+      doctorDebounceTimerRef.current = null;
+    }
+    const trimmed = doctorDraftRef.current.trim();
     applyRowPatchOrCommitPending(rowId, { doctorName: trimmed });
     setActivePopup(null);
   };
@@ -621,48 +730,43 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                         <div
                           data-export-ignore="true"
                           onClick={(e) => e.stopPropagation()}
-                          className="w-full flex flex-col gap-1.5"
+                          className="w-full flex flex-col gap-1.5 p-0.5"
                         >
-                          <div className="flex items-center gap-1">
+                          <div className="relative flex items-center">
                             <input
                               type="text"
                               autoFocus
                               aria-label="كتابة اسم الطبيب"
-                              placeholder="مثال: د/ أمجد رضا"
+                              placeholder="اسم الطبيب (حفظ تلقائي)"
                               value={doctorDraft}
-                              onChange={(e) => setDoctorDraft(e.target.value)}
+                              onChange={(e) => handleDoctorInputChange(row.id, e.target.value)}
+                              onBlur={() => handleDoctorBlur(row.id)}
                               onKeyDown={(e) => {
-                                if (e.key === 'Enter') handleSaveDoctorName(row.id);
+                                if (e.key === 'Enter') {
+                                  handleSaveDoctorName(row.id);
+                                }
                                 if (e.key === 'Escape') setActivePopup(null);
                               }}
-                              className="w-full rounded-lg border-2 border-emerald-600 bg-white px-2 py-1 text-xs sm:text-sm font-extrabold text-slate-900 text-center focus:outline-none"
+                              className="w-full rounded-lg border-2 border-emerald-500 bg-white px-2 py-1.5 text-xs sm:text-sm font-extrabold text-slate-900 text-center shadow-xs focus:ring-2 focus:ring-emerald-400 focus:outline-none"
                             />
-                            <button
-                              type="button"
-                              onClick={() => handleSaveDoctorName(row.id)}
-                              aria-label="حفظ اسم الطبيب"
-                              className="rounded-lg bg-emerald-600 p-1.5 text-white hover:bg-emerald-700 shrink-0"
-                            >
-                              <Check className="w-3.5 h-3.5" />
-                            </button>
                           </div>
-                          <div className="flex items-center justify-center gap-1 text-[10px]">
-                            {['د/ ', 'أ.د/ ', 'أ/ '].map((prefix) => (
-                              <button
-                                key={prefix}
-                                type="button"
-                                onClick={() => {
-                                  const clean = doctorDraft.replace(
-                                    /^(أ\.د\/|د\/|أ\/)\s*/,
-                                    ''
-                                  );
-                                  setDoctorDraft(`${prefix}${clean}`);
-                                }}
-                                className="rounded bg-emerald-100 px-1.5 py-0.5 font-bold text-emerald-900 hover:bg-emerald-200"
-                              >
-                                {prefix.trim()}
-                              </button>
-                            ))}
+                          <div className="flex items-center justify-between gap-1 text-[10px]">
+                            <div className="flex items-center gap-1">
+                              {['د/ ', 'أ.د/ ', 'أ/ '].map((prefix) => (
+                                <button
+                                  key={prefix}
+                                  type="button"
+                                  onClick={() => handleDoctorPrefixSelect(row.id, prefix)}
+                                  className="rounded-md bg-emerald-100 px-1.5 py-0.5 font-bold text-emerald-900 hover:bg-emerald-200 transition active:scale-95 cursor-pointer"
+                                >
+                                  {prefix.trim()}
+                                </button>
+                              ))}
+                            </div>
+                            <span className="text-[9px] font-bold text-emerald-700 flex items-center gap-1 select-none">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse inline-block" />
+                              حفظ تلقائي
+                            </span>
                           </div>
                         </div>
                       ) : row.doctorName ? (
