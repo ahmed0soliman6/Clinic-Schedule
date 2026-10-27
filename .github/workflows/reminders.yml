@@ -1,0 +1,14 @@
+name: Daily Clinic Schedule Reminders
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  send-reminders:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Vercel Daily Reminder Endpoint
+        run: |
+          curl -fsS -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" "${{ secrets.SITE_URL }}/api/send-reminders"

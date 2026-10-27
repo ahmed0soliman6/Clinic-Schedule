@@ -26,13 +26,11 @@ import {
   Edit3,
   Eye,
   History,
-  ListOrdered,
   LogIn,
   LogOut,
   Menu,
   RotateCcw,
   Settings,
-  Shield,
   Trash2,
   Users,
   X,
@@ -52,11 +50,13 @@ import {
   DailyScheduleData,
   DayId,
   PublicDailyScheduleData,
+  ReminderSettings,
   SaveStatus,
   ScheduleRow,
   UserProfile,
   UserRole,
 } from './types/schedule';
+import { DEFAULT_REMINDER_SETTINGS } from './utils/reminderLogic';
 import {
   BLUEPRINT_LIMITS,
   DAYS_LIST,
@@ -77,7 +77,6 @@ import {
   isFictionalOrBlockedEmail,
   mergeConflictingRowsThreeWay,
   moveScheduleRow,
-  reorderScheduleRows,
   resolveAuthorizedUserAccess,
   sanitizeRowForFirestore,
   sanitizeUsersList,
@@ -86,7 +85,6 @@ import {
   upsertUserByEmail,
 } from './utils/scheduleLogic';
 import { SchedulePoster } from './components/SchedulePoster';
-import { ScheduleEditorPanel } from './components/ScheduleEditorPanel';
 import { ShareAndExportBar } from './components/ShareAndExportBar';
 import { CenterSettingsModal } from './components/CenterSettingsModal';
 import { UsersAndAuditModal } from './components/UsersAndAuditModal';
@@ -140,10 +138,49 @@ export default function App() {
       : 'saturday'
   );
 
+  // Sync selectedDay when ?day=<dayId> changes via popstate or Service Worker notificationclick
+  useEffect(() => {
+    const syncDayFromUrl = (rawUrlOrSearch?: string) => {
+      try {
+        const search = rawUrlOrSearch
+          ? new URL(rawUrlOrSearch, window.location.origin).search
+          : window.location.search;
+        const params = new URLSearchParams(search);
+        const dayParam = params.get('day') as DayId | null;
+        if (dayParam && DAYS_LIST.some((d) => d.id === dayParam)) {
+          setSelectedDay(dayParam);
+        }
+      } catch {
+        // Ignore URL parse error
+      }
+    };
+
+    const handlePopState = () => syncDayFromUrl();
+    const handleSwMessage = (event: MessageEvent) => {
+      if (
+        event.data &&
+        event.data.type === 'NOTIFICATION_CLICK_NAVIGATE' &&
+        typeof event.data.url === 'string'
+      ) {
+        syncDayFromUrl(event.data.url);
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', handleSwMessage);
+    }
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.removeEventListener('message', handleSwMessage);
+      }
+    };
+  }, []);
+
   const [viewMode, setViewMode] = useState<'public' | 'manage'>(
     isStrictPublicUrl ? 'public' : 'manage'
   );
-  const [showAdvancedPanel, setShowAdvancedPanel] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   // Copy full day confirmation modal state
@@ -178,6 +215,9 @@ export default function App() {
   const [settings, setSettings] = useState<CenterSettings>(FALLBACK_SETTINGS);
   const [defaultSettings, setDefaultSettings] =
     useState<CenterSettings>(FALLBACK_SETTINGS);
+  const [reminderSettings, setReminderSettings] = useState<ReminderSettings>({
+    ...DEFAULT_REMINDER_SETTINGS,
+  });
   const [schedules, setSchedulesState] = useState<Record<DayId, DailyScheduleData>>(
     () => {
       const emptyMap = {} as Record<DayId, DailyScheduleData>;
@@ -237,7 +277,6 @@ export default function App() {
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('saved');
   const saveStatusRef = useRef<SaveStatus>('saved');
   const [conflict, setConflict] = useState<ConflictInfo | null>(null);
-  const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
 
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showUsersAuditModal, setShowUsersAuditModal] = useState<
@@ -745,9 +784,31 @@ export default function App() {
       );
     }
 
+    let unsubReminders: (() => void) | null = null;
+    if (isStaffAuthenticated) {
+      const remindersRef = doc(db, 'appConfig', 'reminders');
+      unsubReminders = onSnapshot(
+        remindersRef,
+        (snap) => {
+          if (snap.exists()) {
+            const remoteReminders = snap.data() as ReminderSettings;
+            setReminderSettings((prev) => ({
+              ...prev,
+              ...remoteReminders,
+              timezone: 'Africa/Cairo',
+            }));
+          }
+        },
+        () => {
+          // Handled
+        }
+      );
+    }
+
     return () => {
       unsubSettings();
       unsubSchedule();
+      if (unsubReminders) unsubReminders();
     };
   }, [authReady, isLoaded, isStaffAuthenticated, selectedDay]);
 
@@ -1339,16 +1400,6 @@ export default function App() {
     );
   };
 
-  const handleReorderRows = (fromIndex: number, toIndex: number) => {
-    if (!userCanEditSelectedDay) return;
-    mutateDayScheduleDraft(
-      selectedDay,
-      (prevRows) => reorderScheduleRows(prevRows, fromIndex, toIndex),
-      'REORDER_ROWS',
-      `إعادة ترتيب الصفوف من #${fromIndex + 1} إلى #${toIndex + 1}`
-    );
-  };
-
   const handleCopyRowToDay = (row: ScheduleRow, targetDayId: DayId) => {
     if (!canUserEditDay(activeRole, allowedDays, targetDayId)) return;
     if (isCompletelyEmptyRow(row)) return;
@@ -1441,14 +1492,27 @@ export default function App() {
     );
   };
 
-  const handleSaveSettings = async (newSettings: CenterSettings) => {
+  const handleSaveSettings = async (
+    newSettings: CenterSettings,
+    updatedReminders?: Omit<
+      ReminderSettings,
+      'lastSentDate' | 'updatedBy' | 'updatedByEmail' | 'updatedAt'
+    >
+  ) => {
     if (activeRole !== 'ADMIN') return;
     setSettings(newSettings);
+    if (updatedReminders) {
+      setReminderSettings((prev) => ({
+        ...prev,
+        ...updatedReminders,
+      }));
+    }
+
     await appendAuditLog(
       'UPDATE_SETTINGS',
       'center',
       'إعدادات المركز',
-      'تحديث إعدادات الهوية البصرية وأرقام التواصل للمركز'
+      'تحديث إعدادات الهوية البصرية والإشعار اليومي للمركز'
     );
 
     if (firebaseUser) {
@@ -1466,6 +1530,79 @@ export default function App() {
           // Handled
         }
       }
+
+      if (updatedReminders) {
+        try {
+          const reminderRef = doc(db, 'appConfig', 'reminders');
+          const existingSnap = await getDoc(reminderRef);
+          const reminderPayload = {
+            enabled: updatedReminders.enabled,
+            time: updatedReminders.time,
+            timezone: 'Africa/Cairo' as const,
+            targetDay: updatedReminders.targetDay,
+            title: updatedReminders.title,
+            body: updatedReminders.body,
+            updatedBy: firebaseUser.uid,
+            updatedByEmail: firebaseUser.email || PRIMARY_ADMIN_EMAIL,
+            updatedAt: serverTimestamp(),
+          };
+          if (existingSnap.exists()) {
+            await updateDoc(reminderRef, reminderPayload);
+          } else {
+            await setDoc(reminderRef, reminderPayload);
+          }
+        } catch (err) {
+          try {
+            handleFirestoreError(
+              err,
+              OperationType.WRITE,
+              'appConfig/reminders'
+            );
+          } catch {
+            // Handled
+          }
+        }
+      }
+    }
+  };
+
+  const handleSendTestReminder = async (): Promise<{
+    ok: boolean;
+    message: string;
+  }> => {
+    if (!firebaseUser || activeRole !== 'ADMIN') {
+      return { ok: false, message: 'غير مصرح بإرسال إشعار تجريبي.' };
+    }
+    try {
+      const idToken = await firebaseUser.getIdToken();
+      const response = await fetch('/api/send-reminders?test=1', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+          'Content-Type': 'application/json',
+        },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        return {
+          ok: false,
+          message:
+            data.error ||
+            `تعذر الإرسال (${response.status}). تأكد من إعداد متغيرات الخادم وتفعيل الإشعارات على جهازك.`,
+        };
+      }
+      return {
+        ok: true,
+        message:
+          data.message ||
+          `تم إرسال الإشعار التجريبي بنجاح (${data.sentCount ?? 0} جهاز).`,
+      };
+    } catch {
+      return {
+        ok: false,
+        message:
+          'تعذر الوصول إلى نقطة /api/send-reminders (تعمل عند الاستضافة على Vercel مع إعداد المفاتيح).',
+      };
     }
   };
 
@@ -1644,8 +1781,8 @@ export default function App() {
       {/* Top Bar: Always Sticky & Visible while scrolling with Day Navigation + Undo + Login/Logout */}
       <header className="sticky top-0 z-50 bg-gradient-to-r from-purple-950 via-indigo-950 to-purple-950 text-white border-b-2 border-purple-800 shadow-lg backdrop-blur-md">
         <div className="mx-auto max-w-7xl px-2.5 sm:px-6 py-2 flex items-center justify-between gap-2 overflow-x-auto no-scrollbar">
-          {/* Sidebar Menu Button — Shown ONLY when LOGGED IN as ADMIN */}
-          {Boolean(firebaseUser) && activeRole === 'ADMIN' && !isStrictPublicUrl && (
+          {/* Sidebar Menu Button — Shown when LOGGED IN as authorized staff */}
+          {isStaffAuthenticated && !isStrictPublicUrl && (
             <button
               type="button"
               onClick={() => setIsSidebarOpen(true)}
@@ -1676,7 +1813,6 @@ export default function App() {
                   type="button"
                   onClick={() => {
                     setSelectedDay(day.id);
-                    setSelectedRowId(null);
                   }}
                   data-testid={`day-tab-${day.id}`}
                   aria-current={isSelected ? 'page' : undefined}
@@ -1728,7 +1864,7 @@ export default function App() {
                     {saveStatus === 'saving'
                       ? 'جارٍ الحفظ...'
                       : saveStatus === 'error'
-                      ? 'خطأ في الحفظ'
+                      ? 'تعذر الحفظ'
                       : 'تم الحفظ'}
                   </span>
                 </span>
@@ -1779,8 +1915,8 @@ export default function App() {
         </div>
       </header>
 
-      {/* Slide-Over RTL Sidebar Menu — Rendered ONLY when LOGGED IN as ADMIN */}
-      {Boolean(firebaseUser) && activeRole === 'ADMIN' && !isStrictPublicUrl && (
+      {/* Slide-Over RTL Sidebar Menu — Rendered when LOGGED IN as authorized staff */}
+      {isStaffAuthenticated && !isStrictPublicUrl && (
         <div
           aria-hidden={!isSidebarOpen}
           className={`fixed inset-0 z-50 transition-opacity duration-200 ${
@@ -1802,7 +1938,7 @@ export default function App() {
             }`}
           >
             <div className="p-4 space-y-5">
-              {/* 1. Official Complex Logo & Name */}
+              {/* 1) الرأس: الشعار واسم المجمع وزر الإغلاق */}
               <div className="flex items-start justify-between gap-2 pb-4 border-b border-slate-200">
                 <div className="flex items-center gap-3">
                   <div className="h-14 w-14 rounded-2xl bg-purple-50 p-1.5 border border-purple-200 flex items-center justify-center shrink-0 shadow-xs">
@@ -1831,10 +1967,10 @@ export default function App() {
                 </button>
               </div>
 
-              {/* 2. Schedule Editing Controls */}
+              {/* 2) قسم "الجدول" */}
               <div className="space-y-3">
                 <h2 className="text-xs font-black text-slate-500 uppercase tracking-wider">
-                  التعديل وإدارة الجدول
+                  الجدول
                 </h2>
 
                 <div className="grid grid-cols-2 gap-1.5 rounded-xl bg-slate-100 p-1 border border-slate-200">
@@ -1876,6 +2012,8 @@ export default function App() {
                         className={`h-2 w-2 rounded-full shrink-0 ${
                           saveStatus === 'saving'
                             ? 'bg-amber-500 animate-pulse'
+                            : saveStatus === 'error'
+                            ? 'bg-rose-500'
                             : 'bg-emerald-500'
                         }`}
                       />
@@ -1883,7 +2021,7 @@ export default function App() {
                         {saveStatus === 'saving'
                           ? 'جارٍ الحفظ...'
                           : saveStatus === 'error'
-                          ? 'تعذر الحفظ (راجع الاتصال)'
+                          ? 'تعذر الحفظ'
                           : 'تم الحفظ'}
                       </span>
                     </div>
@@ -1891,74 +2029,31 @@ export default function App() {
                 )}
 
                 {userCanEditSelectedDay && (
-                  <div className="grid grid-cols-1 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowAdvancedPanel(!showAdvancedPanel);
-                        setIsSidebarOpen(false);
-                      }}
-                      className="w-full inline-flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs font-extrabold text-slate-800 hover:bg-slate-100 transition cursor-pointer"
-                    >
-                      <span className="inline-flex items-center gap-2">
-                        <ListOrdered className="w-4 h-4 text-purple-700" />
-                        <span>
-                          {showAdvancedPanel
-                            ? 'إخفاء قائمة الصفوف المتقدمة'
-                            : 'قائمة الصفوف (تحرير متقدم)'}
-                        </span>
-                      </span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setCopyDayTarget(
-                          selectedDay === 'saturday' ? 'sunday' : 'saturday'
-                        );
-                        setShowCopyDayModal(true);
-                        setIsSidebarOpen(false);
-                      }}
-                      className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2.5 text-xs font-extrabold text-indigo-900 hover:bg-indigo-100 transition cursor-pointer"
-                    >
-                      <Copy className="w-4 h-4 shrink-0 text-indigo-700" />
-                      <span>نسخ جدول اليوم بالكامل إلى يوم آخر</span>
-                    </button>
-                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCopyDayTarget(
+                        selectedDay === 'saturday' ? 'sunday' : 'saturday'
+                      );
+                      setShowCopyDayModal(true);
+                      setIsSidebarOpen(false);
+                    }}
+                    data-testid="sidebar-copy-day-btn"
+                    className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2.5 text-xs font-extrabold text-indigo-900 hover:bg-indigo-100 transition cursor-pointer"
+                  >
+                    <Copy className="w-4 h-4 shrink-0 text-indigo-700" />
+                    <span>نسخ جدول اليوم إلى يوم آخر</span>
+                  </button>
                 )}
               </div>
 
-              {/* 3. Permissions & Account */}
-              <div className="space-y-2.5 pt-3 border-t border-slate-200">
-                <h2 className="text-xs font-black text-slate-500 uppercase tracking-wider">
-                  الصلاحيات وإدارة المستخدمين
-                </h2>
+              {/* 3) قسم "الإدارة" (للمدير ADMIN فقط) */}
+              {activeRole === 'ADMIN' && (
+                <div className="space-y-2.5 pt-3 border-t border-slate-200">
+                  <h2 className="text-xs font-black text-slate-500 uppercase tracking-wider">
+                    الإدارة
+                  </h2>
 
-                <div className="flex items-center justify-between gap-2 rounded-xl border border-purple-200 bg-purple-50/70 px-3 py-2">
-                  <span className="inline-flex items-center gap-1.5 text-xs font-bold text-purple-900">
-                    <Shield className="w-4 h-4 text-purple-700" />
-                    <span>الدور الحالي:</span>
-                  </span>
-                  <select
-                    id="role-switcher"
-                    aria-label="تبديل دور الصلاحية"
-                    value={activeRole || 'ADMIN'}
-                    onChange={(e) => {
-                      const nextRole = e.target.value as UserRole;
-                      setActiveRole(nextRole);
-                      if (nextRole === 'EDITOR') {
-                        setViewMode('manage');
-                        setIsSidebarOpen(false);
-                      }
-                    }}
-                    className="bg-transparent text-xs font-black text-purple-950 focus:outline-none cursor-pointer"
-                  >
-                    <option value="ADMIN">ADMIN (مدير)</option>
-                    <option value="EDITOR">EDITOR (محرر)</option>
-                  </select>
-                </div>
-
-                {activeRole === 'ADMIN' && (
                   <button
                     type="button"
                     onClick={() => {
@@ -1966,17 +2061,31 @@ export default function App() {
                       setIsSidebarOpen(false);
                     }}
                     data-testid="open-users-btn"
-                    aria-label="إدارة البريد والصلاحيات"
+                    aria-label="إدارة المستخدمين والصلاحيات"
                     className="w-full inline-flex items-center justify-between rounded-xl border border-purple-200 bg-purple-50 px-3 py-2.5 text-xs font-extrabold text-purple-950 hover:bg-purple-100 transition cursor-pointer"
                   >
                     <span className="inline-flex items-center gap-2">
                       <Users className="w-4 h-4 text-purple-700" />
-                      <span>إدارة البريد والصلاحيات (أدمن / محرر)</span>
+                      <span>إدارة المستخدمين والصلاحيات</span>
                     </span>
                   </button>
-                )}
 
-                {(activeRole === 'ADMIN' || activeRole === 'EDITOR') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowSettingsModal(true);
+                      setIsSidebarOpen(false);
+                    }}
+                    data-testid="open-settings-btn"
+                    aria-label="إعدادات المركز والإشعارات"
+                    className="w-full inline-flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-extrabold text-slate-800 hover:bg-slate-50 transition cursor-pointer"
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      <Settings className="w-4 h-4 text-purple-700" />
+                      <span>إعدادات المركز والإشعارات</span>
+                    </span>
+                  </button>
+
                   <button
                     type="button"
                     onClick={() => {
@@ -1989,82 +2098,38 @@ export default function App() {
                   >
                     <span className="inline-flex items-center gap-2">
                       <History className="w-4 h-4 text-purple-700" />
-                      <span>سجل التدقيق والتعديلات</span>
+                      <span>سجل التدقيق</span>
                     </span>
                   </button>
-                )}
+                </div>
+              )}
 
-                {activeRole === 'ADMIN' && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowSettingsModal(true);
-                      setIsSidebarOpen(false);
-                    }}
-                    data-testid="open-settings-btn"
-                    aria-label="إعدادات المركز"
-                    className="w-full inline-flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-extrabold text-slate-800 hover:bg-slate-50 transition cursor-pointer"
-                  >
-                    <span className="inline-flex items-center gap-2">
-                      <Settings className="w-4 h-4 text-purple-700" />
-                      <span>إعدادات المركز وأرقام التواصل</span>
-                    </span>
-                  </button>
-                )}
-
-                {/* Explicit Super Admin First-Time Database Seed Button (Requirement 1.2) */}
-                {isSuperAdminUser && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowSeedModal(true);
-                      setIsSidebarOpen(false);
-                    }}
-                    data-testid="open-seed-btn"
-                    aria-label="تهيئة قاعدة البيانات لأول مرة"
-                    className="w-full inline-flex items-center justify-between rounded-xl border border-amber-300 bg-amber-50 px-3 py-2.5 text-xs font-extrabold text-amber-950 hover:bg-amber-100 transition cursor-pointer"
-                  >
-                    <span className="inline-flex items-center gap-2">
-                      <Database className="w-4 h-4 text-amber-600" />
-                      <span>تهيئة قاعدة البيانات لأول مرة</span>
-                    </span>
-                  </button>
-                )}
-              </div>
-
-              {/* 4. App & Account */}
+              {/* 4) قسم "حسابي" */}
               <div className="space-y-2.5 pt-3 border-t border-slate-200">
                 <h2 className="text-xs font-black text-slate-500 uppercase tracking-wider">
-                  التطبيق والحساب
+                  حسابي
                 </h2>
+
+                {firebaseUser && (
+                  <div className="text-[11px] font-bold text-slate-600 truncate">
+                    {firebaseUser.email}
+                  </div>
+                )}
 
                 <div className="flex flex-wrap items-center gap-2">
                   <PWAInstallButton />
                   <NotificationToggleButton />
                 </div>
 
-                {firebaseUser ? (
-                  <div className="space-y-2 pt-1">
-                    <div className="text-[11px] font-bold text-slate-600 truncate">
-                      مسجل باسم: {firebaseUser.email}
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => signOut(auth)}
-                      className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-extrabold text-rose-800 hover:bg-rose-100 transition cursor-pointer"
-                    >
-                      <LogOut className="w-4 h-4" />
-                      <span>تسجيل الخروج</span>
-                    </button>
-                  </div>
-                ) : (
+                {firebaseUser && (
                   <button
                     type="button"
-                    onClick={handleGoogleSignIn}
-                    className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl bg-slate-900 px-3 py-2.5 text-xs font-extrabold text-white hover:bg-slate-800 transition cursor-pointer"
+                    onClick={() => signOut(auth)}
+                    data-testid="sidebar-logout-btn"
+                    className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-extrabold text-rose-800 hover:bg-rose-100 transition cursor-pointer"
                   >
-                    <LogIn className="w-4 h-4" />
-                    <span>تسجيل الدخول بحساب جوجل</span>
+                    <LogOut className="w-4 h-4" />
+                    <span>تسجيل الخروج</span>
                   </button>
                 )}
               </div>
@@ -2156,45 +2221,8 @@ export default function App() {
         />
 
         {/* Main Workspace: Interactive Poster Table */}
-        <div
-          className={
-            showAdvancedPanel && userCanEditSelectedDay
-              ? 'grid grid-cols-1 lg:grid-cols-12 gap-6 items-start'
-              : 'mx-auto max-w-[780px]'
-          }
-        >
-          {showAdvancedPanel && userCanEditSelectedDay && (
-            <div className="lg:col-span-5 order-2 lg:order-1">
-              <ScheduleEditorPanel
-                dayId={selectedDay}
-                dayLabel={currentSchedule.dayLabel}
-                draftRows={displayedRows}
-                saveStatus={saveStatus}
-                canUndo={canUndo}
-                undoCount={undoCount}
-                selectedRowId={selectedRowId}
-                onSelectRow={setSelectedRowId}
-                onAddRow={handleAddRow}
-                onUpdateRow={handleUpdateRow}
-                onDeleteRow={handleDeleteRow}
-                onMoveRow={handleMoveRow}
-                onReorderRows={handleReorderRows}
-                onCopyRowToDay={handleCopyRowToDay}
-                onCopyDayToDay={handleCopyDayToDay}
-                onUndo={handleUndo}
-                conflict={conflict}
-                onResolveConflict={handleResolveConflict}
-              />
-            </div>
-          )}
-
-          <div
-            className={
-              showAdvancedPanel && userCanEditSelectedDay
-                ? 'lg:col-span-7 order-1 lg:order-2'
-                : 'w-full'
-            }
-          >
+        <div className="mx-auto max-w-[780px]">
+          <div className="w-full">
             <SchedulePoster
               dayId={selectedDay}
               dayLabel={currentSchedule.dayLabel}
@@ -2426,7 +2454,11 @@ export default function App() {
         <CenterSettingsModal
           settings={settings}
           defaultSettings={defaultSettings}
+          reminderSettings={reminderSettings}
+          isSuperAdminUser={isSuperAdminUser}
+          onOpenSeedModal={() => setShowSeedModal(true)}
           onSave={handleSaveSettings}
+          onSendTestReminder={handleSendTestReminder}
           onClose={() => setShowSettingsModal(false)}
         />
       )}

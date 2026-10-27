@@ -253,6 +253,14 @@ service cloud.firestore {
         data.createdAt is timestamp;
     }
 
+    function isValidReminderConfig(data) {
+      return data.enabled is bool &&
+        data.time is string && data.time.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$') &&
+        data.targetDay in ['today', 'tomorrow'] &&
+        data.title is string && data.title.size() <= 160 &&
+        data.body is string && data.body.size() <= 500;
+    }
+
     // 4. Collection Rules
     match /admins/{adminId} {
       allow get: if isValidId(adminId) && isAdmin();
@@ -302,6 +310,28 @@ service cloud.firestore {
       allow create: if isSignedIn() && isValidId(logId) && isValidAuditLog(incoming()) &&
         incoming().userEmail == request.auth.token.email;
       allow update, delete: if false;
+    }
+
+    match /fcmTokens/{tokenId} {
+      allow get, list: if false;
+      allow create, update: if isSignedIn() && isValidId(tokenId) && isStaff() &&
+        incoming().email is string &&
+        request.auth.token.email.lower() == incoming().email.lower() &&
+        incoming().token is string &&
+        incoming().token.size() >= 10 &&
+        incoming().token.size() <= 4096;
+      allow delete: if isSignedIn() && isValidId(tokenId) && isStaff();
+    }
+
+    match /appConfig/{id} {
+      allow get, list: if isStaff();
+      allow create: if isSignedIn() && isValidId(id) && isAdmin() &&
+        isValidReminderConfig(incoming()) &&
+        !('lastSentDate' in incoming());
+      allow update: if isSignedIn() && isValidId(id) && isAdmin() &&
+        isValidReminderConfig(incoming()) &&
+        !('lastSentDate' in incoming().diff(existing()).affectedKeys());
+      allow delete: if false;
     }
   }
 }

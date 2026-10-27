@@ -1,40 +1,111 @@
 import React, { useState } from 'react';
-import { Check, Palette, RotateCcw, Settings, X } from 'lucide-react';
-import { CenterSettings } from '../types/schedule';
+import {
+  BellRing,
+  Check,
+  Database,
+  Palette,
+  RotateCcw,
+  Send,
+  Settings,
+  X,
+} from 'lucide-react';
+import { CenterSettings, ReminderSettings } from '../types/schedule';
 import { validateCenterSettings } from '../utils/scheduleLogic';
+import {
+  DEFAULT_REMINDER_SETTINGS,
+  validateReminderSettings,
+} from '../utils/reminderLogic';
 
 interface CenterSettingsModalProps {
   settings: CenterSettings;
   defaultSettings: CenterSettings;
-  onSave: (updated: CenterSettings) => void;
+  reminderSettings?: ReminderSettings;
+  isSuperAdminUser?: boolean;
+  onOpenSeedModal?: () => void;
+  onSave: (
+    updated: CenterSettings,
+    updatedReminders?: Omit<
+      ReminderSettings,
+      'lastSentDate' | 'updatedBy' | 'updatedByEmail' | 'updatedAt'
+    >
+  ) => void;
+  onSendTestReminder?: () => Promise<{ ok: boolean; message: string }>;
   onClose: () => void;
 }
 
 export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
   settings,
   defaultSettings,
+  reminderSettings,
+  isSuperAdminUser = false,
+  onOpenSeedModal,
   onSave,
+  onSendTestReminder,
   onClose,
 }) => {
   const [draft, setDraft] = useState<CenterSettings>({ ...settings });
+  const [reminderDraft, setReminderDraft] = useState<
+    Omit<
+      ReminderSettings,
+      'lastSentDate' | 'updatedBy' | 'updatedByEmail' | 'updatedAt'
+    >
+  >({
+    enabled: reminderSettings?.enabled ?? DEFAULT_REMINDER_SETTINGS.enabled,
+    time: reminderSettings?.time || DEFAULT_REMINDER_SETTINGS.time,
+    timezone: 'Africa/Cairo',
+    targetDay:
+      reminderSettings?.targetDay === 'today' ||
+      reminderSettings?.targetDay === 'tomorrow'
+        ? reminderSettings.targetDay
+        : DEFAULT_REMINDER_SETTINGS.targetDay,
+    title: reminderSettings?.title || DEFAULT_REMINDER_SETTINGS.title,
+    body: reminderSettings?.body || DEFAULT_REMINDER_SETTINGS.body,
+  });
   const [errors, setErrors] = useState<string[]>([]);
+  const [testSending, setTestSending] = useState(false);
+  const [testStatusMsg, setTestStatusMsg] = useState<{
+    ok: boolean;
+    message: string;
+  } | null>(null);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const validation = validateCenterSettings(draft);
-    if (!validation.valid) {
-      setErrors(validation.errors);
+    const centerValidation = validateCenterSettings(draft);
+    const reminderValidation = validateReminderSettings(reminderDraft);
+    const allErrors = [
+      ...centerValidation.errors,
+      ...reminderValidation.errors,
+    ];
+    if (allErrors.length > 0) {
+      setErrors(allErrors);
       return;
     }
-    onSave(draft);
+    onSave(draft, reminderValidation.sanitized);
     onClose();
+  };
+
+  const handleSendTest = async () => {
+    if (!onSendTestReminder) return;
+    setTestSending(true);
+    setTestStatusMsg(null);
+    try {
+      const result = await onSendTestReminder();
+      setTestStatusMsg(result);
+    } catch {
+      setTestStatusMsg({
+        ok: false,
+        message: 'تعذر الاتصال بخادم الإشعارات التجريبية.',
+      });
+    } finally {
+      setTestSending(false);
+    }
   };
 
   return (
     <div
       role="dialog"
       aria-modal="true"
-      aria-label="إعدادات المركز والهوية البصرية"
+      aria-label="إعدادات المركز والإشعارات"
       dir="rtl"
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs overflow-y-auto"
     >
@@ -42,7 +113,7 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
         <div className="flex items-center justify-between border-b border-slate-200 pb-3 mb-4">
           <h3 className="text-lg font-extrabold text-slate-900 flex items-center gap-2">
             <Settings className="w-5 h-5 text-purple-700" />
-            <span>إعدادات المركز والشعارات والتذييل والألوان</span>
+            <span>إعدادات المركز والإشعارات</span>
           </h3>
           <button
             type="button"
@@ -72,7 +143,9 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
               <input
                 type="text"
                 value={draft.complexName}
-                onChange={(e) => setDraft({ ...draft, complexName: e.target.value })}
+                onChange={(e) =>
+                  setDraft({ ...draft, complexName: e.target.value })
+                }
                 className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-bold"
               />
             </div>
@@ -84,7 +157,9 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
               <input
                 type="text"
                 value={draft.associationName}
-                onChange={(e) => setDraft({ ...draft, associationName: e.target.value })}
+                onChange={(e) =>
+                  setDraft({ ...draft, associationName: e.target.value })
+                }
                 className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-bold"
               />
             </div>
@@ -96,7 +171,9 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
               <input
                 type="text"
                 value={draft.rightLogoUrl}
-                onChange={(e) => setDraft({ ...draft, rightLogoUrl: e.target.value })}
+                onChange={(e) =>
+                  setDraft({ ...draft, rightLogoUrl: e.target.value })
+                }
                 className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-bold"
               />
             </div>
@@ -108,7 +185,9 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
               <input
                 type="text"
                 value={draft.leftLogoUrl}
-                onChange={(e) => setDraft({ ...draft, leftLogoUrl: e.target.value })}
+                onChange={(e) =>
+                  setDraft({ ...draft, leftLogoUrl: e.target.value })
+                }
                 className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-bold"
               />
             </div>
@@ -127,7 +206,9 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
                 <input
                   type="text"
                   value={draft.address}
-                  onChange={(e) => setDraft({ ...draft, address: e.target.value })}
+                  onChange={(e) =>
+                    setDraft({ ...draft, address: e.target.value })
+                  }
                   className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-bold"
                 />
               </div>
@@ -139,7 +220,9 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
                 <input
                   type="text"
                   value={draft.whatsappPhone}
-                  onChange={(e) => setDraft({ ...draft, whatsappPhone: e.target.value })}
+                  onChange={(e) =>
+                    setDraft({ ...draft, whatsappPhone: e.target.value })
+                  }
                   className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-bold"
                 />
               </div>
@@ -151,7 +234,9 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
                 <input
                   type="text"
                   value={draft.landlinePhone}
-                  onChange={(e) => setDraft({ ...draft, landlinePhone: e.target.value })}
+                  onChange={(e) =>
+                    setDraft({ ...draft, landlinePhone: e.target.value })
+                  }
                   className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-bold"
                 />
               </div>
@@ -163,7 +248,9 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
                 <input
                   type="text"
                   value={draft.dentalPhone}
-                  onChange={(e) => setDraft({ ...draft, dentalPhone: e.target.value })}
+                  onChange={(e) =>
+                    setDraft({ ...draft, dentalPhone: e.target.value })
+                  }
                   className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-bold"
                 />
               </div>
@@ -175,7 +262,9 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
                 <input
                   type="text"
                   value={draft.dentalLabel}
-                  onChange={(e) => setDraft({ ...draft, dentalLabel: e.target.value })}
+                  onChange={(e) =>
+                    setDraft({ ...draft, dentalLabel: e.target.value })
+                  }
                   className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-bold"
                 />
               </div>
@@ -196,7 +285,9 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
                 <input
                   type="color"
                   value={draft.bgStartColor}
-                  onChange={(e) => setDraft({ ...draft, bgStartColor: e.target.value })}
+                  onChange={(e) =>
+                    setDraft({ ...draft, bgStartColor: e.target.value })
+                  }
                   className="h-9 w-full cursor-pointer rounded-lg border border-slate-300 p-1"
                 />
               </div>
@@ -207,7 +298,9 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
                 <input
                   type="color"
                   value={draft.bgEndColor}
-                  onChange={(e) => setDraft({ ...draft, bgEndColor: e.target.value })}
+                  onChange={(e) =>
+                    setDraft({ ...draft, bgEndColor: e.target.value })
+                  }
                   className="h-9 w-full cursor-pointer rounded-lg border border-slate-300 p-1"
                 />
               </div>
@@ -244,7 +337,9 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
                 <input
                   type="color"
                   value={draft.fromHeaderColor}
-                  onChange={(e) => setDraft({ ...draft, fromHeaderColor: e.target.value })}
+                  onChange={(e) =>
+                    setDraft({ ...draft, fromHeaderColor: e.target.value })
+                  }
                   className="h-9 w-full cursor-pointer rounded-lg border border-slate-300 p-1"
                 />
               </div>
@@ -255,7 +350,9 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
                 <input
                   type="color"
                   value={draft.toHeaderColor}
-                  onChange={(e) => setDraft({ ...draft, toHeaderColor: e.target.value })}
+                  onChange={(e) =>
+                    setDraft({ ...draft, toHeaderColor: e.target.value })
+                  }
                   className="h-9 w-full cursor-pointer rounded-lg border border-slate-300 p-1"
                 />
               </div>
@@ -266,12 +363,171 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
                 <input
                   type="color"
                   value={draft.footerBgColor}
-                  onChange={(e) => setDraft({ ...draft, footerBgColor: e.target.value })}
+                  onChange={(e) =>
+                    setDraft({ ...draft, footerBgColor: e.target.value })
+                  }
                   className="h-9 w-full cursor-pointer rounded-lg border border-slate-300 p-1"
                 />
               </div>
             </div>
           </div>
+
+          {/* Daily Reminder Section (appConfig/reminders) */}
+          <div className="pt-3 border-t border-slate-200 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <h4 className="text-xs font-extrabold text-slate-800 flex items-center gap-1.5">
+                <BellRing className="w-4 h-4 text-purple-600" />
+                <span>الإشعار اليومي</span>
+              </h4>
+              <label className="inline-flex items-center gap-2 text-xs font-bold text-slate-800 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={reminderDraft.enabled}
+                  onChange={(e) =>
+                    setReminderDraft({
+                      ...reminderDraft,
+                      enabled: e.target.checked,
+                    })
+                  }
+                  data-testid="reminder-enabled-checkbox"
+                  className="h-4 w-4 rounded border-slate-300 text-purple-700 focus:ring-purple-600"
+                />
+                <span>تفعيل الإشعار اليومي للموظفين</span>
+              </label>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  وقت الإشعار اليومي (بتوقيت القاهرة Africa/Cairo)
+                </label>
+                <input
+                  type="time"
+                  value={reminderDraft.time}
+                  onChange={(e) =>
+                    setReminderDraft({
+                      ...reminderDraft,
+                      time: e.target.value || '19:00',
+                    })
+                  }
+                  data-testid="reminder-time-input"
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-bold"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  اليوم المستهدف في التذكير
+                </label>
+                <select
+                  value={reminderDraft.targetDay}
+                  onChange={(e) =>
+                    setReminderDraft({
+                      ...reminderDraft,
+                      targetDay:
+                        e.target.value === 'today' ? 'today' : 'tomorrow',
+                    })
+                  }
+                  data-testid="reminder-target-day-select"
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-bold"
+                >
+                  <option value="tomorrow">جدول الغد (tomorrow)</option>
+                  <option value="today">جدول اليوم (today)</option>
+                </select>
+              </div>
+
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  عنوان الإشعار
+                </label>
+                <input
+                  type="text"
+                  maxLength={160}
+                  value={reminderDraft.title}
+                  onChange={(e) =>
+                    setReminderDraft({
+                      ...reminderDraft,
+                      title: e.target.value,
+                    })
+                  }
+                  data-testid="reminder-title-input"
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-bold"
+                />
+              </div>
+
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  نص الإشعار (يمكنك استخدام &#123;اليوم&#125; لإدراج اسم اليوم تلقائياً)
+                </label>
+                <input
+                  type="text"
+                  maxLength={500}
+                  value={reminderDraft.body}
+                  onChange={(e) =>
+                    setReminderDraft({
+                      ...reminderDraft,
+                      body: e.target.value,
+                    })
+                  }
+                  data-testid="reminder-body-input"
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-bold"
+                />
+              </div>
+            </div>
+
+            {onSendTestReminder && (
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                <button
+                  type="button"
+                  disabled={testSending}
+                  onClick={handleSendTest}
+                  data-testid="send-test-reminder-btn"
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-purple-300 bg-purple-50 px-3.5 py-2 text-xs font-extrabold text-purple-900 hover:bg-purple-100 disabled:opacity-50 transition cursor-pointer"
+                >
+                  <Send className="w-3.5 h-3.5 text-purple-700" />
+                  <span>
+                    {testSending
+                      ? 'جارٍ إرسال الإشعار التجريبي...'
+                      : 'إرسال إشعار تجريبي الآن'}
+                  </span>
+                </button>
+
+                {testStatusMsg && (
+                  <span
+                    data-testid="test-reminder-status"
+                    className={`text-xs font-bold ${
+                      testStatusMsg.ok ? 'text-emerald-700' : 'text-rose-700'
+                    }`}
+                  >
+                    {testStatusMsg.message}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+
+          {isSuperAdminUser && onOpenSeedModal && (
+            <div className="pt-3 border-t border-slate-200 space-y-2">
+              <h4 className="text-xs font-extrabold text-slate-800">
+                خيارات متقدمة
+              </h4>
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onOpenSeedModal();
+                }}
+                data-testid="open-seed-btn"
+                aria-label="تهيئة قاعدة البيانات لأول مرة"
+                className="w-full inline-flex items-center justify-between rounded-xl border border-amber-300 bg-amber-50 px-3 py-2.5 text-xs font-extrabold text-amber-950 hover:bg-amber-100 transition cursor-pointer"
+              >
+                <span className="inline-flex items-center gap-2">
+                  <Database className="w-4 h-4 text-amber-600" />
+                  <span>تهيئة قاعدة البيانات لأول مرة</span>
+                </span>
+              </button>
+            </div>
+          )}
 
           <div className="flex flex-wrap items-center justify-between gap-2 pt-4 border-t border-slate-200">
             <button

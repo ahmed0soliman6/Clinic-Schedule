@@ -6,19 +6,24 @@ import {
   doc,
   getDocFromServer,
   getFirestore,
+  serverTimestamp,
   setDoc,
 } from 'firebase/firestore';
 import {
+  deleteToken,
   getMessaging,
   getToken,
   isSupported as isMessagingSupported,
   onMessage,
 } from 'firebase/messaging';
 import firebaseAppletConfig from '../firebase-applet-config.json';
+import { computeTokenDocId } from './utils/reminderLogic';
 
 export const VAPID_PUBLIC_KEY =
   import.meta.env.VITE_FIREBASE_VAPID_KEY ||
   'BAfoL-06-pPKxzS7IcRIKa4bxuSCcmo7o6PE7tWpf9Ov1AjCfBGQPMF0KiRPYQaVGBkhTIvfWvL7qqCayFIE0Y0';
+
+export const FCM_TOKEN_STORAGE_KEY = 'meet_azzoun_fcm_token_v1';
 
 const resolvedConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || firebaseAppletConfig.apiKey,
@@ -73,12 +78,45 @@ if (typeof window !== 'undefined') {
     });
 }
 
+let foregroundMessageListenerRegistered = false;
+
+function ensureForegroundMessageListenerOnce() {
+  if (foregroundMessageListenerRegistered || typeof window === 'undefined') {
+    return;
+  }
+  isMessagingSupported()
+    .then((supported) => {
+      if (!supported || foregroundMessageListenerRegistered) return;
+      const messaging = getMessaging(app);
+      foregroundMessageListenerRegistered = true;
+      onMessage(messaging, (payload) => {
+        const data = payload.data || {};
+        const title =
+          data.title ||
+          payload.notification?.title ||
+          'تذكير جدول العيادات — مجمع ميت عزون الطبي';
+        const body =
+          data.body ||
+          payload.notification?.body ||
+          'يرجى مراجعة وتجهيز جدول العيادات ومشاركته.';
+        const url = data.url || '/';
+        showLocalNotification(title, body, url);
+      });
+    })
+    .catch(() => {
+      // Ignore in unsupported environments
+    });
+}
+
 /**
- * Request Web Push / FCM Notification permission and register with the VAPID key
+ * Request Web Push / FCM Notification permission, get token via navigator.serviceWorker.ready,
+ * and persist in Firestore `fcmTokens/{sha256(token)}`.
  */
 export async function enablePushNotifications(): Promise<{
   granted: boolean;
+  blocked?: boolean;
   token?: string;
+  docId?: string;
   message: string;
 }> {
   if (typeof window === 'undefined' || !('Notification' in window)) {
@@ -88,63 +126,164 @@ export async function enablePushNotifications(): Promise<{
     };
   }
 
+  const currentUser = auth.currentUser;
+  if (!currentUser || !currentUser.email) {
+    return {
+      granted: false,
+      message: 'يرجى تسجيل الدخول بحساب موظف معتمد لتفعيل الإشعارات.',
+    };
+  }
+
   try {
     const permission = await Notification.requestPermission();
+    if (permission === 'denied') {
+      return {
+        granted: false,
+        blocked: true,
+        message:
+          'الإشعارات محظورة من إعدادات المتصفح. افتح إعدادات الموقع في المتصفح واسمح بالإشعارات ثم أعد المحاولة.',
+      };
+    }
     if (permission !== 'granted') {
       return {
         granted: false,
-        message: 'يرجى السماح بالإشعارات من إعدادات المتصفح لتلقي تنبيهات المواعيد.',
+        message: 'لم يتم منح إذن الإشعارات.',
       };
     }
 
-    let fcmToken: string | undefined;
     const supported = await isMessagingSupported().catch(() => false);
-    if (supported && 'serviceWorker' in navigator) {
-      try {
-        const swReg = await navigator.serviceWorker.register(
-          '/firebase-messaging-sw.js',
-          { scope: '/' }
-        );
-        const messaging = getMessaging(app);
-        fcmToken = await getToken(messaging, {
-          vapidKey: VAPID_PUBLIC_KEY,
-          serviceWorkerRegistration: swReg,
-        });
-
-        onMessage(messaging, (payload) => {
-          const title =
-            payload.notification?.title || 'مجمع ميت عزون الطبي';
-          const body =
-            payload.notification?.body ||
-            'تم تحديث جدول عيادات مجمع ميت عزون الطبي';
-          showLocalNotification(title, body);
-        });
-      } catch {
-        // Fallback to local Service Worker / Browser Notification if in preview iframe
-      }
+    if (!supported || !('serviceWorker' in navigator)) {
+      return {
+        granted: false,
+        message: 'خدمة إشعارات الخلفية غير مدعومة في هذا المتصفح حالياً.',
+      };
     }
 
-    await showLocalNotification(
-      'مجمع ميت عزون الطبي',
-      'تم تفعيل إشعارات تحديث جداول العيادات الفورية بنجاح!'
-    );
+    const swReg = await navigator.serviceWorker.ready;
+    const messaging = getMessaging(app);
+    const fcmToken = await getToken(messaging, {
+      vapidKey: import.meta.env.VITE_FIREBASE_VAPID_KEY || VAPID_PUBLIC_KEY,
+      serviceWorkerRegistration: swReg,
+    });
+
+    if (!fcmToken) {
+      return {
+        granted: false,
+        message: 'تعذر استخراج رمز الإشعارات (FCM Token) من المتصفح.',
+      };
+    }
+
+    ensureForegroundMessageListenerOnce();
+
+    const docId = await computeTokenDocId(fcmToken);
+    const cleanEmail = currentUser.email.trim().toLowerCase();
+    const platform =
+      (navigator.userAgent || 'web').slice(0, 120) || 'web';
+
+    await setDoc(doc(db, 'fcmTokens', docId), {
+      token: fcmToken,
+      email: cleanEmail,
+      uid: currentUser.uid,
+      platform,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    try {
+      localStorage.setItem(
+        FCM_TOKEN_STORAGE_KEY,
+        JSON.stringify({ token: fcmToken, docId, email: cleanEmail })
+      );
+    } catch {
+      // Ignore storage error
+    }
 
     return {
       granted: true,
       token: fcmToken,
-      message: 'تم تفعيل الإشعارات الفورية بنجاح!',
+      docId,
+      message: 'تم تفعيل الإشعارات اليومية وحفظ جهازك بنجاح!',
+    };
+  } catch (err) {
+    console.warn('Enable push notifications error:', err);
+    return {
+      granted: false,
+      message:
+        'تعذر تفعيل الإشعارات حالياً. تأكد من فتح التطبيق عبر رابط HTTPS الرسمي أو تثبيته.',
+    };
+  }
+}
+
+/**
+ * Disables push notifications for this device: deletes `fcmTokens/{docId}` from Firestore
+ * and calls `deleteToken(messaging)`.
+ */
+export async function disablePushNotifications(): Promise<{
+  disabled: boolean;
+  message: string;
+}> {
+  try {
+    let savedDocId: string | null = null;
+    try {
+      const raw = localStorage.getItem(FCM_TOKEN_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as { token?: string; docId?: string };
+        if (parsed.docId) {
+          savedDocId = parsed.docId;
+        } else if (parsed.token) {
+          savedDocId = await computeTokenDocId(parsed.token);
+        }
+      }
+    } catch {
+      // Ignore
+    }
+
+    const supported = await isMessagingSupported().catch(() => false);
+    if (supported && 'serviceWorker' in navigator) {
+      try {
+        const messaging = getMessaging(app);
+        if (!savedDocId) {
+          const swReg = await navigator.serviceWorker.ready;
+          const currentToken = await getToken(messaging, {
+            vapidKey: import.meta.env.VITE_FIREBASE_VAPID_KEY || VAPID_PUBLIC_KEY,
+            serviceWorkerRegistration: swReg,
+          }).catch(() => '');
+          if (currentToken) {
+            savedDocId = await computeTokenDocId(currentToken);
+          }
+        }
+        await deleteToken(messaging).catch(() => false);
+      } catch {
+        // Ignore messaging delete error
+      }
+    }
+
+    if (savedDocId && auth.currentUser) {
+      await deleteDoc(doc(db, 'fcmTokens', savedDocId)).catch(() => undefined);
+    }
+
+    try {
+      localStorage.removeItem(FCM_TOKEN_STORAGE_KEY);
+    } catch {
+      // Ignore
+    }
+
+    return {
+      disabled: true,
+      message: 'تم إيقاف الإشعارات لهذا الجهاز وحذف رمز التنبيه.',
     };
   } catch {
     return {
-      granted: false,
-      message: 'تعذر تفعيل الإشعارات في هذا المتصفح حالياً.',
+      disabled: false,
+      message: 'حدث خطأ أثناء إيقاف الإشعارات.',
     };
   }
 }
 
 export async function showLocalNotification(
   title: string,
-  body: string
+  body: string,
+  url = '/'
 ): Promise<void> {
   if (
     typeof window === 'undefined' ||
@@ -164,6 +303,7 @@ export async function showLocalNotification(
           badge: '/pwa-192x192.png',
           dir: 'rtl',
           lang: 'ar',
+          data: { url },
         });
         return;
       }

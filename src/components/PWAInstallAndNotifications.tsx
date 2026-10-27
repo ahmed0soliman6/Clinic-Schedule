@@ -1,6 +1,18 @@
 import React, { useEffect, useState } from 'react';
-import { Bell, BellRing, Download, Smartphone, WifiOff, X } from 'lucide-react';
-import { enablePushNotifications } from '../firebase';
+import {
+  Bell,
+  BellOff,
+  BellRing,
+  Download,
+  Smartphone,
+  WifiOff,
+  X,
+} from 'lucide-react';
+import {
+  disablePushNotifications,
+  enablePushNotifications,
+  FCM_TOKEN_STORAGE_KEY,
+} from '../firebase';
 import { ComplexBrandLogo } from './BrandLogos';
 
 interface BeforeInstallPromptEvent extends Event {
@@ -21,8 +33,8 @@ export function usePWAInstall() {
         true;
     setIsInstalled(isStandalone);
 
-    const userAgent = window.navigator.userAgent.toLowerCase();
-    const isIOSDevice = /iphone|ipad|ipod/.test(userAgent);
+    const userAgent = window.navigator.userAgent;
+    const isIOSDevice = /iphone|ipad|ipod/i.test(userAgent);
     setIsIOS(isIOSDevice);
 
     const handleBeforeInstallPrompt = (e: Event) => {
@@ -127,10 +139,10 @@ export const PWAInstallButton: React.FC = () => {
         onClick={handleClick}
         data-testid="pwa-install-btn"
         aria-label="تثبيت تطبيق مجمع ميت عزون الطبي"
-        className="inline-flex items-center gap-1 rounded-xl border border-sky-200 bg-sky-50 px-2.5 py-1.5 text-xs font-extrabold text-sky-900 hover:bg-sky-100 transition cursor-pointer"
+        className="inline-flex items-center gap-1.5 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-xs font-extrabold text-sky-900 hover:bg-sky-100 transition cursor-pointer"
       >
         <Download className="w-3.5 h-3.5 text-sky-700 shrink-0" />
-        <span className="hidden sm:inline">تثبيت التطبيق</span>
+        <span>تثبيت التطبيق</span>
       </button>
 
       {showGuideModal && (
@@ -186,67 +198,163 @@ export const PWAInstallButton: React.FC = () => {
 };
 
 interface NotificationToggleButtonProps {
+  isStaffAuthenticated?: boolean;
   onSaveTokenToFirestore?: (token: string) => void;
+}
+
+type NotificationState = 'enabled' | 'disabled' | 'blocked';
+
+function resolveInitialNotificationState(): NotificationState {
+  if (typeof window === 'undefined' || !('Notification' in window)) {
+    return 'disabled';
+  }
+  if (Notification.permission === 'denied') {
+    return 'blocked';
+  }
+  if (Notification.permission === 'granted') {
+    try {
+      const saved = localStorage.getItem(FCM_TOKEN_STORAGE_KEY);
+      if (saved) return 'enabled';
+    } catch {
+      // Fall through
+    }
+  }
+  return 'disabled';
 }
 
 export const NotificationToggleButton: React.FC<
   NotificationToggleButtonProps
-> = ({ onSaveTokenToFirestore }) => {
-  const [enabled, setEnabled] = useState<boolean>(() => {
-    if (typeof window !== 'undefined' && 'Notification' in window) {
-      return Notification.permission === 'granted';
-    }
-    return false;
-  });
+> = ({ isStaffAuthenticated = true, onSaveTokenToFirestore }) => {
+  const { isInstalled, isIOS } = usePWAInstall();
+  const [status, setStatus] = useState<NotificationState>(
+    resolveInitialNotificationState
+  );
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [iosGuideMessage, setIosGuideMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  useEffect(() => {
+    setStatus(resolveInitialNotificationState());
+  }, []);
+
+  if (!isStaffAuthenticated) {
+    return null;
+  }
+
   const handleToggle = async () => {
-    setLoading(true);
-    const res = await enablePushNotifications();
-    setLoading(false);
-    setEnabled(res.granted);
-    setToastMsg(res.message);
-    if (res.granted && res.token && onSaveTokenToFirestore) {
-      onSaveTokenToFirestore(res.token);
+    setIosGuideMessage(null);
+
+    // iOS check: Web Push on iOS requires PWA installed to Home Screen first
+    if (isIOS && !isInstalled) {
+      const msg =
+        'ثبّت التطبيق من قائمة المشاركة ثم أضف إلى الشاشة الرئيسية لتفعيل الإشعارات';
+      setIosGuideMessage(msg);
+      setToastMsg(msg);
+      return;
     }
-    setTimeout(() => {
-      setToastMsg(null);
-    }, 3500);
+
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      if (Notification.permission === 'denied') {
+        setStatus('blocked');
+        setToastMsg(
+          'الإشعارات محظورة من إعدادات المتصفح. افتح إعدادات الموقع في المتصفح واسمح بالإشعارات.'
+        );
+        return;
+      }
+    }
+
+    setLoading(true);
+    try {
+      if (status === 'enabled') {
+        const res = await disablePushNotifications();
+        if (res.disabled) {
+          setStatus('disabled');
+        }
+        setToastMsg(res.message);
+      } else {
+        const res = await enablePushNotifications();
+        if (res.blocked) {
+          setStatus('blocked');
+        } else if (res.granted) {
+          setStatus('enabled');
+          if (res.token && onSaveTokenToFirestore) {
+            onSaveTokenToFirestore(res.token);
+          }
+        } else {
+          setStatus('disabled');
+        }
+        setToastMsg(res.message);
+      }
+    } finally {
+      setLoading(false);
+      setTimeout(() => {
+        setToastMsg(null);
+      }, 4500);
+    }
   };
 
   return (
-    <div className="relative inline-flex items-center">
+    <div className="w-full space-y-1.5">
       <button
         type="button"
         onClick={handleToggle}
         disabled={loading}
         data-testid="notifications-toggle-btn"
-        aria-label={enabled ? 'الإشعارات مفعلة' : 'تفعيل الإشعارات'}
-        title={
-          enabled
-            ? 'إشعارات المواعيد مفعلة (اضغط لإرسال إشعار تجريبي)'
-            : 'تفعيل إشعارات تحديث المواعيد'
+        aria-label={
+          status === 'enabled'
+            ? 'الإشعارات مفعّلة'
+            : status === 'blocked'
+            ? 'محظورة من إعدادات المتصفح'
+            : 'متوقفة'
         }
-        className={`inline-flex items-center gap-1 rounded-xl border px-2.5 py-1.5 text-xs font-extrabold transition cursor-pointer ${
-          enabled
+        className={`w-full inline-flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-xs font-extrabold transition cursor-pointer ${
+          status === 'enabled'
             ? 'border-emerald-200 bg-emerald-50 text-emerald-900 hover:bg-emerald-100'
+            : status === 'blocked'
+            ? 'border-rose-200 bg-rose-50 text-rose-900 hover:bg-rose-100'
             : 'border-amber-200 bg-amber-50 text-amber-900 hover:bg-amber-100'
         }`}
       >
-        {enabled ? (
-          <BellRing className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-        ) : (
-          <Bell className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-        )}
-        <span className="hidden sm:inline">
-          {loading
-            ? 'جارٍ التفعيل...'
-            : enabled
-            ? 'الإشعارات مفعلة'
-            : 'تفعيل الإشعارات'}
+        <span className="inline-flex items-center gap-1.5">
+          {status === 'enabled' ? (
+            <BellRing className="w-4 h-4 text-emerald-600 shrink-0" />
+          ) : status === 'blocked' ? (
+            <BellOff className="w-4 h-4 text-rose-600 shrink-0" />
+          ) : (
+            <Bell className="w-4 h-4 text-amber-600 shrink-0" />
+          )}
+          <span>
+            {loading
+              ? 'جارٍ التحديث...'
+              : status === 'enabled'
+              ? 'الإشعارات مفعّلة'
+              : status === 'blocked'
+              ? 'محظورة من إعدادات المتصفح'
+              : 'متوقفة'}
+          </span>
+        </span>
+        <span className="text-[11px] font-bold opacity-80">
+          {status === 'enabled' ? 'إيقاف' : 'تفعيل'}
         </span>
       </button>
+
+      {status === 'blocked' && (
+        <p
+          data-testid="notifications-blocked-hint"
+          className="text-[11px] font-bold text-rose-700 leading-relaxed bg-rose-50/70 rounded-lg px-2.5 py-1.5 border border-rose-200"
+        >
+          لإعادة التفعيل: افتح أيقونة القفل/الإعدادات بجانب عنوان الموقع في المتصفح واسمح بالإشعارات.
+        </p>
+      )}
+
+      {iosGuideMessage && (
+        <p
+          data-testid="ios-notifications-hint"
+          className="text-[11px] font-bold text-amber-900 leading-relaxed bg-amber-50 rounded-lg px-2.5 py-1.5 border border-amber-200"
+        >
+          {iosGuideMessage}
+        </p>
+      )}
 
       {toastMsg && (
         <div

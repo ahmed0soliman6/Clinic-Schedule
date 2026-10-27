@@ -135,3 +135,26 @@ export interface PublicDailyScheduleData {
   publishedAt: string;
 }
 
+export interface ReminderSettings {
+  enabled: boolean;
+  time: string;
+  timezone: 'Africa/Cairo';
+  targetDay: 'tomorrow' | 'today';
+  title: string;
+  body: string;
+  lastSentDate?: string;
+  updatedBy?: string;
+  updatedByEmail?: string;
+  updatedAt?: unknown;
+}
+
+export interface FcmTokenRecord {
+  token: string;
+  email: string;
+  uid: string;
+  platform: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+

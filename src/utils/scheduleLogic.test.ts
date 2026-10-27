@@ -41,6 +41,14 @@ import {
   applyDraftMutationToDay,
   createPerDayScheduleSyncController,
 } from './scheduleLogic';
+import {
+  computeTokenDocId,
+  filterEligibleReminderTokens,
+  formatReminderMessage,
+  isWithinReminderWindow,
+  resolveTargetDayId,
+  validateReminderSettings,
+} from './reminderLogic';
 import { DailyScheduleData, DayId, ScheduleRow, UserProfile } from '../types/schedule';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -956,6 +964,190 @@ test('Requirement 6: firestore.rules enforces 30-row cap, draftRows == published
     rulesContent.includes('incoming().version == existing().version + 1'),
     'Expected firestore.rules to enforce version + 1 on schedule updates'
   );
+
+  // (g) fcmTokens/{tokenId} and appConfig/{id} rules
+  assert.match(
+    rulesContent,
+    /match\s+\/fcmTokens\/\{tokenId\}\s*\{[\s\S]*?allow\s+get,\s*list:\s+if\s+false;/
+  );
+  assert.ok(
+    rulesContent.includes('request.auth.token.email.lower() == incoming().email.lower()')
+  );
+  assert.ok(
+    rulesContent.includes('incoming().token.size() >= 10') &&
+      rulesContent.includes('incoming().token.size() <= 4096')
+  );
+  assert.match(
+    rulesContent,
+    /match\s+\/appConfig\/\{id\}\s*\{[\s\S]*?allow\s+get,\s*list:\s+if\s+isStaff\(\);/
+  );
+  assert.ok(rulesContent.includes("!('lastSentDate' in incoming())"));
 });
+
+test('Daily Reminder Pure Logic: 10-minute Cairo window, lastSentDate duplicate guard, DST handling, targetDay resolution, and recipient filtering', async () => {
+  // 1) SHA-256 deterministic 64-char hex docId for FCM tokens
+  const docIdA = await computeTokenDocId('sample-fcm-token-1234567890');
+  const docIdB = await computeTokenDocId('sample-fcm-token-1234567890');
+  assert.equal(docIdA, docIdB);
+  assert.match(docIdA, /^[a-f0-9]{64}$/);
+
+  // 2) Cairo 10-minute window check (Winter UTC+2: 2026-01-17 is Saturday, 17:05 UTC = 19:05 Africa/Cairo)
+  const winterInWindow = new Date('2026-01-17T17:05:00Z');
+  const check1 = isWithinReminderWindow({
+    now: winterInWindow,
+    scheduledTime: '19:00',
+    lastSentDate: null,
+    timeZone: 'Africa/Cairo',
+    windowMinutes: 10,
+  });
+  assert.equal(check1.shouldSend, true);
+  assert.equal(check1.reason, 'in_window');
+  assert.equal(check1.cairoDateStr, '2026-01-17');
+  assert.equal(check1.cairoTimeHHmm, '19:05');
+
+  // Duplicate send prevented on the same Cairo date
+  const checkDuplicate = isWithinReminderWindow({
+    now: winterInWindow,
+    scheduledTime: '19:00',
+    lastSentDate: '2026-01-17',
+    timeZone: 'Africa/Cairo',
+    windowMinutes: 10,
+  });
+  assert.equal(checkDuplicate.shouldSend, false);
+  assert.equal(checkDuplicate.reason, 'already_sent_today');
+
+  // Outside 10-minute window (17:10 UTC = 19:10 Cairo -> outside [19:00, 19:10))
+  const winterOutside = new Date('2026-01-17T17:10:00Z');
+  const checkOutside = isWithinReminderWindow({
+    now: winterOutside,
+    scheduledTime: '19:00',
+    lastSentDate: '2026-01-16',
+    timeZone: 'Africa/Cairo',
+    windowMinutes: 10,
+  });
+  assert.equal(checkOutside.shouldSend, false);
+  assert.equal(checkOutside.reason, 'outside_window');
+
+  // Summer DST in Egypt (UTC+3: 2026-07-18 is Saturday, 16:03 UTC = 19:03 Africa/Cairo)
+  const summerInWindow = new Date('2026-07-18T16:03:00Z');
+  const checkSummer = isWithinReminderWindow({
+    now: summerInWindow,
+    scheduledTime: '19:00',
+    lastSentDate: null,
+    timeZone: 'Africa/Cairo',
+    windowMinutes: 10,
+  });
+  assert.equal(checkSummer.shouldSend, true);
+  assert.equal(checkSummer.cairoDateStr, '2026-07-18');
+  assert.equal(checkSummer.cairoTimeHHmm, '19:03');
+
+  // 3) Target day calculation (Saturday -> today = saturday, tomorrow = sunday)
+  const todayTarget = resolveTargetDayId(winterInWindow, 'today', 'Africa/Cairo');
+  const tomorrowTarget = resolveTargetDayId(winterInWindow, 'tomorrow', 'Africa/Cairo');
+  assert.equal(todayTarget.dayId, 'saturday');
+  assert.equal(todayTarget.dayLabel, 'السبت');
+  assert.equal(tomorrowTarget.dayId, 'sunday');
+  assert.equal(tomorrowTarget.dayLabel, 'الأحد');
+
+  // Friday -> tomorrow wraps around to Saturday
+  const fridayCairo = new Date('2026-01-16T17:00:00Z');
+  assert.equal(resolveTargetDayId(fridayCairo, 'today', 'Africa/Cairo').dayId, 'friday');
+  assert.equal(resolveTargetDayId(fridayCairo, 'tomorrow', 'Africa/Cairo').dayId, 'saturday');
+
+  // 4) Recipient filtering by active users/{emailDocId}, role, and allowedDays
+  const registeredUsers: UserProfile[] = [
+    {
+      uid: emailToDocId(PRIMARY_ADMIN_EMAIL),
+      email: PRIMARY_ADMIN_EMAIL,
+      displayName: 'المدير العام',
+      role: 'ADMIN',
+      allowedDays: DAYS_LIST.map((d) => d.id),
+    },
+    {
+      uid: emailToDocId('sunday.editor@gmail.com'),
+      email: 'sunday.editor@gmail.com',
+      displayName: 'محرر الأحد',
+      role: 'EDITOR',
+      allowedDays: ['sunday', 'monday'],
+    },
+    {
+      uid: emailToDocId('thursday.editor@gmail.com'),
+      email: 'thursday.editor@gmail.com',
+      displayName: 'محرر الخميس',
+      role: 'EDITOR',
+      allowedDays: ['thursday'],
+    },
+  ];
+
+  const candidateTokens = [
+    {
+      docId: 'doc-admin',
+      token: 'valid-token-admin-0001',
+      email: PRIMARY_ADMIN_EMAIL,
+      uid: 'u1',
+    },
+    {
+      docId: 'doc-sun-editor',
+      token: 'valid-token-sunday-editor-0002',
+      email: 'sunday.editor@gmail.com',
+      uid: 'u2',
+    },
+    {
+      docId: 'doc-thu-editor',
+      token: 'valid-token-thursday-editor-0003',
+      email: 'thursday.editor@gmail.com',
+      uid: 'u3',
+    },
+    {
+      docId: 'doc-removed-user',
+      token: 'valid-token-deleted-staff-0004',
+      email: 'deleted.staff@gmail.com',
+      uid: 'u4',
+    },
+  ];
+
+  const sundayRecipients = filterEligibleReminderTokens(
+    candidateTokens,
+    registeredUsers,
+    'sunday'
+  );
+  assert.deepEqual(
+    sundayRecipients.map((r) => r.email),
+    [PRIMARY_ADMIN_EMAIL, 'sunday.editor@gmail.com']
+  );
+
+  const thursdayRecipients = filterEligibleReminderTokens(
+    candidateTokens,
+    registeredUsers,
+    'thursday'
+  );
+  assert.deepEqual(
+    thursdayRecipients.map((r) => r.email),
+    [PRIMARY_ADMIN_EMAIL, 'thursday.editor@gmail.com']
+  );
+
+  // 5) Reminder message formatting & validation
+  const msg = formatReminderMessage(
+    {
+      title: 'تذكير جدول {اليوم}',
+      body: 'يرجى مراجعة جدول {اليوم} ومشاركته.',
+    },
+    'الأحد'
+  );
+  assert.equal(msg.title, 'تذكير جدول الأحد');
+  assert.equal(msg.body, 'يرجى مراجعة جدول الأحد ومشاركته.');
+
+  const validated = validateReminderSettings({
+    enabled: true,
+    time: '19:00',
+    targetDay: 'tomorrow',
+    title: 'عنوان التذكير',
+    body: 'نص التذكير',
+    lastSentDate: '2026-01-17',
+  });
+  assert.equal(validated.valid, true);
+  assert.equal('lastSentDate' in validated.sanitized, false);
+});
+
 
 
