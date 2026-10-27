@@ -2,7 +2,18 @@ import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
-import type { ReminderSettings, UserProfile } from '../src/types/schedule.js';
+import type {
+  CenterSettings,
+  DailyScheduleData,
+  PublicDailyScheduleData,
+  ReminderSettings,
+  ScheduleRow,
+  UserProfile,
+} from '../src/types/schedule.js';
+import {
+  formatFacebookSchedulePost,
+  publishToFacebookPageGraphApi,
+} from '../src/utils/facebookPostLogic.js';
 import {
   computeTokenDocId,
   DEFAULT_REMINDER_SETTINGS,
@@ -13,7 +24,13 @@ import {
   resolveTargetDayId,
   StoredTokenEntry,
 } from '../src/utils/reminderLogic.js';
-import { emailToDocId, PRIMARY_ADMIN_EMAIL } from '../src/utils/scheduleLogic.js';
+import {
+  DEFAULT_POST_TEMPLATE,
+  emailToDocId,
+  filterNonEmptyRows,
+  PRIMARY_ADMIN_EMAIL,
+} from '../src/utils/scheduleLogic.js';
+import facebookPostHandler from './facebook-post.js';
 
 interface VercelRequestLike {
   method?: string;
@@ -68,7 +85,8 @@ function parseRequestBody(body: unknown): Record<string, unknown> {
 }
 
 function isInvalidTokenError(err: unknown): boolean {
-  const code = (err as { code?: string; errorInfo?: { code?: string } })?.code ||
+  const code =
+    (err as { code?: string; errorInfo?: { code?: string } })?.code ||
     (err as { errorInfo?: { code?: string } })?.errorInfo?.code ||
     '';
   return (
@@ -76,6 +94,27 @@ function isInvalidTokenError(err: unknown): boolean {
     code === 'messaging/invalid-registration-token'
   );
 }
+
+const FALLBACK_CENTER_SETTINGS: CenterSettings = {
+  complexName: 'مجمع ميت عزون الطبي',
+  associationName: 'جمعية تنمية المجتمع المحلي',
+  registrationNumber: 'مشهرة برقم 2406',
+  rightLogoUrl: '/logos/complex-logo.svg',
+  leftLogoUrl: '/logos/association-logo.svg',
+  address: 'ميت عزون - بجوار المسجد الكبير',
+  whatsappPhone: '01202027567',
+  landlinePhone: '0502053187',
+  dentalPhone: '01515674347',
+  dentalLabel: 'عيادة الأسنان',
+  bgStartColor: '#f3effb',
+  bgEndColor: '#e8dff5',
+  clinicHeaderColor: '#f59e0b',
+  doctorHeaderColor: '#0d9456',
+  fromHeaderColor: '#f59e0b',
+  toHeaderColor: '#0088cc',
+  footerBgColor: '#1e295b',
+  postTemplate: DEFAULT_POST_TEMPLATE,
+};
 
 export default async function handler(
   req: VercelRequestLike,
@@ -86,14 +125,20 @@ export default async function handler(
     return;
   }
 
+  const rawAction = req.query?.action;
+  const action = Array.isArray(rawAction) ? rawAction[0] : rawAction;
+
+  // Delegate manual/direct Facebook Page post requests (`?action=facebook-post`)
+  if (action === 'facebook-post') {
+    await facebookPostHandler(req, res);
+    return;
+  }
+
   try {
     const adminApp = getAdminApp();
     const db = getFirestore(adminApp);
     const messaging = getMessaging(adminApp);
     const adminAuth = getAuth(adminApp);
-
-    const rawAction = req.query?.action;
-    const action = Array.isArray(rawAction) ? rawAction[0] : rawAction;
 
     // Public/External Device Subscription & Unsubscription via firebase-admin
     if (req.method === 'POST' && action === 'subscribe') {
@@ -134,12 +179,19 @@ export default async function handler(
 
     if (req.method === 'POST' && action === 'unsubscribe') {
       const payload = parseRequestBody(req.body);
-      const rawDocId = typeof payload.docId === 'string' ? payload.docId.trim() : '';
-      const rawToken = typeof payload.token === 'string' ? payload.token.trim() : '';
+      const rawDocId =
+        typeof payload.docId === 'string' ? payload.docId.trim() : '';
+      const rawToken =
+        typeof payload.token === 'string' ? payload.token.trim() : '';
       const docId =
-        rawDocId || (rawToken.length >= 10 ? await computeTokenDocId(rawToken) : '');
+        rawDocId ||
+        (rawToken.length >= 10 ? await computeTokenDocId(rawToken) : '');
       if (docId && /^[a-zA-Z0-9_-]{1,128}$/.test(docId)) {
-        await db.collection('fcmTokens').doc(docId).delete().catch(() => undefined);
+        await db
+          .collection('fcmTokens')
+          .doc(docId)
+          .delete()
+          .catch(() => undefined);
       }
       res.status(200).json({ ok: true });
       return;
@@ -164,13 +216,18 @@ export default async function handler(
       const decoded = await adminAuth.verifyIdToken(bearer);
       const email = (decoded.email || '').trim().toLowerCase();
       if (!email) {
-        res.status(403).json({ error: 'الحساب لا يحتوي على بريد إلكتروني معتمد.' });
+        res
+          .status(403)
+          .json({ error: 'الحساب لا يحتوي على بريد إلكتروني معتمد.' });
         return;
       }
       const isSuperAdmin = email === PRIMARY_ADMIN_EMAIL;
       let isAdminInUsers = isSuperAdmin;
       if (!isAdminInUsers) {
-        const userSnap = await db.collection('users').doc(emailToDocId(email)).get();
+        const userSnap = await db
+          .collection('users')
+          .doc(emailToDocId(email))
+          .get();
         if (userSnap.exists && userSnap.data()?.role === 'ADMIN') {
           isAdminInUsers = true;
         }
@@ -211,6 +268,93 @@ export default async function handler(
       'Africa/Cairo'
     );
 
+    // -------------------------------------------------------------------------
+    // Automatic Daily Facebook Page Post (when fbAutoPostEnabled === true)
+    // Always publishes tomorrow's clinic schedule once per day at the scheduled time
+    // -------------------------------------------------------------------------
+    let facebookAutoPostResult: Record<string, unknown> | null = null;
+
+    if (!isTestMode && reminderConfig.fbAutoPostEnabled) {
+      const fbWindowCheck = isWithinReminderWindow({
+        now,
+        scheduledTime: reminderConfig.time,
+        lastSentDate: reminderConfig.lastFbPostDate,
+        timeZone: 'Africa/Cairo',
+        windowMinutes: 10,
+      });
+
+      if (fbWindowCheck.shouldSend) {
+        const fbClaimed = await db.runTransaction(async (tx) => {
+          const freshSnap = await tx.get(remindersRef);
+          const freshData = (freshSnap.data() || {}) as Partial<ReminderSettings>;
+          if (freshData.lastFbPostDate === fbWindowCheck.cairoDateStr) {
+            return false;
+          }
+          tx.set(
+            remindersRef,
+            {
+              ...DEFAULT_REMINDER_SETTINGS,
+              ...freshData,
+              lastFbPostDate: fbWindowCheck.cairoDateStr,
+            },
+            { merge: true }
+          );
+          return true;
+        });
+
+        if (fbClaimed) {
+          const tomorrowMeta = resolveTargetDayId(
+            now,
+            'tomorrow',
+            'Africa/Cairo'
+          );
+          const [settingsSnap, schedSnap, pubSchedSnap] = await Promise.all([
+            db.collection('settings').doc('center').get(),
+            db.collection('schedules').doc(tomorrowMeta.dayId).get(),
+            db.collection('publicSchedules').doc(tomorrowMeta.dayId).get(),
+          ]);
+
+          const centerSettings: CenterSettings = settingsSnap.exists
+            ? {
+                ...FALLBACK_CENTER_SETTINGS,
+                ...(settingsSnap.data() as Partial<CenterSettings>),
+              }
+            : FALLBACK_CENTER_SETTINGS;
+
+          let tomorrowRows: ScheduleRow[] = [];
+          if (schedSnap.exists) {
+            const sData = schedSnap.data() as DailyScheduleData;
+            tomorrowRows = filterNonEmptyRows(
+              sData.draftRows || sData.publishedRows || []
+            );
+          } else if (pubSchedSnap.exists) {
+            const pData = pubSchedSnap.data() as PublicDailyScheduleData;
+            tomorrowRows = filterNonEmptyRows(pData.publishedRows || []);
+          }
+
+          const fbMessage = formatFacebookSchedulePost({
+            dayLabel: tomorrowMeta.dayLabel,
+            rows: tomorrowRows,
+            settings: centerSettings,
+          });
+
+          const fbPublish = await publishToFacebookPageGraphApi({
+            pageId: process.env.FB_PAGE_ID,
+            pageAccessToken: process.env.FB_PAGE_ACCESS_TOKEN,
+            message: fbMessage,
+          });
+
+          facebookAutoPostResult = {
+            ok: fbPublish.ok,
+            post_id: fbPublish.post_id,
+            dayId: tomorrowMeta.dayId,
+            dayLabel: tomorrowMeta.dayLabel,
+            error: fbPublish.error,
+          };
+        }
+      }
+    }
+
     if (!isTestMode) {
       if (!reminderConfig.enabled) {
         res.status(200).json({
@@ -218,6 +362,7 @@ export default async function handler(
           skipped: true,
           reason: 'disabled',
           message: 'الإشعار اليومي غير مفعّل حالياً.',
+          facebookAutoPost: facebookAutoPostResult,
         });
         return;
       }
@@ -237,6 +382,7 @@ export default async function handler(
           reason: windowCheck.reason,
           cairoDate: windowCheck.cairoDateStr,
           cairoTime: windowCheck.cairoTimeHHmm,
+          facebookAutoPost: facebookAutoPostResult,
         });
         return;
       }
@@ -266,6 +412,7 @@ export default async function handler(
           skipped: true,
           reason: 'already_sent_today',
           cairoDate: windowCheck.cairoDateStr,
+          facebookAutoPost: facebookAutoPostResult,
         });
         return;
       }
@@ -309,13 +456,18 @@ export default async function handler(
           (t) =>
             t.email === testAdminEmail || t.email === PUBLIC_SUBSCRIBER_EMAIL
         )
-      : filterEligibleReminderTokens(allTokens, registeredUsers, targetDay.dayId);
+      : filterEligibleReminderTokens(
+          allTokens,
+          registeredUsers,
+          targetDay.dayId
+        );
 
     if (recipients.length === 0) {
       res.status(200).json({
         ok: true,
         sentCount: 0,
         targetDay: targetDay.dayId,
+        facebookAutoPost: facebookAutoPostResult,
         message: isTestMode
           ? 'لا يوجد جهاز مفعّل عليه الإشعارات حالياً. فعّل الإشعارات من زر الجرس بالواجهة أولاً.'
           : 'لا توجد أجهزة مؤهلة لإرسال الإشعار حالياً.',
@@ -363,6 +515,7 @@ export default async function handler(
       deletedExpiredCount,
       targetDay: targetDay.dayId,
       url: targetUrl,
+      facebookAutoPost: facebookAutoPostResult,
       message: `تم إرسال الإشعار بنجاح إلى ${sentCount} جهاز (${targetDay.dayLabel}).`,
     });
   } catch (err) {

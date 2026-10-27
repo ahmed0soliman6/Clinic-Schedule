@@ -107,6 +107,11 @@
           "minLength": 4,
           "maxLength": 30
         },
+        "postTemplate": {
+          "type": "string",
+          "description": "Customizable template for daily social media and Facebook posts",
+          "maxLength": 2000
+        },
         "updatedBy": {
           "type": "string",
           "description": "UID of the user who last updated settings",
@@ -416,6 +421,54 @@
         "userName",
         "createdAt"
       ]
+    },
+    "ReminderSettings": {
+      "title": "ReminderSettings",
+      "description": "Daily push reminder and Facebook Page automatic schedule publishing configuration",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether daily push reminders are enabled"
+        },
+        "time": {
+          "type": "string",
+          "description": "Daily scheduled time in HH:mm format (Africa/Cairo)",
+          "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+        },
+        "timezone": {
+          "type": "string",
+          "description": "Timezone identifier (Africa/Cairo)"
+        },
+        "targetDay": {
+          "type": "string",
+          "description": "Target schedule day for reminders",
+          "enum": ["today", "tomorrow"]
+        },
+        "title": {
+          "type": "string",
+          "description": "Notification title template",
+          "maxLength": 160
+        },
+        "body": {
+          "type": "string",
+          "description": "Notification body template",
+          "maxLength": 500
+        },
+        "fbAutoPostEnabled": {
+          "type": "boolean",
+          "description": "Whether daily automatic Facebook Page schedule publishing is enabled"
+        },
+        "lastSentDate": {
+          "type": "string",
+          "description": "Server-managed YYYY-MM-DD date of last sent reminder"
+        },
+        "lastFbPostDate": {
+          "type": "string",
+          "description": "Server-managed YYYY-MM-DD date of last automatic Facebook post"
+        }
+      },
+      "required": ["enabled", "time", "targetDay", "title", "body"]
     }
   },
   "firestore": {
@@ -438,6 +491,10 @@
     "/auditLogs/{logId}": {
       "schema": { "$ref": "#/entities/AuditLog" },
       "description": "Immutable audit log entries for modifications"
+    },
+    "/appConfig/{id}": {
+      "schema": { "$ref": "#/entities/ReminderSettings" },
+      "description": "Daily reminder and Facebook Page automatic publishing configuration"
     }
   }
 }

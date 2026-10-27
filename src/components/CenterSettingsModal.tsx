@@ -3,6 +3,7 @@ import {
   BellRing,
   Check,
   Database,
+  Globe,
   MessageSquareText,
   Palette,
   RotateCcw,
@@ -30,10 +31,15 @@ interface CenterSettingsModalProps {
     updated: CenterSettings,
     updatedReminders?: Omit<
       ReminderSettings,
-      'lastSentDate' | 'updatedBy' | 'updatedByEmail' | 'updatedAt'
+      'lastSentDate' | 'lastFbPostDate' | 'updatedBy' | 'updatedByEmail' | 'updatedAt'
     >
   ) => void;
   onSendTestReminder?: () => Promise<{ ok: boolean; message: string }>;
+  onPublishFacebookNow?: () => Promise<{
+    ok: boolean;
+    message: string;
+    post_id?: string;
+  }>;
   onClose: () => void;
 }
 
@@ -45,6 +51,7 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
   onOpenSeedModal,
   onSave,
   onSendTestReminder,
+  onPublishFacebookNow,
   onClose,
 }) => {
   const [draft, setDraft] = useState<CenterSettings>({
@@ -58,7 +65,7 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
   const [reminderDraft, setReminderDraft] = useState<
     Omit<
       ReminderSettings,
-      'lastSentDate' | 'updatedBy' | 'updatedByEmail' | 'updatedAt'
+      'lastSentDate' | 'lastFbPostDate' | 'updatedBy' | 'updatedByEmail' | 'updatedAt'
     >
   >({
     enabled: reminderSettings?.enabled ?? DEFAULT_REMINDER_SETTINGS.enabled,
@@ -71,12 +78,21 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
         : DEFAULT_REMINDER_SETTINGS.targetDay,
     title: reminderSettings?.title || DEFAULT_REMINDER_SETTINGS.title,
     body: reminderSettings?.body || DEFAULT_REMINDER_SETTINGS.body,
+    fbAutoPostEnabled:
+      reminderSettings?.fbAutoPostEnabled ??
+      DEFAULT_REMINDER_SETTINGS.fbAutoPostEnabled,
   });
   const [errors, setErrors] = useState<string[]>([]);
   const [testSending, setTestSending] = useState(false);
   const [testStatusMsg, setTestStatusMsg] = useState<{
     ok: boolean;
     message: string;
+  } | null>(null);
+  const [fbPublishing, setFbPublishing] = useState(false);
+  const [fbStatusMsg, setFbStatusMsg] = useState<{
+    ok: boolean;
+    message: string;
+    post_id?: string;
   } | null>(null);
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -109,6 +125,23 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
       });
     } finally {
       setTestSending(false);
+    }
+  };
+
+  const handlePublishFacebook = async () => {
+    if (!onPublishFacebookNow) return;
+    setFbPublishing(true);
+    setFbStatusMsg(null);
+    try {
+      const result = await onPublishFacebookNow();
+      setFbStatusMsg(result);
+    } catch {
+      setFbStatusMsg({
+        ok: false,
+        message: 'تعذر الاتصال بخدمة النشر على فيسبوك.',
+      });
+    } finally {
+      setFbPublishing(false);
     }
   };
 
@@ -578,6 +611,83 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
                     }`}
                   >
                     {testStatusMsg.message}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Facebook Page Auto-Publish & Manual Publish Section (Meta Graph API v21.0) */}
+          <div className="pt-3 border-t border-slate-200 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h4 className="text-xs font-extrabold text-slate-800 flex items-center gap-1.5">
+                  <Globe className="w-4 h-4 text-blue-600" />
+                  <span>النشر على صفحة فيسبوك (Meta Graph API v21.0)</span>
+                </h4>
+                <p className="text-[11px] font-bold text-slate-500 mt-0.5">
+                  يستخدم متغيرات الخادم FB_PAGE_ID و FB_PAGE_ACCESS_TOKEN لنشر جدول عيادات اليوم التالي تلقائياً في موعد الإشعار اليومي أو فوراً بضغطة زر.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-extrabold text-slate-800">
+                  النشر التلقائي اليومي
+                </span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={Boolean(reminderDraft.fbAutoPostEnabled)}
+                  aria-label="تفعيل أو تعطيل النشر التلقائي اليومي على فيسبوك"
+                  data-testid="settings-fb-auto-post-toggle"
+                  onClick={() =>
+                    setReminderDraft({
+                      ...reminderDraft,
+                      fbAutoPostEnabled: !reminderDraft.fbAutoPostEnabled,
+                    })
+                  }
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                    reminderDraft.fbAutoPostEnabled
+                      ? 'bg-blue-600'
+                      : 'bg-slate-300'
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                      reminderDraft.fbAutoPostEnabled
+                        ? '-translate-x-5'
+                        : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+            </div>
+
+            {onPublishFacebookNow && (
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                <button
+                  type="button"
+                  disabled={fbPublishing}
+                  onClick={handlePublishFacebook}
+                  data-testid="settings-publish-facebook-now-btn"
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-2 text-xs font-extrabold text-white hover:bg-blue-700 disabled:opacity-50 transition cursor-pointer shadow-xs"
+                >
+                  <Send className="w-3.5 h-3.5 text-white" />
+                  <span>
+                    {fbPublishing
+                      ? 'جارٍ النشر على فيسبوك...'
+                      : 'نشر جدول اليوم على فيسبوك الان'}
+                  </span>
+                </button>
+
+                {fbStatusMsg && (
+                  <span
+                    data-testid="settings-facebook-status"
+                    className={`text-xs font-bold ${
+                      fbStatusMsg.ok ? 'text-emerald-700' : 'text-rose-700'
+                    }`}
+                  >
+                    {fbStatusMsg.message}
                   </span>
                 )}
               </div>

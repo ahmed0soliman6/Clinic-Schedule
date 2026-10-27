@@ -143,7 +143,9 @@ export interface ReminderSettings {
   targetDay: 'tomorrow' | 'today';
   title: string;
   body: string;
+  fbAutoPostEnabled?: boolean;
   lastSentDate?: string;
+  lastFbPostDate?: string;
   updatedBy?: string;
   updatedByEmail?: string;
   updatedAt?: unknown;

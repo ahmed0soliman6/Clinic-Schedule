@@ -1501,7 +1501,7 @@ export default function App() {
     newSettings: CenterSettings,
     updatedReminders?: Omit<
       ReminderSettings,
-      'lastSentDate' | 'updatedBy' | 'updatedByEmail' | 'updatedAt'
+      'lastSentDate' | 'lastFbPostDate' | 'updatedBy' | 'updatedByEmail' | 'updatedAt'
     >
   ) => {
     if (activeRole !== 'ADMIN') return;
@@ -1517,7 +1517,7 @@ export default function App() {
       'UPDATE_SETTINGS',
       'center',
       'إعدادات المركز',
-      'تحديث إعدادات الهوية البصرية والإشعار اليومي للمركز'
+      'تحديث إعدادات الهوية البصرية والإشعار اليومي والنشر على فيسبوك للمركز'
     );
 
     if (firebaseUser) {
@@ -1547,6 +1547,7 @@ export default function App() {
             targetDay: updatedReminders.targetDay,
             title: updatedReminders.title,
             body: updatedReminders.body,
+            fbAutoPostEnabled: Boolean(updatedReminders.fbAutoPostEnabled),
             updatedBy: firebaseUser.uid,
             updatedByEmail: firebaseUser.email || PRIMARY_ADMIN_EMAIL,
             updatedAt: serverTimestamp(),
@@ -1568,6 +1569,109 @@ export default function App() {
           }
         }
       }
+    }
+  };
+
+  const handleToggleFbAutoPost = async (nextEnabled: boolean) => {
+    setReminderSettings((prev) => ({
+      ...prev,
+      fbAutoPostEnabled: nextEnabled,
+    }));
+
+    if (!firebaseUser || activeRole !== 'ADMIN') return;
+
+    try {
+      const reminderRef = doc(db, 'appConfig', 'reminders');
+      const existingSnap = await getDoc(reminderRef);
+      const reminderPayload = {
+        enabled: reminderSettings.enabled ?? DEFAULT_REMINDER_SETTINGS.enabled,
+        time: reminderSettings.time || DEFAULT_REMINDER_SETTINGS.time,
+        timezone: 'Africa/Cairo' as const,
+        targetDay:
+          reminderSettings.targetDay === 'today' ? ('today' as const) : ('tomorrow' as const),
+        title: reminderSettings.title || DEFAULT_REMINDER_SETTINGS.title,
+        body: reminderSettings.body || DEFAULT_REMINDER_SETTINGS.body,
+        fbAutoPostEnabled: nextEnabled,
+        updatedBy: firebaseUser.uid,
+        updatedByEmail: firebaseUser.email || PRIMARY_ADMIN_EMAIL,
+        updatedAt: serverTimestamp(),
+      };
+      if (existingSnap.exists()) {
+        await updateDoc(reminderRef, reminderPayload);
+      } else {
+        await setDoc(reminderRef, reminderPayload);
+      }
+    } catch (err) {
+      try {
+        handleFirestoreError(err, OperationType.WRITE, 'appConfig/reminders');
+      } catch {
+        // Handled
+      }
+    }
+  };
+
+  const handlePublishFacebookNow = async (params?: {
+    dayId?: DayId;
+    dayLabel?: string;
+    rows?: ScheduleRow[];
+  }): Promise<{ ok: boolean; message: string; post_id?: string }> => {
+    const targetDayId = params?.dayId || selectedDay;
+    const targetSched = schedulesRef.current[targetDayId];
+    const targetDayLabel =
+      params?.dayLabel || targetSched?.dayLabel || currentSchedule.dayLabel;
+    const targetRows =
+      params?.rows ||
+      filterNonEmptyRows(
+        targetSched?.draftRows || targetSched?.publishedRows || []
+      );
+
+    try {
+      const idToken = firebaseUser
+        ? await firebaseUser.getIdToken()
+        : 'local-preview-token';
+
+      const response = await fetch(
+        `/api/send-reminders?action=facebook-post&dayId=${encodeURIComponent(
+          targetDayId
+        )}`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${idToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            dayId: targetDayId,
+            dayLabel: targetDayLabel,
+            rows: targetRows,
+            settings,
+          }),
+        }
+      );
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) {
+        return {
+          ok: false,
+          message:
+            data.error ||
+            `تعذر النشر على فيسبوك (${response.status}). تأكد من ضبط FB_PAGE_ID و FB_PAGE_ACCESS_TOKEN في إعدادات Vercel.`,
+        };
+      }
+
+      return {
+        ok: true,
+        post_id: data.post_id,
+        message:
+          data.message ||
+          `✅ تم نشر جدول عيادات يوم ${targetDayLabel} على صفحة فيسبوك بنجاح! (post_id: ${data.post_id})`,
+      };
+    } catch {
+      return {
+        ok: false,
+        message:
+          'تعذر الوصول إلى نقطة النهاية (/api/facebook-post). يعمل النشر على فيسبوك عند الاستضافة على Vercel مع ضبط FB_PAGE_ID و FB_PAGE_ACCESS_TOKEN.',
+      };
     }
   };
 
@@ -2148,6 +2252,10 @@ export default function App() {
           rows={displayedRows}
           settings={settings}
           posterRef={exportPosterRef}
+          canManageFacebook={isStaffAuthenticated && !isStrictPublicUrl}
+          fbAutoPostEnabled={Boolean(reminderSettings.fbAutoPostEnabled)}
+          onToggleFbAutoPost={handleToggleFbAutoPost}
+          onPublishFacebookNow={handlePublishFacebookNow}
         />
 
         {/* Main Workspace: Interactive Poster Table */}
@@ -2389,6 +2497,13 @@ export default function App() {
           onOpenSeedModal={() => setShowSeedModal(true)}
           onSave={handleSaveSettings}
           onSendTestReminder={handleSendTestReminder}
+          onPublishFacebookNow={() =>
+            handlePublishFacebookNow({
+              dayId: selectedDay,
+              dayLabel: currentSchedule.dayLabel,
+              rows: displayedRows,
+            })
+          }
           onClose={() => setShowSettingsModal(false)}
         />
       )}

@@ -3,7 +3,9 @@ import {
   Check,
   Copy,
   Download,
+  Globe,
   MessageSquareText,
+  Send,
   Share2,
   Smartphone,
 } from 'lucide-react';
@@ -25,6 +27,14 @@ interface ShareAndExportBarProps {
   rows: ScheduleRow[];
   settings: CenterSettings;
   posterRef: React.RefObject<HTMLDivElement | null>;
+  canManageFacebook?: boolean;
+  fbAutoPostEnabled?: boolean;
+  onToggleFbAutoPost?: (enabled: boolean) => Promise<void> | void;
+  onPublishFacebookNow?: (params: {
+    dayId?: DayId;
+    dayLabel: string;
+    rows: ScheduleRow[];
+  }) => Promise<{ ok: boolean; message: string; post_id?: string }>;
 }
 
 function copyTextToClipboardSync(text: string): void {
@@ -42,16 +52,24 @@ function copyTextToClipboardSync(text: string): void {
   } catch {
     // Fallback
   }
-  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+  if (
+    navigator.clipboard &&
+    typeof navigator.clipboard.writeText === 'function'
+  ) {
     navigator.clipboard.writeText(text).catch(() => {});
   }
 }
 
 export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
+  dayId,
   dayLabel,
   rows,
   settings,
   posterRef,
+  canManageFacebook = false,
+  fbAutoPostEnabled = false,
+  onToggleFbAutoPost,
+  onPublishFacebookNow,
 }) => {
   const [isExporting, setIsExporting] = useState(false);
   const [cachedPoster, setCachedPoster] = useState<{
@@ -65,6 +83,13 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
   const [showPostBox, setShowPostBox] = useState<boolean>(false);
   const [copiedPost, setCopiedPost] = useState<boolean>(false);
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
+
+  const [fbPublishing, setFbPublishing] = useState<boolean>(false);
+  const [fbStatusBanner, setFbStatusBanner] = useState<{
+    ok: boolean;
+    message: string;
+    post_id?: string;
+  } | null>(null);
 
   // Update daily post text whenever the selected day, rows, or center settings change
   useEffect(() => {
@@ -204,6 +229,27 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
     await handleDownload4x5Png();
   };
 
+  const handlePublishToFacebookClick = async () => {
+    if (!onPublishFacebookNow) return;
+    setFbPublishing(true);
+    setFbStatusBanner(null);
+    try {
+      const result = await onPublishFacebookNow({
+        dayId,
+        dayLabel,
+        rows,
+      });
+      setFbStatusBanner(result);
+    } catch {
+      setFbStatusBanner({
+        ok: false,
+        message: 'تعذر الاتصال بخدمة النشر على فيسبوك.',
+      });
+    } finally {
+      setFbPublishing(false);
+    }
+  };
+
   return (
     <div
       dir="rtl"
@@ -267,6 +313,86 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
           <span>بوست</span>
         </button>
       </div>
+
+      {/* Facebook Page Publishing Control Bar (Shown for logged-in staff/admin OR when Post Box is open) */}
+      {(canManageFacebook || showPostBox) && onPublishFacebookNow && (
+        <div
+          data-testid="facebook-control-panel"
+          className="rounded-xl bg-blue-50/70 border border-blue-200 px-3 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+        >
+          <div className="flex items-center justify-between sm:justify-start gap-3">
+            <div className="flex items-center gap-2">
+              <Globe className="w-4 h-4 text-blue-700 shrink-0" />
+              <div>
+                <div className="text-xs font-extrabold text-slate-900">
+                  النشر التلقائي اليومي
+                </div>
+                <div className="text-[10px] font-bold text-slate-600">
+                  نشر جدول عيادات اليوم التالي تلقائياً على فيسبوك
+                </div>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              role="switch"
+              aria-checked={fbAutoPostEnabled}
+              aria-label="تفعيل أو تعطيل النشر التلقائي اليومي على فيسبوك"
+              data-testid="fb-auto-post-toggle"
+              onClick={() =>
+                onToggleFbAutoPost && onToggleFbAutoPost(!fbAutoPostEnabled)
+              }
+              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                fbAutoPostEnabled ? 'bg-blue-600' : 'bg-slate-300'
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                  fbAutoPostEnabled ? '-translate-x-5' : 'translate-x-0'
+                }`}
+              />
+            </button>
+          </div>
+
+          <button
+            type="button"
+            disabled={fbPublishing}
+            onClick={handlePublishToFacebookClick}
+            data-testid="publish-facebook-now-btn"
+            className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-60 px-3.5 py-2 text-xs font-black text-white shadow-xs transition cursor-pointer shrink-0"
+          >
+            <Send className="w-3.5 h-3.5 shrink-0" />
+            <span>
+              {fbPublishing
+                ? 'جارٍ النشر على فيسبوك...'
+                : 'نشر جدول اليوم على فيسبوك الان'}
+            </span>
+          </button>
+        </div>
+      )}
+
+      {/* Facebook Publish Status Feedback Banner */}
+      {fbStatusBanner && (
+        <div
+          role="status"
+          data-testid="facebook-status-banner"
+          className={`rounded-xl border px-3 py-2 text-xs font-bold flex items-center justify-between gap-2 ${
+            fbStatusBanner.ok
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+              : 'bg-rose-50 border-rose-200 text-rose-900'
+          }`}
+        >
+          <span>{fbStatusBanner.message}</span>
+          <button
+            type="button"
+            onClick={() => setFbStatusBanner(null)}
+            aria-label="إغلاق رسالة حالة فيسبوك"
+            className="font-extrabold px-1 hover:opacity-75"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* Confirmation Banner when Image + Post are Prepared */}
       {statusBanner && (
