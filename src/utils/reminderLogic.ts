@@ -18,6 +18,7 @@ export const DEFAULT_REMINDER_SETTINGS: Omit<
   title: 'تذكير جدول العيادات — مجمع ميت عزون الطبي',
   body: 'يرجى مراجعة وتجهيز جدول عيادات {اليوم} ومشاركته.',
   fbAutoPostEnabled: false,
+  fbAutoPostTime: '20:00',
   fbPostMode: 'photo_with_caption',
 };
 
@@ -348,6 +349,7 @@ export function validateReminderSettings(input: Partial<ReminderSettings>): {
   const errors: string[] = [];
   const enabled = Boolean(input.enabled);
   const fbAutoPostEnabled = Boolean(input.fbAutoPostEnabled);
+  const fbAutoPostTime = (input.fbAutoPostTime ?? input.time ?? DEFAULT_REMINDER_SETTINGS.fbAutoPostTime ?? '20:00').trim();
   const fbPostMode =
     input.fbPostMode === 'photo_only' || input.fbPostMode === 'text_only'
       ? input.fbPostMode
@@ -362,6 +364,9 @@ export function validateReminderSettings(input: Partial<ReminderSettings>): {
 
   if (!isValidTimeHHmm(time)) {
     errors.push('وقت الإشعار يجب أن يكون بصيغة HH:mm (مثال: 19:00).');
+  }
+  if (!isValidTimeHHmm(fbAutoPostTime)) {
+    errors.push('وقت النشر التلقائي يجب أن يكون بصيغة HH:mm (مثال: 20:00).');
   }
   if (!title || title.length > 160) {
     errors.push('عنوان الإشعار مطلوب ولا يتجاوز 160 حرفاً.');
@@ -381,6 +386,7 @@ export function validateReminderSettings(input: Partial<ReminderSettings>): {
       title: title.slice(0, 160),
       body: body.slice(0, 500),
       fbAutoPostEnabled,
+      fbAutoPostTime,
       fbPostMode,
     },
   };

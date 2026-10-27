@@ -21,6 +21,7 @@ import {
 } from 'firebase/firestore';
 import {
   AlertTriangle,
+  BellRing,
   Copy,
   Database,
   Edit3,
@@ -91,6 +92,7 @@ import { SchedulePoster } from './components/SchedulePoster';
 import { ShareAndExportBar } from './components/ShareAndExportBar';
 import { syncPosterImageToFirestore } from './utils/posterImageSync';
 import { CenterSettingsModal } from './components/CenterSettingsModal';
+import { RemindersAndAutoPostModal } from './components/RemindersAndAutoPostModal';
 import { UsersAndAuditModal } from './components/UsersAndAuditModal';
 import { ComplexBrandLogo } from './components/BrandLogos';
 import {
@@ -306,6 +308,7 @@ export default function App() {
   const [conflict, setConflict] = useState<ConflictInfo | null>(null);
 
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showRemindersModal, setShowRemindersModal] = useState(false);
   const [showUsersAuditModal, setShowUsersAuditModal] = useState<
     'audit' | 'users' | null
   >(null);
@@ -1559,27 +1562,15 @@ export default function App() {
     );
   };
 
-  const handleSaveSettings = async (
-    newSettings: CenterSettings,
-    updatedReminders?: Omit<
-      ReminderSettings,
-      'lastSentDate' | 'lastFbPostDate' | 'updatedBy' | 'updatedByEmail' | 'updatedAt'
-    >
-  ) => {
+  const handleSaveSettings = async (newSettings: CenterSettings) => {
     if (activeRole !== 'ADMIN') return;
     setSettings(newSettings);
-    if (updatedReminders) {
-      setReminderSettings((prev) => ({
-        ...prev,
-        ...updatedReminders,
-      }));
-    }
 
     await appendAuditLog(
       'UPDATE_SETTINGS',
       'center',
       'إعدادات المركز',
-      'تحديث إعدادات الهوية البصرية والإشعار اليومي والنشر على فيسبوك للمركز'
+      'تحديث إعدادات الهوية البصرية ونصوص المجمع'
     );
 
     if (firebaseUser) {
@@ -1597,39 +1588,56 @@ export default function App() {
           // Handled
         }
       }
+    }
+  };
 
-      if (updatedReminders) {
+  const handleSaveReminders = async (
+    updatedReminders: Omit<
+      ReminderSettings,
+      'lastSentDate' | 'lastFbPostDate' | 'lastFbPostWarning' | 'updatedBy' | 'updatedByEmail' | 'updatedAt'
+    >
+  ) => {
+    if (activeRole !== 'ADMIN') return;
+    setReminderSettings((prev) => ({
+      ...prev,
+      ...updatedReminders,
+    }));
+
+    await appendAuditLog(
+      'UPDATE_SETTINGS',
+      'reminders',
+      'الإشعارات والنشر التلقائي',
+      'تحديث إعدادات الإشعار اليومي وتوقيت النشر التلقائي على فيسبوك'
+    );
+
+    if (firebaseUser) {
+      try {
+        const reminderRef = doc(db, 'appConfig', 'reminders');
+        const existingSnap = await getDoc(reminderRef);
+        const reminderPayload = {
+          enabled: updatedReminders.enabled,
+          time: updatedReminders.time,
+          timezone: 'Africa/Cairo' as const,
+          targetDay: updatedReminders.targetDay,
+          title: updatedReminders.title,
+          body: updatedReminders.body,
+          fbAutoPostEnabled: Boolean(updatedReminders.fbAutoPostEnabled),
+          fbAutoPostTime: updatedReminders.fbAutoPostTime || '20:00',
+          fbPostMode: updatedReminders.fbPostMode || 'photo_with_caption',
+          updatedBy: firebaseUser.uid,
+          updatedByEmail: firebaseUser.email || PRIMARY_ADMIN_EMAIL,
+          updatedAt: serverTimestamp(),
+        };
+        if (existingSnap.exists()) {
+          await updateDoc(reminderRef, reminderPayload);
+        } else {
+          await setDoc(reminderRef, reminderPayload);
+        }
+      } catch (err) {
         try {
-          const reminderRef = doc(db, 'appConfig', 'reminders');
-          const existingSnap = await getDoc(reminderRef);
-          const reminderPayload = {
-            enabled: updatedReminders.enabled,
-            time: updatedReminders.time,
-            timezone: 'Africa/Cairo' as const,
-            targetDay: updatedReminders.targetDay,
-            title: updatedReminders.title,
-            body: updatedReminders.body,
-            fbAutoPostEnabled: Boolean(updatedReminders.fbAutoPostEnabled),
-            fbPostMode: updatedReminders.fbPostMode || 'photo_with_caption',
-            updatedBy: firebaseUser.uid,
-            updatedByEmail: firebaseUser.email || PRIMARY_ADMIN_EMAIL,
-            updatedAt: serverTimestamp(),
-          };
-          if (existingSnap.exists()) {
-            await updateDoc(reminderRef, reminderPayload);
-          } else {
-            await setDoc(reminderRef, reminderPayload);
-          }
-        } catch (err) {
-          try {
-            handleFirestoreError(
-              err,
-              OperationType.WRITE,
-              'appConfig/reminders'
-            );
-          } catch {
-            // Handled
-          }
+          handleFirestoreError(err, OperationType.WRITE, 'appConfig/reminders');
+        } catch {
+          // Handled
         }
       }
     }
@@ -2233,16 +2241,32 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => {
+                      setShowRemindersModal(true);
+                      setIsSidebarOpen(false);
+                    }}
+                    data-testid="open-reminders-btn"
+                    aria-label="الاشعارات والنشر التلقائي"
+                    className="w-full inline-flex items-center justify-between rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs font-extrabold text-blue-950 hover:bg-blue-100 transition cursor-pointer"
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      <BellRing className="w-4 h-4 text-blue-700" />
+                      <span>الاشعارات والنشر التلقائي</span>
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
                       setShowSettingsModal(true);
                       setIsSidebarOpen(false);
                     }}
                     data-testid="open-settings-btn"
-                    aria-label="إعدادات المركز والإشعارات"
+                    aria-label="إعدادات المركز والتصميم"
                     className="w-full inline-flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-extrabold text-slate-800 hover:bg-slate-50 transition cursor-pointer"
                   >
                     <span className="inline-flex items-center gap-2">
                       <Settings className="w-4 h-4 text-purple-700" />
-                      <span>إعدادات المركز والإشعارات</span>
+                      <span>إعدادات المركز والتصميم</span>
                     </span>
                   </button>
 
@@ -2620,10 +2644,17 @@ export default function App() {
         <CenterSettingsModal
           settings={settings}
           defaultSettings={defaultSettings}
-          reminderSettings={reminderSettings}
           isSuperAdminUser={isSuperAdminUser}
           onOpenSeedModal={() => setShowSeedModal(true)}
           onSave={handleSaveSettings}
+          onClose={() => setShowSettingsModal(false)}
+        />
+      )}
+
+      {showRemindersModal && activeRole === 'ADMIN' && (
+        <RemindersAndAutoPostModal
+          reminderSettings={reminderSettings}
+          onSave={handleSaveReminders}
           onSendTestReminder={handleSendTestReminder}
           onPublishFacebookNow={() =>
             handlePublishFacebookNow({
@@ -2632,7 +2663,7 @@ export default function App() {
               rows: displayedRows,
             })
           }
-          onClose={() => setShowSettingsModal(false)}
+          onClose={() => setShowRemindersModal(false)}
         />
       )}
 

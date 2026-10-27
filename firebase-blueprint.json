@@ -459,6 +459,11 @@
           "type": "boolean",
           "description": "Whether daily automatic Facebook Page schedule publishing is enabled"
         },
+        "fbAutoPostTime": {
+          "type": "string",
+          "description": "Daily scheduled automatic Facebook posting time in HH:mm format (Africa/Cairo)",
+          "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
+        },
         "lastSentDate": {
           "type": "string",
           "description": "Server-managed YYYY-MM-DD date of last sent reminder"

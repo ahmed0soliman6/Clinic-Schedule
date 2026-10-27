@@ -886,7 +886,7 @@ export default async function handler(
     if (!isTestMode && reminderConfig.fbAutoPostEnabled) {
       const fbWindowCheck = isWithinReminderWindow({
         now,
-        scheduledTime: reminderConfig.time,
+        scheduledTime: reminderConfig.fbAutoPostTime || reminderConfig.time,
         lastSentDate: reminderConfig.lastFbPostDate,
         timeZone: 'Africa/Cairo',
         windowMinutes: 10,
