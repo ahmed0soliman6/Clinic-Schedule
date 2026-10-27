@@ -8,6 +8,7 @@ import {
   Send,
   Share2,
   Smartphone,
+  X,
 } from 'lucide-react';
 import { CenterSettings, DayId, ScheduleRow } from '../types/schedule';
 import {
@@ -28,6 +29,8 @@ interface ShareAndExportBarProps {
   settings: CenterSettings;
   posterRef: React.RefObject<HTMLDivElement | null>;
   canManageFacebook?: boolean;
+  showFacebookCard?: boolean;
+  onCloseFacebookCard?: () => void;
   fbAutoPostEnabled?: boolean;
   onToggleFbAutoPost?: (enabled: boolean) => Promise<void> | void;
   onPublishFacebookNow?: (params: {
@@ -67,6 +70,8 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
   settings,
   posterRef,
   canManageFacebook = false,
+  showFacebookCard = false,
+  onCloseFacebookCard,
   fbAutoPostEnabled = false,
   onToggleFbAutoPost,
   onPublishFacebookNow,
@@ -314,13 +319,25 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
         </button>
       </div>
 
-      {/* Facebook Page Publishing Control Bar (Shown for logged-in staff/admin OR when Post Box is open) */}
-      {(canManageFacebook || showPostBox) && onPublishFacebookNow && (
+      {/* Facebook Page Publishing Control Bar (Controlled via sidebar toggle, hidden by default) */}
+      {showFacebookCard && canManageFacebook && onPublishFacebookNow && (
         <div
           data-testid="facebook-control-panel"
-          className="rounded-xl bg-blue-50/70 border border-blue-200 px-3 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+          className="relative rounded-xl bg-blue-50/70 border border-blue-200 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 transition-all"
         >
-          <div className="flex items-center justify-between sm:justify-start gap-3">
+          {onCloseFacebookCard && (
+            <button
+              type="button"
+              onClick={onCloseFacebookCard}
+              title="إخفاء بطاقة النشر على فيسبوك"
+              aria-label="إخفاء بطاقة النشر على فيسبوك"
+              className="absolute top-2 left-2 text-slate-400 hover:text-slate-700 p-1 rounded-lg hover:bg-blue-100 transition cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+
+          <div className="flex items-center justify-between sm:justify-start gap-3 pl-7 sm:pl-0">
             <div className="flex items-center gap-2">
               <Globe className="w-4 h-4 text-blue-700 shrink-0" />
               <div>

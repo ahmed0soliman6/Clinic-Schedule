@@ -25,6 +25,7 @@ import {
   Database,
   Edit3,
   Eye,
+  Globe,
   History,
   LogIn,
   LogOut,
@@ -186,6 +187,27 @@ export default function App() {
     isStrictPublicUrl ? 'public' : 'manage'
   );
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+
+  // Controls visibility of Facebook auto-post card (Hidden by default, toggleable via sidebar)
+  const [showFacebookCard, setShowFacebookCard] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('mitazoun_show_facebook_card') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  const handleToggleShowFacebookCard = () => {
+    setShowFacebookCard((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('mitazoun_show_facebook_card', String(next));
+      } catch {
+        // Ignore storage errors
+      }
+      return next;
+    });
+  };
 
   // Copy full day confirmation modal state
   const [showCopyDayModal, setShowCopyDayModal] = useState(false);
@@ -2092,6 +2114,32 @@ export default function App() {
                     <span>نسخ جدول اليوم إلى يوم آخر</span>
                   </button>
                 )}
+
+                {/* زر إظهار وإخفاء بطاقة النشر على فيسبوك */}
+                <button
+                  type="button"
+                  onClick={handleToggleShowFacebookCard}
+                  data-testid="sidebar-toggle-facebook-card-btn"
+                  className={`w-full inline-flex items-center justify-between rounded-xl border px-3 py-2.5 text-xs font-extrabold transition cursor-pointer ${
+                    showFacebookCard
+                      ? 'border-blue-300 bg-blue-50 text-blue-950 hover:bg-blue-100'
+                      : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                  }`}
+                >
+                  <span className="inline-flex items-center gap-2">
+                    <Globe className="w-4 h-4 text-blue-600 shrink-0" />
+                    <span>بطاقة النشر على فيسبوك</span>
+                  </span>
+                  <span
+                    className={`px-2 py-0.5 rounded-md text-[10px] font-black transition ${
+                      showFacebookCard
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-slate-100 text-slate-600'
+                    }`}
+                  >
+                    {showFacebookCard ? 'إخفاء البطاقة' : 'إظهار البطاقة'}
+                  </span>
+                </button>
               </div>
 
               {/* 3) قسم "الإدارة" (للمدير ADMIN فقط) */}
@@ -2266,6 +2314,8 @@ export default function App() {
           settings={settings}
           posterRef={exportPosterRef}
           canManageFacebook={isStaffAuthenticated && !isStrictPublicUrl}
+          showFacebookCard={showFacebookCard}
+          onCloseFacebookCard={() => setShowFacebookCard(false)}
           fbAutoPostEnabled={Boolean(reminderSettings.fbAutoPostEnabled)}
           onToggleFbAutoPost={handleToggleFbAutoPost}
           onPublishFacebookNow={handlePublishFacebookNow}
