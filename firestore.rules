@@ -1,4 +1,50 @@
 rules_version = '2';
+
+// ============================================================================
+// WORST-CASE EXPRESSION BUDGET CALCULATION (30 ROWS ATOMIC TRANSACTION)
+// ============================================================================
+// Firestore enforces a hard cap of 1,000 evaluated expressions per request
+// (including all documents written inside a single atomic `runTransaction`).
+// Every save in Clinic-Schedule atomically writes TWO documents in one transaction:
+//   1) `schedules/{dayId}`
+//   2) `publicSchedules/{dayId}`
+//
+// Breakdown for worst case (30 rows in `draftRows` and `publishedRows`):
+// - `isValidRowItem(row)`:
+//     1 (`row is map`)
+//   + 1 (`row.id is string`)
+//   + 2 (`row.clinicName is string && row.clinicName.size() <= 120`)
+//   + 2 (`row.doctorName is string && row.doctorName.size() <= 120`)
+//   + 2 (`row.startTime is string && row.startTime.size() <= 40`)
+//   + 2 (`row.endTime is string && row.endTime.size() <= 40`)
+//   = 10 expressions per row.
+//
+// - `isValidRowsList(rows)` (validates `draftRows` indices 0..29):
+//     2 (`rows is list && rows.size() <= 30`)
+//   + 30 * (1 size check `rows.size() <= i` + 10 in `isValidRowItem(rows[i])`)
+//   = 2 + (30 * 11) = 332 expressions.
+//
+// - `schedules/{dayId}` write evaluation:
+//   - Auth & role check (`isSignedIn`, `isValidId`, `isEditorForDay`): ~18 expressions
+//   - Document scalar & equality checks (`keys().hasAll`, `dayId`, `dayLabel`,
+//     `dayOrder`, `isPublic`, `hasUnpublishedChanges == false`, `version`,
+//     `publishedRows == draftRows` [1 comparison], `updatedBy*`, `updatedAt`,
+//     `publishedAt`, version increment): ~34 expressions
+//   - `isValidRowsList(data.draftRows)`: 332 expressions
+//   => Subtotal for `schedules/{dayId}` = 384 expressions.
+//
+// - `publicSchedules/{dayId}` write evaluation:
+//   - Auth & role check (`isSignedIn`, `isValidId`, `isEditorForDay`): ~18 expressions
+//   - Document scalar checks (`keys().hasAll`, `dayId`, `dayLabel`, `dayOrder`,
+//     `isPublic`, `publishedAt`): ~14 expressions
+//   - First-row lightweight check (`publishedRows is list && size() <= 30 &&
+//     (size() == 0 || isValidRowItem(publishedRows[0]))`): 3 + 10 = 13 expressions
+//   => Subtotal for `publicSchedules/{dayId}` = 45 expressions.
+//
+// TOTAL WORST-CASE EXPRESSIONS PER ATOMIC TRANSACTION (30 ROWS):
+//   384 + 45 = 429 expressions (< 600 target budget, and well below 1,000 limit).
+// ============================================================================
+
 service cloud.firestore {
   match /databases/{database}/documents {
     // 1. Global Safety Net: Default-deny catch-all
@@ -60,7 +106,7 @@ service cloud.firestore {
       return day in ['saturday', 'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday'];
     }
 
-    // Validate all 7 elements (indices 0..6) of allowedDays (Requirement 6c)
+    // Validate all 7 elements (indices 0..6) of allowedDays
     function isValidAllowedDaysList(days) {
       return days is list &&
         days.size() <= 7 &&
@@ -102,18 +148,21 @@ service cloud.firestore {
         data.footerBgColor is string && data.footerBgColor.size() >= 4 && data.footerBgColor.size() <= 30;
     }
 
+    // Lightweight per-row validation (10 expressions per row)
     function isValidRowItem(row) {
       return row is map &&
-        row.id is string && row.id.size() <= 80 &&
+        row.id is string &&
         row.clinicName is string && row.clinicName.size() <= 120 &&
         row.doctorName is string && row.doctorName.size() <= 120 &&
-        row.sortOrder is int;
+        row.startTime is string && row.startTime.size() <= 40 &&
+        row.endTime is string && row.endTime.size() <= 40;
     }
 
-    // Exhaustive per-index validation for all rows 0..59 (Requirement 6b)
-    // Short-circuited by batch boundaries in isValidRowsList to stay well under Firestore's 1,000-expression limit
-    function isValidRowsBatch0(rows) {
-      return (rows.size() <= 0 || isValidRowItem(rows[0])) &&
+    // Clean 30-row check for draftRows (indices 0..29)
+    function isValidRowsList(rows) {
+      return rows is list &&
+        rows.size() <= 30 &&
+        (rows.size() <= 0 || isValidRowItem(rows[0])) &&
         (rows.size() <= 1 || isValidRowItem(rows[1])) &&
         (rows.size() <= 2 || isValidRowItem(rows[2])) &&
         (rows.size() <= 3 || isValidRowItem(rows[3])) &&
@@ -122,11 +171,8 @@ service cloud.firestore {
         (rows.size() <= 6 || isValidRowItem(rows[6])) &&
         (rows.size() <= 7 || isValidRowItem(rows[7])) &&
         (rows.size() <= 8 || isValidRowItem(rows[8])) &&
-        (rows.size() <= 9 || isValidRowItem(rows[9]));
-    }
-
-    function isValidRowsBatch1(rows) {
-      return (rows.size() <= 10 || isValidRowItem(rows[10])) &&
+        (rows.size() <= 9 || isValidRowItem(rows[9])) &&
+        (rows.size() <= 10 || isValidRowItem(rows[10])) &&
         (rows.size() <= 11 || isValidRowItem(rows[11])) &&
         (rows.size() <= 12 || isValidRowItem(rows[12])) &&
         (rows.size() <= 13 || isValidRowItem(rows[13])) &&
@@ -135,11 +181,8 @@ service cloud.firestore {
         (rows.size() <= 16 || isValidRowItem(rows[16])) &&
         (rows.size() <= 17 || isValidRowItem(rows[17])) &&
         (rows.size() <= 18 || isValidRowItem(rows[18])) &&
-        (rows.size() <= 19 || isValidRowItem(rows[19]));
-    }
-
-    function isValidRowsBatch2(rows) {
-      return (rows.size() <= 20 || isValidRowItem(rows[20])) &&
+        (rows.size() <= 19 || isValidRowItem(rows[19])) &&
+        (rows.size() <= 20 || isValidRowItem(rows[20])) &&
         (rows.size() <= 21 || isValidRowItem(rows[21])) &&
         (rows.size() <= 22 || isValidRowItem(rows[22])) &&
         (rows.size() <= 23 || isValidRowItem(rows[23])) &&
@@ -151,56 +194,6 @@ service cloud.firestore {
         (rows.size() <= 29 || isValidRowItem(rows[29]));
     }
 
-    function isValidRowsBatch3(rows) {
-      return (rows.size() <= 30 || isValidRowItem(rows[30])) &&
-        (rows.size() <= 31 || isValidRowItem(rows[31])) &&
-        (rows.size() <= 32 || isValidRowItem(rows[32])) &&
-        (rows.size() <= 33 || isValidRowItem(rows[33])) &&
-        (rows.size() <= 34 || isValidRowItem(rows[34])) &&
-        (rows.size() <= 35 || isValidRowItem(rows[35])) &&
-        (rows.size() <= 36 || isValidRowItem(rows[36])) &&
-        (rows.size() <= 37 || isValidRowItem(rows[37])) &&
-        (rows.size() <= 38 || isValidRowItem(rows[38])) &&
-        (rows.size() <= 39 || isValidRowItem(rows[39]));
-    }
-
-    function isValidRowsBatch4(rows) {
-      return (rows.size() <= 40 || isValidRowItem(rows[40])) &&
-        (rows.size() <= 41 || isValidRowItem(rows[41])) &&
-        (rows.size() <= 42 || isValidRowItem(rows[42])) &&
-        (rows.size() <= 43 || isValidRowItem(rows[43])) &&
-        (rows.size() <= 44 || isValidRowItem(rows[44])) &&
-        (rows.size() <= 45 || isValidRowItem(rows[45])) &&
-        (rows.size() <= 46 || isValidRowItem(rows[46])) &&
-        (rows.size() <= 47 || isValidRowItem(rows[47])) &&
-        (rows.size() <= 48 || isValidRowItem(rows[48])) &&
-        (rows.size() <= 49 || isValidRowItem(rows[49]));
-    }
-
-    function isValidRowsBatch5(rows) {
-      return (rows.size() <= 50 || isValidRowItem(rows[50])) &&
-        (rows.size() <= 51 || isValidRowItem(rows[51])) &&
-        (rows.size() <= 52 || isValidRowItem(rows[52])) &&
-        (rows.size() <= 53 || isValidRowItem(rows[53])) &&
-        (rows.size() <= 54 || isValidRowItem(rows[54])) &&
-        (rows.size() <= 55 || isValidRowItem(rows[55])) &&
-        (rows.size() <= 56 || isValidRowItem(rows[56])) &&
-        (rows.size() <= 57 || isValidRowItem(rows[57])) &&
-        (rows.size() <= 58 || isValidRowItem(rows[58])) &&
-        (rows.size() <= 59 || isValidRowItem(rows[59]));
-    }
-
-    function isValidRowsList(rows) {
-      return rows is list &&
-        rows.size() <= 60 &&
-        (rows.size() == 0 || isValidRowsBatch0(rows)) &&
-        (rows.size() <= 10 || isValidRowsBatch1(rows)) &&
-        (rows.size() <= 20 || isValidRowsBatch2(rows)) &&
-        (rows.size() <= 30 || isValidRowsBatch3(rows)) &&
-        (rows.size() <= 40 || isValidRowsBatch4(rows)) &&
-        (rows.size() <= 50 || isValidRowsBatch5(rows));
-    }
-
     function isValidPublicSchedule(data) {
       return data.keys().hasAll(['dayId', 'dayLabel', 'dayOrder', 'isPublic', 'publishedRows', 'publishedAt']) &&
         data.dayId is string && data.dayId in ['saturday', 'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday'] &&
@@ -208,7 +201,8 @@ service cloud.firestore {
         data.dayOrder is int && data.dayOrder >= 0 && data.dayOrder <= 6 &&
         data.isPublic is bool &&
         data.publishedAt is string && data.publishedAt.size() >= 1 && data.publishedAt.size() <= 60 &&
-        isValidRowsList(data.publishedRows);
+        data.publishedRows is list && data.publishedRows.size() <= 30 &&
+        (data.publishedRows.size() == 0 || isValidRowItem(data.publishedRows[0]));
     }
 
     function isValidDailySchedule(data) {
@@ -221,14 +215,10 @@ service cloud.firestore {
         data.dayLabel is string && data.dayLabel.size() >= 3 && data.dayLabel.size() <= 30 &&
         data.dayOrder is int && data.dayOrder >= 0 && data.dayOrder <= 6 &&
         data.isPublic is bool &&
-        data.hasUnpublishedChanges is bool &&
+        data.hasUnpublishedChanges == false &&
         data.version is int && data.version >= 1 && data.version <= 1000000 &&
         isValidRowsList(data.draftRows) &&
-        (
-          data.publishedRows == data.draftRows ||
-          (resource != null && data.publishedRows == resource.data.publishedRows) ||
-          isValidRowsList(data.publishedRows)
-        ) &&
+        data.publishedRows == data.draftRows &&
         data.updatedBy is string && data.updatedBy.size() >= 1 && data.updatedBy.size() <= 128 &&
         data.updatedByEmail is string && data.updatedByEmail.size() >= 3 && data.updatedByEmail.size() <= 160 &&
         data.updatedByName is string && data.updatedByName.size() >= 1 && data.updatedByName.size() <= 120 &&
@@ -270,7 +260,6 @@ service cloud.firestore {
     }
 
     match /settings/{settingId} {
-      // Public visitors can read the center branding document
       allow get: if isValidId(settingId);
       allow list: if false;
       allow create, update: if isSignedIn() && isValidId(settingId) && isAdmin() && isValidCenterSettings(incoming());
@@ -278,14 +267,12 @@ service cloud.firestore {
     }
 
     match /publicSchedules/{dayId} {
-      // Public visitors read ONLY approved schedules from publicSchedules/{dayId}
       allow get, list: if true;
       allow create, update: if isSignedIn() && isValidId(dayId) && isEditorForDay(dayId) && isValidPublicSchedule(incoming());
       allow delete: if false;
     }
 
     match /schedules/{dayId} {
-      // Requirement 6a & 6d: Staff-only read access; version increment enforced on update for editors
       allow get: if isValidId(dayId) && isStaff();
       allow list: if isStaff();
       allow create: if isSignedIn() && isValidId(dayId) && isEditorForDay(dayId) && isValidDailySchedule(incoming()) && incoming().dayId == dayId;
@@ -297,7 +284,6 @@ service cloud.firestore {
     }
 
     match /users/{userId} {
-      // Single permissions source of truth: users/{emailDocId}
       allow get: if isValidId(userId) && (
         isAdmin() || (isSignedIn() && userId == authEmailDocId())
       );

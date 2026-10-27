@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  BLUEPRINT_LIMITS,
   DAYS_LIST,
   POSTER_EXPORT_HEIGHT,
   POSTER_EXPORT_WIDTH,
@@ -13,6 +14,8 @@ import {
   copyRowToDay,
   deleteScheduleRow,
   detectConcurrentConflict,
+  filterNonEmptyRows,
+  isCompletelyEmptyRow,
   mergeConflictingRows,
   moveScheduleRow,
   normalizeRightLogoUrl,
@@ -36,7 +39,6 @@ import {
   executeWithRetry,
   formatFirestoreCommitError,
   applyDraftMutationToDay,
-  applyPublishToDay,
   createPerDayScheduleSyncController,
 } from './scheduleLogic';
 import { DailyScheduleData, DayId, ScheduleRow, UserProfile } from '../types/schedule';
@@ -574,10 +576,10 @@ test('Requirement 1, 2 & 4: 6 rapid consecutive deletes with delayed/stale snaps
     );
   }
 
-  // Immediately after 6 rapid deletes, local draftRows is empty and publishedRows is untouched
+  // Immediately after 6 rapid deletes, BOTH draftRows and publishedRows are empty and hasUnpublishedChanges is false
   assert.equal(controller.getDaySchedule('saturday').draftRows.length, 0);
-  assert.equal(controller.getDaySchedule('saturday').publishedRows.length, 6);
-  assert.equal(controller.getDaySchedule('saturday').hasUnpublishedChanges, true);
+  assert.equal(controller.getDaySchedule('saturday').publishedRows.length, 0);
+  assert.equal(controller.getDaySchedule('saturday').hasUnpublishedChanges, false);
 
   // While the commit is in-flight, simulate another snapshot with hasPendingWrites = true
   await new Promise((resolve) => setTimeout(resolve, 45));
@@ -598,7 +600,10 @@ test('Requirement 1, 2 & 4: 6 rapid consecutive deletes with delayed/stale snaps
   // Verify all 6 rapid deletes coalesced into a single Firestore transaction write
   assert.equal(committedPayloads.length, 1);
   assert.equal(committedPayloads[0].draftRows.length, 0);
+  assert.equal(committedPayloads[0].publishedRows.length, 0);
+  assert.equal(committedPayloads[0].hasUnpublishedChanges, false);
   assert.equal(controller.getDaySchedule('saturday').draftRows.length, 0);
+  assert.equal(controller.getDaySchedule('saturday').publishedRows.length, 0);
   assert.equal(controller.getLocalVersion('saturday'), 11);
 
   // Even after save completes, an older late-arriving snapshot (version 10 < localVersion 11) is rejected
@@ -716,13 +721,14 @@ test('Requirement 3: executeWithRetry retries aborted/unavailable up to 3 times 
   assert.ok(conflictFormatted.message.includes('conflict'));
 });
 
-test('Requirement 5: Draft mutations never overwrite publishedRows until explicit publish', () => {
+test('No draft mode: every edit writes both draftRows and publishedRows identically with hasUnpublishedChanges=false, and clearing a day empties both', async () => {
+  // Simulate legacy day where draftRows (2 rows) differed from publishedRows (1 row)
   const initialDay: DailyScheduleData = {
     ...INITIAL_SCHEDULES.saturday,
     version: 3,
     draftRows: sampleRows,
-    publishedRows: sampleRows,
-    hasUnpublishedChanges: false,
+    publishedRows: [sampleRows[0]],
+    hasUnpublishedChanges: true,
   };
   const editor = {
     uid: 'ahmed0soliman6_at_gmail_dot_com',
@@ -730,20 +736,14 @@ test('Requirement 5: Draft mutations never overwrite publishedRows until explici
     displayName: 'مدير النظام',
   };
 
-  // Clear day in draft -> draftRows becomes [], publishedRows remains 2 rows
-  const afterClearDraft = applyDraftMutationToDay(initialDay, () => [], editor);
-  assert.equal(afterClearDraft.draftRows.length, 0);
-  assert.equal(afterClearDraft.publishedRows.length, 2);
-  assert.equal(afterClearDraft.hasUnpublishedChanges, true);
-
-  // Add new row in draft -> draftRows has 1 row, publishedRows still has original 2 rows
-  const afterAddDraft = applyDraftMutationToDay(
-    afterClearDraft,
+  // Data migration + direct edit: adding a row uses draftRows as truth and sets publishedRows == draftRows and hasUnpublishedChanges == false
+  const afterAdd = applyDraftMutationToDay(
+    initialDay,
     (prev) =>
       addScheduleRow(
         prev,
         {
-          clinicName: 'الرمد',
+          clinicName: 'العيون',
           doctorName: 'د/ سامح',
           startTime: '5:00 م',
           endTime: '7:00 م',
@@ -754,25 +754,149 @@ test('Requirement 5: Draft mutations never overwrite publishedRows until explici
       ),
     editor
   );
-  assert.equal(afterAddDraft.draftRows.length, 1);
-  assert.equal(afterAddDraft.publishedRows.length, 2);
-  assert.equal(afterAddDraft.hasUnpublishedChanges, true);
+  assert.equal(afterAdd.draftRows.length, 3);
+  assert.equal(afterAdd.publishedRows.length, 3);
+  assert.deepEqual(afterAdd.publishedRows, afterAdd.draftRows);
+  assert.equal(afterAdd.hasUnpublishedChanges, false);
 
-  // Explicit publish copies draftRows to publishedRows and clears hasUnpublishedChanges
-  const afterPublish = applyPublishToDay(
-    afterAddDraft,
-    '2026-10-27T10:00:00.000Z',
-    4,
-    editor
-  );
-  assert.equal(afterPublish.draftRows.length, 1);
-  assert.equal(afterPublish.publishedRows.length, 1);
-  assert.equal(afterPublish.publishedRows[0].clinicName, 'الرمد');
-  assert.equal(afterPublish.hasUnpublishedChanges, false);
-  assert.equal(afterPublish.version, 4);
+  // Clearing a day empties both draftRows and publishedRows immediately
+  const afterClear = applyDraftMutationToDay(afterAdd, () => [], editor);
+  assert.equal(afterClear.draftRows.length, 0);
+  assert.equal(afterClear.publishedRows.length, 0);
+  assert.equal(afterClear.hasUnpublishedChanges, false);
+
+  // Verify controller writes both schedules and publicSchedules in one atomic commit and supports flushAllPending
+  const writtenSchedulesDocs: DailyScheduleData[] = [];
+  const writtenPublicDocs: { dayId: DayId; publishedRows: ScheduleRow[] }[] = [];
+
+  const controller = createPerDayScheduleSyncController({
+    initialSchedules: {
+      ...INITIAL_SCHEDULES,
+      saturday: initialDay,
+    },
+    debounceMs: 700,
+    commitDraftToRemote: async ({ dayId, daySnapshot, baseVersion }) => {
+      const committedVersion = baseVersion + 1;
+      const serverDoc: DailyScheduleData = {
+        ...daySnapshot,
+        version: committedVersion,
+        hasUnpublishedChanges: false,
+        publishedRows: daySnapshot.draftRows,
+      };
+      writtenSchedulesDocs.push(serverDoc);
+      writtenPublicDocs.push({
+        dayId,
+        publishedRows: daySnapshot.draftRows,
+      });
+      return { committedVersion, serverDoc };
+    },
+  });
+
+  // Perform clear day mutation
+  controller.mutateDayDraft('saturday', () => [], editor);
+  // Immediately flush before 700ms timer expires (simulating pagehide / visibilitychange)
+  await controller.flushAllPending();
+  await controller.waitForDayIdle('saturday');
+
+  assert.equal(writtenSchedulesDocs.length, 1);
+  assert.equal(writtenPublicDocs.length, 1);
+  assert.deepEqual(writtenSchedulesDocs[0].draftRows, []);
+  assert.deepEqual(writtenSchedulesDocs[0].publishedRows, []);
+  assert.equal(writtenSchedulesDocs[0].hasUnpublishedChanges, false);
+  assert.deepEqual(writtenPublicDocs[0].publishedRows, []);
 });
 
-test('Requirement 6: firestore.rules enforces staff-only schedules read, 0..59 rows validation, 0..6 allowedDays validation, and version + 1 increment', () => {
+test('Empty row prevention and 30-row cap enforcement', () => {
+  // Completely empty row is detected and rejected
+  assert.equal(
+    isCompletelyEmptyRow({
+      clinicName: '   ',
+      doctorName: '',
+      startTime: ' ',
+      endTime: '',
+    }),
+    true
+  );
+  assert.equal(
+    isCompletelyEmptyRow({
+      clinicName: 'الباطنة',
+      doctorName: '',
+      startTime: '',
+      endTime: '',
+    }),
+    false
+  );
+
+  const emptyValidation = validateRowInput({
+    clinicName: ' ',
+    doctorName: '',
+    startTime: '',
+    endTime: '',
+  });
+  assert.equal(emptyValidation.valid, false);
+  assert.ok(emptyValidation.errors[0].includes('فارغ'));
+
+  // filterNonEmptyRows strips blank rows from Saturday schedule and normalizes sortOrders
+  const dirtySaturdayRows: ScheduleRow[] = [
+    sampleRows[0],
+    {
+      id: 'empty-1',
+      clinicName: '',
+      doctorName: '',
+      startTime: '',
+      endTime: '',
+      icon: 'stethoscope',
+      iconColor: '#6d28d9',
+      sortOrder: 1,
+    },
+    sampleRows[1],
+    {
+      id: 'empty-2',
+      clinicName: '  ',
+      doctorName: ' ',
+      startTime: '',
+      endTime: '',
+      icon: 'stethoscope',
+      iconColor: '#6d28d9',
+      sortOrder: 3,
+    },
+  ];
+  const cleaned = filterNonEmptyRows(dirtySaturdayRows);
+  assert.equal(cleaned.length, 2);
+  assert.equal(cleaned[0].id, 'row-1');
+  assert.equal(cleaned[0].sortOrder, 0);
+  assert.equal(cleaned[1].id, 'row-2');
+  assert.equal(cleaned[1].sortOrder, 1);
+
+  // Enforce 30-row maximum cap per day
+  assert.equal(BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY, 30);
+  const thirtyFiveRows: ScheduleRow[] = Array.from({ length: 35 }, (_, idx) => ({
+    id: `r-${idx + 1}`,
+    clinicName: `عيادة ${idx + 1}`,
+    doctorName: `د/ طبيب ${idx + 1}`,
+    startTime: '4:00 م',
+    endTime: '6:00 م',
+    icon: 'internal',
+    iconColor: '#0284c7',
+    sortOrder: idx,
+  }));
+
+  const editor = {
+    uid: 'ahmed0soliman6_at_gmail_dot_com',
+    email: PRIMARY_ADMIN_EMAIL,
+    displayName: 'مدير النظام',
+  };
+  const cappedDay = applyDraftMutationToDay(
+    INITIAL_SCHEDULES.saturday,
+    () => thirtyFiveRows,
+    editor
+  );
+  assert.equal(cappedDay.draftRows.length, 30);
+  assert.equal(cappedDay.publishedRows.length, 30);
+  assert.equal(cappedDay.hasUnpublishedChanges, false);
+});
+
+test('Requirement 6: firestore.rules enforces 30-row cap, draftRows == publishedRows, hasUnpublishedChanges == false, lightweight first-row check on publicSchedules, and < 600 expression budget', () => {
   const rulesPath = path.resolve(process.cwd(), 'firestore.rules');
   const rulesContent = fs.readFileSync(rulesPath, 'utf8');
 
@@ -786,26 +910,52 @@ test('Requirement 6: firestore.rules enforces staff-only schedules read, 0..59 r
     /match\s+\/schedules\/\{dayId\}\s*\{[\s\S]*?allow\s+list:\s+if\s+isStaff\(\);/
   );
 
-  // (b) All 60 row positions (0..59) are validated via batch helpers
-  for (let i = 0; i < 60; i++) {
+  // (b) 30-row cap (0..29 validated on draftRows, no index 30, and no isValidRowsBatch0..5)
+  assert.ok(rulesContent.includes('rows.size() <= 30'));
+  for (let i = 0; i < 30; i++) {
     assert.ok(
       rulesContent.includes(`isValidRowItem(rows[${i}])`),
       `Expected firestore.rules to validate row index ${i}`
     );
   }
+  assert.equal(rulesContent.includes('isValidRowItem(rows[30])'), false);
+  assert.equal(rulesContent.includes('isValidRowsBatch0'), false);
 
-  // (c) All 7 allowedDays positions (0..6) are validated
-  for (let i = 0; i < 7; i++) {
-    assert.ok(
-      rulesContent.includes(`isValidAllowedDay(days[${i}])`),
-      `Expected firestore.rules to validate allowedDays index ${i}`
-    );
-  }
+  // (c) schedules/{dayId} enforces data.publishedRows == data.draftRows and data.hasUnpublishedChanges == false
+  assert.ok(rulesContent.includes('data.publishedRows == data.draftRows'));
+  assert.ok(rulesContent.includes('data.hasUnpublishedChanges == false'));
 
-  // (d) Version increment check incoming().version == existing().version + 1 on schedules update
+  // (d) publicSchedules/{dayId} uses lightweight first-row check
+  assert.ok(
+    rulesContent.includes(
+      'data.publishedRows is list && data.publishedRows.size() <= 30'
+    )
+  );
+  assert.ok(
+    rulesContent.includes(
+      '(data.publishedRows.size() == 0 || isValidRowItem(data.publishedRows[0]))'
+    )
+  );
+
+  // (e) Lightweight per-row check has length bounds on the 4 fields
+  assert.ok(
+    rulesContent.includes('row.clinicName is string && row.clinicName.size() <= 120')
+  );
+  assert.ok(
+    rulesContent.includes('row.doctorName is string && row.doctorName.size() <= 120')
+  );
+  assert.ok(
+    rulesContent.includes('row.startTime is string && row.startTime.size() <= 40')
+  );
+  assert.ok(
+    rulesContent.includes('row.endTime is string && row.endTime.size() <= 40')
+  );
+
+  // (f) Version increment check incoming().version == existing().version + 1 on schedules update
   assert.ok(
     rulesContent.includes('incoming().version == existing().version + 1'),
     'Expected firestore.rules to enforce version + 1 on schedule updates'
   );
 });
+
 

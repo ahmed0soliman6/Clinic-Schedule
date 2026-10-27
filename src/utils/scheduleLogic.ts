@@ -121,12 +121,32 @@ export const BLUEPRINT_LIMITS = {
   DOCTOR_NAME_MAX: 120,
   TIME_MIN: 1,
   TIME_MAX: 40,
-  MAX_ROWS_PER_DAY: 60,
+  MAX_ROWS_PER_DAY: 30,
   COMPLEX_NAME_MAX: 120,
   ASSOCIATION_NAME_MAX: 160,
   ADDRESS_MAX: 200,
   PHONE_MAX: 40,
 };
+
+export function isCompletelyEmptyRow(
+  row:
+    | Partial<Pick<ScheduleRow, 'clinicName' | 'doctorName' | 'startTime' | 'endTime'>>
+    | null
+    | undefined
+): boolean {
+  if (!row) return true;
+  return (
+    !(row.clinicName || '').trim() &&
+    !(row.doctorName || '').trim() &&
+    !(row.startTime || '').trim() &&
+    !(row.endTime || '').trim()
+  );
+}
+
+export function filterNonEmptyRows(rows: ScheduleRow[]): ScheduleRow[] {
+  if (!Array.isArray(rows)) return [];
+  return normalizeSortOrders(rows.filter((r) => !isCompletelyEmptyRow(r)));
+}
 
 export function normalizeArabicText(str: string): string {
   return str
@@ -210,6 +230,10 @@ export function validateRowInput(input: {
   iconColor?: string;
 }): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
+  if (isCompletelyEmptyRow(input)) {
+    errors.push('لا يمكن حفظ صف فارغ تماماً (العيادة والطبيب والوقت كلها فارغة)');
+    return { valid: false, errors };
+  }
   const clinic = (input.clinicName ?? '').trim();
   const doctor = (input.doctorName ?? '').trim();
   const start = (input.startTime ?? '').trim();
@@ -626,7 +650,7 @@ export function mergeConflictingRowsThreeWay(
     return {
       success: false,
       rows: [],
-      error: 'الحد الأقصى للعيادات في اليوم الواحد هو 60 عيادة',
+      error: `الحد الأقصى للعيادات في اليوم الواحد هو ${BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY} عيادة`,
     };
   }
 
@@ -1089,45 +1113,18 @@ export function formatFirestoreCommitError(
 }
 
 /**
- * Pure draft mutation helper (Requirement 5):
- * Updates ONLY `draftRows` and sets `hasUnpublishedChanges` without touching `publishedRows`.
+ * Pure schedule mutation helper:
+ * Makes `draftRows` the single source of truth, strips completely empty rows,
+ * sets `publishedRows` equal to `draftRows`, and keeps `hasUnpublishedChanges = false` always.
  */
 export function applyDraftMutationToDay(
   currentDay: DailyScheduleData,
   updater: (prevRows: ScheduleRow[]) => ScheduleRow[],
   editorInfo: { uid: string; email: string; displayName: string }
 ): DailyScheduleData {
-  const rawNextRows = updater(currentDay.draftRows || []);
-  const sanitizedDraft = normalizeSortOrders(rawNextRows)
-    .slice(0, BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY)
-    .map((r, i) => sanitizeRowForFirestore(r, i));
-
-  const publishedRows = currentDay.publishedRows || [];
-  const hasDiff = !areRowsEqual(sanitizedDraft, publishedRows);
-
-  return {
-    ...currentDay,
-    draftRows: sanitizedDraft,
-    // Strictly preserve publishedRows untouched during draft edits
-    publishedRows,
-    hasUnpublishedChanges: hasDiff,
-    updatedBy: editorInfo.uid,
-    updatedByEmail: editorInfo.email,
-    updatedByName: editorInfo.displayName.slice(0, 120),
-  };
-}
-
-/**
- * Pure publish helper (Requirement 5):
- * Copies `draftRows` to `publishedRows` and clears `hasUnpublishedChanges`.
- */
-export function applyPublishToDay(
-  currentDay: DailyScheduleData,
-  publishIso: string,
-  nextVersion: number,
-  editorInfo: { uid: string; email: string; displayName: string }
-): DailyScheduleData {
-  const sanitizedRows = normalizeSortOrders(currentDay.draftRows || [])
+  const baseRows = filterNonEmptyRows(currentDay.draftRows || []);
+  const rawNextRows = updater(baseRows);
+  const sanitizedRows = filterNonEmptyRows(rawNextRows)
     .slice(0, BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY)
     .map((r, i) => sanitizeRowForFirestore(r, i));
 
@@ -1137,8 +1134,6 @@ export function applyPublishToDay(
     publishedRows: sanitizedRows,
     hasUnpublishedChanges: false,
     isPublic: true,
-    version: nextVersion,
-    publishedAt: publishIso,
     updatedBy: editorInfo.uid,
     updatedByEmail: editorInfo.email,
     updatedByName: editorInfo.displayName.slice(0, 120),
@@ -1146,10 +1141,12 @@ export function applyPublishToDay(
 }
 
 /**
- * Per-Day Save Queue + 700ms Debounce + Snapshot Guard Controller (Requirements 1, 2, 3, 4, 5).
+ * Per-Day Save Queue + 700ms Debounce + Snapshot Guard Controller.
  * Ensures:
+ * - `draftRows` is the single source of truth (`publishedRows` always equals `draftRows`, `hasUnpublishedChanges = false`).
  * - Every mutation builds functionally `(prevRows) => nextRows` on the latest `schedulesByDay[dayId].draftRows`.
  * - Rapid mutations within `debounceMs` (700ms) coalesce into a single transaction write.
+ * - `flushAllPending()` immediately triggers any pending debounced saves (e.g. on `pagehide` / `visibilitychange`).
  * - Per-day promise queue guarantees no commit starts before the previous commit for that day finishes.
  * - Incoming snapshots are ignored while a day has pending debounce or in-flight commit, or if `hasPendingWrites`, or if `remote.version < localVersion`.
  */
@@ -1169,20 +1166,39 @@ export interface PerDaySyncControllerOptions {
 export function createPerDayScheduleSyncController(options: PerDaySyncControllerOptions) {
   const debounceMs = options.debounceMs ?? 700;
 
+  const normalizeDayUnified = (day: DailyScheduleData): DailyScheduleData => {
+    const cleanRows = filterNonEmptyRows(day.draftRows || [])
+      .slice(0, BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY)
+      .map((r, i) => sanitizeRowForFirestore(r, i));
+    return {
+      ...day,
+      draftRows: cleanRows,
+      publishedRows: cleanRows,
+      hasUnpublishedChanges: false,
+      isPublic: true,
+    };
+  };
+
   const schedulesByDay: Record<DayId, DailyScheduleData> = {
-    ...options.initialSchedules,
+    saturday: normalizeDayUnified(options.initialSchedules.saturday),
+    sunday: normalizeDayUnified(options.initialSchedules.sunday),
+    monday: normalizeDayUnified(options.initialSchedules.monday),
+    tuesday: normalizeDayUnified(options.initialSchedules.tuesday),
+    wednesday: normalizeDayUnified(options.initialSchedules.wednesday),
+    thursday: normalizeDayUnified(options.initialSchedules.thursday),
+    friday: normalizeDayUnified(options.initialSchedules.friday),
   };
   const confirmedByDay: Record<DayId, DailyScheduleData> = {
-    ...options.initialSchedules,
+    ...schedulesByDay,
   };
   const localVersionByDay: Record<DayId, number> = {
-    saturday: options.initialSchedules.saturday?.version || 1,
-    sunday: options.initialSchedules.sunday?.version || 1,
-    monday: options.initialSchedules.monday?.version || 1,
-    tuesday: options.initialSchedules.tuesday?.version || 1,
-    wednesday: options.initialSchedules.wednesday?.version || 1,
-    thursday: options.initialSchedules.thursday?.version || 1,
-    friday: options.initialSchedules.friday?.version || 1,
+    saturday: schedulesByDay.saturday?.version || 1,
+    sunday: schedulesByDay.sunday?.version || 1,
+    monday: schedulesByDay.monday?.version || 1,
+    tuesday: schedulesByDay.tuesday?.version || 1,
+    wednesday: schedulesByDay.wednesday?.version || 1,
+    thursday: schedulesByDay.thursday?.version || 1,
+    friday: schedulesByDay.friday?.version || 1,
   };
   const inFlightCountByDay: Record<DayId, number> = {
     saturday: 0,
@@ -1256,12 +1272,11 @@ export function createPerDayScheduleSyncController(options: PerDaySyncController
         // Keep queue alive after prior failure
       })
       .then(async () => {
-        // If a newer debounce cycle already superseded or committed this generation, skip redundant write
         if (committedGenerationByDay[dayId] >= targetGen) {
           return;
         }
         const currentGen = dirtyGenerationByDay[dayId];
-        const snapshotToCommit = schedulesByDay[dayId];
+        const snapshotToCommit = normalizeDayUnified(schedulesByDay[dayId]);
         const baseVersion = localVersionByDay[dayId] || snapshotToCommit.version || 1;
 
         try {
@@ -1277,19 +1292,19 @@ export function createPerDayScheduleSyncController(options: PerDaySyncController
             currentGen
           );
 
-          const confirmedDoc: DailyScheduleData = result.serverDoc || {
-            ...snapshotToCommit,
-            version: result.committedVersion,
-          };
+          const confirmedDoc: DailyScheduleData = normalizeDayUnified(
+            result.serverDoc || {
+              ...snapshotToCommit,
+              version: result.committedVersion,
+            }
+          );
           confirmedByDay[dayId] = confirmedDoc;
 
-          // Only overwrite schedulesByDay if no newer local edits occurred while in flight
           if (dirtyGenerationByDay[dayId] === currentGen) {
             schedulesByDay[dayId] = confirmedDoc;
             options.onSchedulesChange?.({ ...schedulesByDay });
           }
         } catch (err) {
-          // Rollback to last confirmed state for this day
           committedGenerationByDay[dayId] = dirtyGenerationByDay[dayId];
           const rollbackDoc = confirmedByDay[dayId];
           schedulesByDay[dayId] = rollbackDoc;
@@ -1343,6 +1358,21 @@ export function createPerDayScheduleSyncController(options: PerDaySyncController
     }) as unknown as DailyScheduleData & Promise<void>, updatedDay;
   }
 
+  function flushAllPending(): Promise<void[]> {
+    const promises: Promise<void>[] = [];
+    for (const day of DAYS_LIST) {
+      const dayId = day.id;
+      if (pendingTimerByDay[dayId] !== null) {
+        clearTimeout(pendingTimerByDay[dayId]!);
+        pendingTimerByDay[dayId] = null;
+        promises.push(enqueueDayCommit(dayId, dirtyGenerationByDay[dayId]));
+      } else if (dirtyGenerationByDay[dayId] > committedGenerationByDay[dayId] && inFlightCountByDay[dayId] === 0) {
+        promises.push(enqueueDayCommit(dayId, dirtyGenerationByDay[dayId]));
+      }
+    }
+    return Promise.all(promises);
+  }
+
   function receiveRemoteSnapshot(
     dayId: DayId,
     remoteDoc: DailyScheduleData,
@@ -1359,9 +1389,10 @@ export function createPerDayScheduleSyncController(options: PerDaySyncController
       return false;
     }
 
-    localVersionByDay[dayId] = remoteDoc.version || 1;
-    confirmedByDay[dayId] = remoteDoc;
-    schedulesByDay[dayId] = remoteDoc;
+    const normalizedRemote = normalizeDayUnified(remoteDoc);
+    localVersionByDay[dayId] = normalizedRemote.version || 1;
+    confirmedByDay[dayId] = normalizedRemote;
+    schedulesByDay[dayId] = normalizedRemote;
     options.onSchedulesChange?.({ ...schedulesByDay });
     return true;
   }
@@ -1381,6 +1412,7 @@ export function createPerDayScheduleSyncController(options: PerDaySyncController
     getLocalVersion: (dayId: DayId) => localVersionByDay[dayId],
     isDayBusy,
     mutateDayDraft,
+    flushAllPending,
     receiveRemoteSnapshot,
     waitForDayIdle,
   };

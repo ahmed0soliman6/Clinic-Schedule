@@ -31,9 +31,9 @@ import {
   LogOut,
   Menu,
   RotateCcw,
-  Send,
   Settings,
   Shield,
+  Trash2,
   Users,
   X,
 } from 'lucide-react';
@@ -43,7 +43,6 @@ import {
   googleProvider,
   handleFirestoreError,
   OperationType,
-  showLocalNotification,
 } from './firebase';
 import {
   AuditAction,
@@ -59,12 +58,11 @@ import {
   UserRole,
 } from './types/schedule';
 import {
+  BLUEPRINT_LIMITS,
   DAYS_LIST,
   PRIMARY_ADMIN_EMAIL,
   addScheduleRow,
   applyDraftMutationToDay,
-  applyPublishToDay,
-  areRowsEqual,
   canUserEditDay,
   copyFullDayRows,
   copyRowToDay,
@@ -73,11 +71,12 @@ import {
   detectConcurrentConflict,
   emailToDocId,
   executeWithRetry,
+  filterNonEmptyRows,
   formatFirestoreCommitError,
+  isCompletelyEmptyRow,
   isFictionalOrBlockedEmail,
   mergeConflictingRowsThreeWay,
   moveScheduleRow,
-  normalizeSortOrders,
   reorderScheduleRows,
   resolveAuthorizedUserAccess,
   sanitizeRowForFirestore,
@@ -150,6 +149,13 @@ export default function App() {
   // Copy full day confirmation modal state
   const [showCopyDayModal, setShowCopyDayModal] = useState(false);
   const [copyDayTarget, setCopyDayTarget] = useState<DayId>('sunday');
+
+  // Clear day confirmation modal state (states row count clearly)
+  const [confirmClearDayModal, setConfirmClearDayModal] = useState<{
+    dayId: DayId;
+    dayLabel: string;
+    rowCount: number;
+  } | null>(null);
 
   // Super Admin explicit database seed modal
   const [showSeedModal, setShowSeedModal] = useState(false);
@@ -350,9 +356,12 @@ export default function App() {
                 const next = { ...prev };
                 DAYS_LIST.forEach((d) => {
                   if (Array.isArray(cached.publishedSchedules[d.id])) {
+                    const cleanRows = filterNonEmptyRows(cached.publishedSchedules[d.id]);
                     next[d.id] = {
                       ...next[d.id],
-                      publishedRows: cached.publishedSchedules[d.id],
+                      draftRows: cleanRows,
+                      publishedRows: cleanRows,
+                      hasUnpublishedChanges: false,
                     };
                   }
                 });
@@ -373,7 +382,7 @@ export default function App() {
           const built = {} as Record<DayId, DailyScheduleData>;
           DAYS_LIST.forEach((d) => {
             const dayData = json.schedules[d.id];
-            const rows: ScheduleRow[] = normalizeSortOrders(dayData?.rows || []);
+            const rows: ScheduleRow[] = filterNonEmptyRows(dayData?.rows || []);
             built[d.id] = {
               dayId: d.id,
               dayLabel: d.label,
@@ -600,19 +609,24 @@ export default function App() {
     let unsubSchedule: () => void;
 
     if (!isStaffAuthenticated) {
-      // Visitor: Read public approved schedule ONLY from publicSchedules/{selectedDay}
+      // Visitor: Read schedule from publicSchedules/{selectedDay}
       const publicRef = doc(db, 'publicSchedules', selectedDay);
       unsubSchedule = onSnapshot(
         publicRef,
         (snap) => {
           if (snap.exists()) {
             const pubData = snap.data() as PublicDailyScheduleData;
+            const cleanRows = filterNonEmptyRows(pubData.publishedRows || [])
+              .slice(0, BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY)
+              .map((r, i) => sanitizeRowForFirestore(r, i));
             setSchedules((prev) => {
               const current = prev[selectedDay];
               if (!current) return prev;
               const nextDay: DailyScheduleData = {
                 ...current,
-                publishedRows: pubData.publishedRows || [],
+                draftRows: cleanRows,
+                publishedRows: cleanRows,
+                hasUnpublishedChanges: false,
                 publishedAt: pubData.publishedAt || current.publishedAt,
                 isPublic: pubData.isPublic ?? true,
               };
@@ -632,7 +646,7 @@ export default function App() {
         }
       );
     } else {
-      // Staff / Editor / Admin: Read full draft schedule from schedules/{selectedDay}
+      // Staff / Editor / Admin: Read schedule from schedules/{selectedDay}
       // Protected against active saves, pending writes, and older versions (Requirement 2)
       const scheduleRef = doc(db, 'schedules', selectedDay);
       unsubSchedule = onSnapshot(
@@ -652,11 +666,31 @@ export default function App() {
             return;
           }
 
+          const rawSourceRows = Array.isArray(remoteDoc.draftRows)
+            ? remoteDoc.draftRows
+            : Array.isArray(remoteDoc.publishedRows)
+            ? remoteDoc.publishedRows
+            : [];
+          const hadEmptyRowsInRemote = rawSourceRows.some((r) =>
+            isCompletelyEmptyRow(r)
+          );
+          const cleanRows = filterNonEmptyRows(rawSourceRows)
+            .slice(0, BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY)
+            .map((r, i) => sanitizeRowForFirestore(r, i));
+
+          const normalizedRemote: DailyScheduleData = {
+            ...remoteDoc,
+            draftRows: cleanRows,
+            publishedRows: cleanRows,
+            hasUnpublishedChanges: false,
+            isPublic: true,
+          };
+
           setSchedules((prev) => {
             const currentLocal = prev[selectedDay];
             const conflictCheck = detectConcurrentConflict({
               localBaseVersion: localVersionRef.current[selectedDay] || 1,
-              incomingRemoteSchedule: remoteDoc,
+              incomingRemoteSchedule: normalizedRemote,
               currentUserId: auth.currentUser?.uid,
               hasLocalUnsavedChanges: isDaySavingOrPending(selectedDay),
               localDraftRows: currentLocal?.draftRows || [],
@@ -667,21 +701,13 @@ export default function App() {
                 dayId: selectedDay,
                 baseRows: confirmedSchedulesRef.current[selectedDay]?.draftRows,
                 localRows: currentLocal?.draftRows || [],
-                remoteSchedule: remoteDoc,
+                remoteSchedule: normalizedRemote,
                 detectedAt: new Date().toISOString(),
               });
               setSaveStatus('conflict');
               saveStatusRef.current = 'conflict';
               return prev;
             }
-
-            const normalizedRemote: DailyScheduleData = {
-              ...remoteDoc,
-              hasUnpublishedChanges: !areRowsEqual(
-                remoteDoc.draftRows || [],
-                remoteDoc.publishedRows || []
-              ),
-            };
 
             localVersionRef.current[selectedDay] = normalizedRemote.version || 1;
             confirmedSchedulesRef.current = {
@@ -693,6 +719,15 @@ export default function App() {
               [selectedDay]: normalizedRemote,
             };
           });
+
+          // If legacy remote document had completely empty rows (e.g. Saturday), silently clean them in Firestore
+          if (
+            hadEmptyRowsInRemote &&
+            canUserEditDay(activeRoleRef.current, allowedDays, selectedDay)
+          ) {
+            dirtyGenRef.current[selectedDay] += 1;
+            enqueueDayDraftCommit(selectedDay, dirtyGenRef.current[selectedDay]);
+          }
         },
         (error) => {
           if (auth.currentUser) {
@@ -762,11 +797,15 @@ export default function App() {
   };
 
   /**
-   * Enqueues an atomic Firestore transaction for `schedules/{targetDayId}` onto the per-day promise queue.
-   * - Never starts before the previous save for `targetDayId` finishes (Requirement 1).
-   * - Writes ONLY `draftRows` and `hasUnpublishedChanges` without touching `publishedRows` or `publicSchedules` (Requirement 5).
-   * - Uses `executeWithRetry` (up to 3 retries with exponential backoff on `aborted`/`unavailable`) and NO `setDoc` fallback (Requirement 3).
-   * - Displays the real error in `authErrorBanner` (persistent until user closes) before rolling back to `confirmedSchedulesRef` (Requirement 3).
+   * Enqueues an atomic Firestore transaction for BOTH `schedules/{targetDayId}` AND `publicSchedules/{targetDayId}`
+   * onto the per-day promise queue (`daySaveQueueRef`).
+   * - Never starts before the previous save for `targetDayId` finishes.
+   * - Makes `draftRows` the single source of truth: writes `draftRows` and `publishedRows` with the exact same rows,
+   *   `hasUnpublishedChanges: false` always, and `publicSchedules/{targetDayId}.publishedRows` with the exact same rows
+   *   inside the SAME `runTransaction`.
+   * - Silently migrates any day where `draftRows` previously differed from `publishedRows` by taking `draftRows` as truth.
+   * - Uses `executeWithRetry` (up to 3 retries with exponential backoff on `aborted`/`unavailable`) and NO `setDoc` fallback.
+   * - Displays the real error in `authErrorBanner` (persistent until user closes) before rolling back to `confirmedSchedulesRef`.
    */
   const enqueueDayDraftCommit = (targetDayId: DayId, targetGen: number) => {
     inFlightCountRef.current[targetDayId] += 1;
@@ -787,41 +826,40 @@ export default function App() {
         const latestDay = schedulesRef.current[targetDayId];
         if (!latestDay) return;
 
+        const sanitizedRows = filterNonEmptyRows(latestDay.draftRows || [])
+          .slice(0, BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY)
+          .map((r, i) => sanitizeRowForFirestore(r, i));
+
         const currentUser = firebaseUserRef.current;
         if (!currentUser) {
           committedGenRef.current[targetDayId] = currentGen;
+          const localUnified: DailyScheduleData = {
+            ...latestDay,
+            draftRows: sanitizedRows,
+            publishedRows: sanitizedRows,
+            hasUnpublishedChanges: false,
+            isPublic: true,
+          };
           confirmedSchedulesRef.current = {
             ...confirmedSchedulesRef.current,
-            [targetDayId]: latestDay,
+            [targetDayId]: localUnified,
           };
           return;
         }
 
-        const sanitizedDraft = normalizeSortOrders(latestDay.draftRows || [])
-          .slice(0, 60)
-          .map((r, i) => sanitizeRowForFirestore(r, i));
         const baseVersion =
           localVersionRef.current[targetDayId] ||
           confirmedSchedulesRef.current[targetDayId]?.version ||
           1;
         const scheduleDocRef = doc(db, 'schedules', targetDayId);
+        const publicDocRef = doc(db, 'publicSchedules', targetDayId);
         const auditMeta = pendingAuditMetaRef.current[targetDayId];
         const dayMeta =
           DAYS_LIST.find((d) => d.id === targetDayId) || DAYS_LIST[0];
+        const commitIso = new Date().toISOString();
 
         try {
           let finalVersion = Math.max(1, Math.floor(baseVersion)) + 1;
-          let finalPublishedRows = normalizeSortOrders(
-            latestDay.publishedRows || []
-          )
-            .slice(0, 60)
-            .map((r, i) => sanitizeRowForFirestore(r, i));
-          let finalPublishedAt =
-            typeof latestDay.publishedAt === 'string' &&
-            latestDay.publishedAt.trim().length > 0 &&
-            latestDay.publishedAt.length <= 60
-              ? latestDay.publishedAt
-              : new Date().toISOString();
 
           await executeWithRetry(
             async () => {
@@ -844,28 +882,10 @@ export default function App() {
                     );
                   }
                   finalVersion = remoteVer + 1;
-                  finalPublishedRows = normalizeSortOrders(
-                    Array.isArray(remoteData.publishedRows)
-                      ? remoteData.publishedRows
-                      : []
-                  )
-                    .slice(0, 60)
-                    .map((r, i) => sanitizeRowForFirestore(r, i));
-                  if (
-                    typeof remoteData.publishedAt === 'string' &&
-                    remoteData.publishedAt.trim().length > 0 &&
-                    remoteData.publishedAt.length <= 60
-                  ) {
-                    finalPublishedAt = remoteData.publishedAt;
-                  }
                 } else {
                   finalVersion = 1;
                 }
 
-                const hasDiff = !areRowsEqual(
-                  sanitizedDraft,
-                  finalPublishedRows
-                );
                 const safeUpdatedBy =
                   (currentUser.uid || 'admin').slice(0, 128) || 'admin';
                 const safeUpdatedByEmail = (
@@ -880,20 +900,32 @@ export default function App() {
                   'مدير النظام'
                 ).slice(0, 120);
 
+                // Write BOTH schedules/{day} and publicSchedules/{day} atomically in the same transaction
                 transaction.set(scheduleDocRef, {
                   dayId: dayMeta.id,
                   dayLabel: dayMeta.label,
                   dayOrder: dayMeta.order,
                   isPublic: true,
-                  hasUnpublishedChanges: hasDiff,
+                  hasUnpublishedChanges: false,
                   version: finalVersion,
-                  draftRows: sanitizedDraft,
-                  publishedRows: finalPublishedRows,
+                  draftRows: sanitizedRows,
+                  publishedRows: sanitizedRows,
                   updatedBy: safeUpdatedBy,
                   updatedByEmail: safeUpdatedByEmail,
                   updatedByName: safeUpdatedByName,
                   updatedAt: serverTimestamp(),
-                  publishedAt: finalPublishedAt,
+                  publishedAt: commitIso,
+                });
+
+                transaction.set(publicDocRef, {
+                  dayId: dayMeta.id,
+                  dayLabel: dayMeta.label,
+                  dayOrder: dayMeta.order,
+                  isPublic: true,
+                  version: finalVersion,
+                  publishedRows: sanitizedRows,
+                  publishedAt: commitIso,
+                  updatedAt: serverTimestamp(),
                 });
               });
             },
@@ -912,14 +944,12 @@ export default function App() {
             dayId: dayMeta.id,
             dayLabel: dayMeta.label,
             dayOrder: dayMeta.order,
-            draftRows: sanitizedDraft,
-            publishedRows: finalPublishedRows,
-            hasUnpublishedChanges: !areRowsEqual(
-              sanitizedDraft,
-              finalPublishedRows
-            ),
+            draftRows: sanitizedRows,
+            publishedRows: sanitizedRows,
+            hasUnpublishedChanges: false,
+            isPublic: true,
             version: finalVersion,
-            publishedAt: finalPublishedAt,
+            publishedAt: commitIso,
           };
 
           confirmedSchedulesRef.current = {
@@ -957,12 +987,20 @@ export default function App() {
             const remoteData = JSON.parse(
               errMsg.slice('CONCURRENT_CONFLICT:'.length)
             ) as DailyScheduleData;
+            const cleanRemoteRows = filterNonEmptyRows(
+              remoteData.draftRows || remoteData.publishedRows || []
+            );
             setConflict({
               dayId: targetDayId,
               baseRows:
                 confirmedSchedulesRef.current[targetDayId]?.draftRows || [],
-              localRows: sanitizedDraft,
-              remoteSchedule: remoteData,
+              localRows: sanitizedRows,
+              remoteSchedule: {
+                ...remoteData,
+                draftRows: cleanRemoteRows,
+                publishedRows: cleanRemoteRows,
+                hasUnpublishedChanges: false,
+              },
               detectedAt: new Date().toISOString(),
             });
             setSaveStatus('conflict');
@@ -1011,9 +1049,41 @@ export default function App() {
   };
 
   /**
-   * Functional draft mutation handler (Requirements 1, 4, 5):
+   * Immediately flushes any pending debounced saves across all days without waiting 700ms.
+   * Triggered on `pagehide` and `visibilitychange` (when document becomes hidden).
+   */
+  const flushAllPendingDebouncedSaves = () => {
+    DAYS_LIST.forEach((d) => {
+      const dayId = d.id;
+      if (pendingDebounceTimerRef.current[dayId] !== null) {
+        clearTimeout(pendingDebounceTimerRef.current[dayId]!);
+        pendingDebounceTimerRef.current[dayId] = null;
+        enqueueDayDraftCommit(dayId, dirtyGenRef.current[dayId]);
+      }
+    });
+  };
+
+  useEffect(() => {
+    const handlePageHide = () => {
+      flushAllPendingDebouncedSaves();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        flushAllPendingDebouncedSaves();
+      }
+    };
+    window.addEventListener('pagehide', handlePageHide);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('pagehide', handlePageHide);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
+
+  /**
+   * Functional schedule mutation handler:
    * - Builds on `schedulesRef.current[targetDayId].draftRows` using `(prevRows) => nextRows` (never stale render state).
-   * - Updates ONLY `draftRows` and `hasUnpublishedChanges` (never touches `publishedRows` or `publicSchedules`).
+   * - Synchronizes `draftRows` and `publishedRows` with `hasUnpublishedChanges = false`.
    * - Coalesces rapid consecutive edits with a 700ms debounce before enqueuing into `daySaveQueueRef`.
    */
   const mutateDayScheduleDraft = (
@@ -1021,12 +1091,13 @@ export default function App() {
     updater: (prevRows: ScheduleRow[]) => ScheduleRow[],
     action: AuditAction,
     detailsOrBuilder: string | ((prevRows: ScheduleRow[], nextRows: ScheduleRow[]) => string),
-    recordUndo = true
+    recordUndo = true,
+    immediateFlush = false
   ) => {
     const currentDay = schedulesRef.current[targetDayId];
     if (!currentDay) return;
 
-    const prevDraftRows = currentDay.draftRows || [];
+    const prevDraftRows = filterNonEmptyRows(currentDay.draftRows || []);
 
     if (recordUndo) {
       setUndoStacks((prev) => ({
@@ -1068,232 +1139,14 @@ export default function App() {
       pendingDebounceTimerRef.current[targetDayId] = null;
     }
 
-    pendingDebounceTimerRef.current[targetDayId] = setTimeout(() => {
-      pendingDebounceTimerRef.current[targetDayId] = null;
+    if (immediateFlush) {
       enqueueDayDraftCommit(targetDayId, dirtyGenRef.current[targetDayId]);
-    }, 700);
-  };
-
-  /**
-   * "اعتماد ونشر التعديلات" (Requirements 3 & 5):
-   * - Cancels any pending debounce timer for `selectedDay` and chains onto `daySaveQueueRef.current[selectedDay]`.
-   * - Copies `draftRows` to `publishedRows`, sets `hasUnpublishedChanges: false`,
-   *   and writes BOTH `schedules/{selectedDay}` and `publicSchedules/{selectedDay}` atomically in ONE `runTransaction`.
-   * - Retries up to 3 times on `aborted`/`unavailable` without any `setDoc` fallback.
-   */
-  const handlePublishDay = async () => {
-    if (!userCanEditSelectedDay) return;
-    const targetDayId = selectedDay;
-
-    // Cancel any pending debounce timer so publish commits the latest draft in a single atomic transaction
-    if (pendingDebounceTimerRef.current[targetDayId] !== null) {
-      clearTimeout(pendingDebounceTimerRef.current[targetDayId]!);
-      pendingDebounceTimerRef.current[targetDayId] = null;
+    } else {
+      pendingDebounceTimerRef.current[targetDayId] = setTimeout(() => {
+        pendingDebounceTimerRef.current[targetDayId] = null;
+        enqueueDayDraftCommit(targetDayId, dirtyGenRef.current[targetDayId]);
+      }, 700);
     }
-
-    const currentDay = schedulesRef.current[targetDayId];
-    if (!currentDay) return;
-
-    const publishTimestamp = new Date().toISOString();
-    const baseVersion =
-      localVersionRef.current[targetDayId] || currentDay.version || 1;
-    const editorInfo = {
-      uid: firebaseUserRef.current?.uid || 'local-staff',
-      email: firebaseUserRef.current?.email || PRIMARY_ADMIN_EMAIL,
-      displayName:
-        firebaseUserRef.current?.displayName ||
-        (activeRoleRef.current === 'ADMIN' ? 'مدير النظام' : 'محرر الجداول'),
-    };
-
-    const optimisticPublished = applyPublishToDay(
-      currentDay,
-      publishTimestamp,
-      baseVersion + 1,
-      editorInfo
-    );
-
-    dirtyGenRef.current[targetDayId] += 1;
-    const publishGen = dirtyGenRef.current[targetDayId];
-
-    setSaveStatus('saving');
-    saveStatusRef.current = 'saving';
-    setSchedules((prev) => ({
-      ...prev,
-      [targetDayId]: optimisticPublished,
-    }));
-
-    if (!firebaseUserRef.current) {
-      committedGenRef.current[targetDayId] = publishGen;
-      confirmedSchedulesRef.current = {
-        ...confirmedSchedulesRef.current,
-        [targetDayId]: optimisticPublished,
-      };
-      setSaveStatus('saved');
-      saveStatusRef.current = 'saved';
-      return;
-    }
-
-    inFlightCountRef.current[targetDayId] += 1;
-
-    const nextPromise = daySaveQueueRef.current[targetDayId]
-      .catch(() => {
-        // Keep queue alive
-      })
-      .then(async () => {
-        const latestDay = schedulesRef.current[targetDayId];
-        const currentUser = firebaseUserRef.current;
-        if (!latestDay || !currentUser) return;
-
-        const sanitizedRows = normalizeSortOrders(
-          latestDay.draftRows || []
-        )
-          .slice(0, 60)
-          .map((r, i) => sanitizeRowForFirestore(r, i));
-
-        const scheduleDocRef = doc(db, 'schedules', targetDayId);
-        const publicDocRef = doc(db, 'publicSchedules', targetDayId);
-        const dayMeta =
-          DAYS_LIST.find((d) => d.id === targetDayId) || DAYS_LIST[0];
-        let finalVersion =
-          Math.max(1, Math.floor(localVersionRef.current[targetDayId] || baseVersion)) + 1;
-
-        try {
-          await executeWithRetry(
-            async () => {
-              await runTransaction(db, async (transaction) => {
-                const remoteSnap = await transaction.get(scheduleDocRef);
-                if (remoteSnap.exists()) {
-                  const remoteData = remoteSnap.data() as DailyScheduleData;
-                  const remoteVer =
-                    typeof remoteData.version === 'number' &&
-                    Number.isFinite(remoteData.version)
-                      ? Math.max(1, Math.floor(remoteData.version))
-                      : 1;
-                  finalVersion = remoteVer + 1;
-                } else {
-                  finalVersion = 1;
-                }
-
-                const safeUpdatedBy =
-                  (currentUser.uid || 'admin').slice(0, 128) || 'admin';
-                const safeUpdatedByEmail = (
-                  currentUser.email || PRIMARY_ADMIN_EMAIL
-                )
-                  .trim()
-                  .toLowerCase()
-                  .slice(0, 160);
-                const safeUpdatedByName = (
-                  editorInfo.displayName?.trim() || 'مدير النظام'
-                ).slice(0, 120);
-
-                transaction.set(scheduleDocRef, {
-                  dayId: dayMeta.id,
-                  dayLabel: dayMeta.label,
-                  dayOrder: dayMeta.order,
-                  isPublic: true,
-                  hasUnpublishedChanges: false,
-                  version: finalVersion,
-                  draftRows: sanitizedRows,
-                  publishedRows: sanitizedRows,
-                  updatedBy: safeUpdatedBy,
-                  updatedByEmail: safeUpdatedByEmail,
-                  updatedByName: safeUpdatedByName,
-                  updatedAt: serverTimestamp(),
-                  publishedAt: publishTimestamp,
-                });
-
-                transaction.set(publicDocRef, {
-                  dayId: dayMeta.id,
-                  dayLabel: dayMeta.label,
-                  dayOrder: dayMeta.order,
-                  isPublic: true,
-                  publishedRows: sanitizedRows,
-                  publishedAt: publishTimestamp,
-                  updatedAt: serverTimestamp(),
-                });
-              });
-            },
-            3,
-            150
-          );
-
-          localVersionRef.current[targetDayId] = finalVersion;
-          committedGenRef.current[targetDayId] = Math.max(
-            committedGenRef.current[targetDayId],
-            publishGen
-          );
-
-          const confirmedPublished: DailyScheduleData = {
-            ...latestDay,
-            dayId: dayMeta.id,
-            dayLabel: dayMeta.label,
-            dayOrder: dayMeta.order,
-            draftRows: sanitizedRows,
-            publishedRows: sanitizedRows,
-            hasUnpublishedChanges: false,
-            version: finalVersion,
-            publishedAt: publishTimestamp,
-          };
-
-          confirmedSchedulesRef.current = {
-            ...confirmedSchedulesRef.current,
-            [targetDayId]: confirmedPublished,
-          };
-
-          setSchedules((prev) => ({
-            ...prev,
-            [targetDayId]: confirmedPublished,
-          }));
-
-          await showLocalNotification(
-            `تحديث جدول يوم ${dayMeta.label}`,
-            `تم اعتماد ونشر جدول عيادات يوم ${dayMeta.label} (${sanitizedRows.length} عيادات) للجمهور بنجاح.`
-          );
-
-          try {
-            await appendAuditLog(
-              'PUBLISH_DAY',
-              targetDayId,
-              dayMeta.label,
-              `اعتماد ونشر جدول يوم ${dayMeta.label} للجمهور (${sanitizedRows.length} عيادات)`
-            );
-          } catch {
-            // Non-blocking
-          }
-        } catch (err: unknown) {
-          console.warn('Publish error:', err);
-          committedGenRef.current[targetDayId] = dirtyGenRef.current[targetDayId];
-          const formatted = formatFirestoreCommitError(err, latestDay.dayLabel);
-          setAuthErrorBanner(formatted.message);
-          setSaveStatus('error');
-          saveStatusRef.current = 'error';
-
-          const rollbackDay =
-            confirmedSchedulesRef.current[targetDayId] || currentDay;
-          setSchedules((prev) => ({
-            ...prev,
-            [targetDayId]: rollbackDay,
-          }));
-        }
-      })
-      .finally(() => {
-        inFlightCountRef.current[targetDayId] = Math.max(
-          0,
-          inFlightCountRef.current[targetDayId] - 1
-        );
-        if (!isDaySavingOrPending(targetDayId)) {
-          if (
-            saveStatusRef.current !== 'error' &&
-            saveStatusRef.current !== 'conflict'
-          ) {
-            setSaveStatus('saved');
-            saveStatusRef.current = 'saved';
-          }
-        }
-      });
-
-    daySaveQueueRef.current[targetDayId] = nextPromise;
-    await nextPromise;
   };
 
   /**
@@ -1345,9 +1198,9 @@ export default function App() {
       for (const day of DAYS_LIST) {
         const scheduleSnap = await getDoc(doc(db, 'schedules', day.id));
         const daySched = schedulesRef.current[day.id];
-        const draftRows = normalizeSortOrders(daySched?.draftRows || []).map(
-          (r, i) => sanitizeRowForFirestore(r, i)
-        );
+        const draftRows = filterNonEmptyRows(daySched?.draftRows || [])
+          .slice(0, BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY)
+          .map((r, i) => sanitizeRowForFirestore(r, i));
 
         if (!scheduleSnap.exists()) {
           await setDoc(doc(db, 'schedules', day.id), {
@@ -1374,6 +1227,7 @@ export default function App() {
             dayLabel: day.label,
             dayOrder: day.order,
             isPublic: true,
+            version: 1,
             publishedRows: draftRows,
             publishedAt: new Date().toISOString(),
             updatedAt: serverTimestamp(),
@@ -1406,14 +1260,29 @@ export default function App() {
     viewMode === 'manage' &&
     canUserEditDay(activeRole, allowedDays, selectedDay);
 
-  const displayedRows =
-    viewMode === 'public' || isStrictPublicUrl || !firebaseUser
-      ? currentSchedule.publishedRows
-      : currentSchedule.draftRows;
+  // Staff and visitors see the exact same rows (draftRows is the single source of truth)
+  const displayedRows = filterNonEmptyRows(
+    currentSchedule.draftRows || currentSchedule.publishedRows || []
+  );
 
-  // Functional row handlers building on schedulesRef.current (Requirement 1)
+  // Functional row handlers building on schedulesRef.current
   const handleAddRow = (input: Omit<ScheduleRow, 'id' | 'sortOrder'>) => {
     if (!userCanEditSelectedDay) return;
+    if (isCompletelyEmptyRow(input)) {
+      setAuthErrorBanner(
+        'لا يمكن حفظ صف فارغ تماماً (العيادة والطبيب والوقت كلها فارغة).'
+      );
+      return;
+    }
+    const currentRows = filterNonEmptyRows(
+      schedulesRef.current[selectedDay]?.draftRows || []
+    );
+    if (currentRows.length >= BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY) {
+      setAuthErrorBanner(
+        `لا يمكن إضافة المزيد: الحد الأقصى المسموح به هو ${BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY} عيادة في اليوم الواحد.`
+      );
+      return;
+    }
     mutateDayScheduleDraft(
       selectedDay,
       (prevRows) => addScheduleRow(prevRows, input),
@@ -1427,6 +1296,18 @@ export default function App() {
     patch: Partial<Omit<ScheduleRow, 'id' | 'sortOrder'>>
   ) => {
     if (!userCanEditSelectedDay) return;
+    const existingRow = (schedulesRef.current[selectedDay]?.draftRows || []).find(
+      (r) => r.id === rowId
+    );
+    if (existingRow) {
+      const candidate = { ...existingRow, ...patch };
+      if (isCompletelyEmptyRow(candidate)) {
+        setAuthErrorBanner(
+          'لا يمكن حفظ صف فارغ تماماً (العيادة والطبيب والوقت كلها فارغة).'
+        );
+        return;
+      }
+    }
     mutateDayScheduleDraft(
       selectedDay,
       (prevRows) => updateScheduleRow(prevRows, rowId, patch),
@@ -1470,6 +1351,16 @@ export default function App() {
 
   const handleCopyRowToDay = (row: ScheduleRow, targetDayId: DayId) => {
     if (!canUserEditDay(activeRole, allowedDays, targetDayId)) return;
+    if (isCompletelyEmptyRow(row)) return;
+    const targetRows = filterNonEmptyRows(
+      schedulesRef.current[targetDayId]?.draftRows || []
+    );
+    if (targetRows.length >= BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY) {
+      setAuthErrorBanner(
+        `لا يمكن نسخ العيادة: الحد الأقصى المسموح به هو ${BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY} عيادة في اليوم الواحد.`
+      );
+      return;
+    }
     const sourceLabel = schedulesRef.current[selectedDay]?.dayLabel || '';
     const targetLabel = schedulesRef.current[targetDayId]?.dayLabel || '';
     mutateDayScheduleDraft(
@@ -1482,10 +1373,20 @@ export default function App() {
 
   const handleCopyDayToDay = (targetDayId: DayId) => {
     if (!canUserEditDay(activeRole, allowedDays, targetDayId)) return;
-    const sourceRows = schedulesRef.current[selectedDay]?.draftRows || [];
+    const sourceRows = filterNonEmptyRows(
+      schedulesRef.current[selectedDay]?.draftRows || []
+    );
+    if (sourceRows.length > BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY) {
+      setAuthErrorBanner(
+        `الحد الأقصى للعيادات في اليوم الواحد هو ${BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY} عيادة.`
+      );
+    }
     const sourceLabel = schedulesRef.current[selectedDay]?.dayLabel || '';
     const targetLabel = schedulesRef.current[targetDayId]?.dayLabel || '';
-    const copiedRows = copyFullDayRows(sourceRows, targetDayId);
+    const copiedRows = copyFullDayRows(sourceRows, targetDayId).slice(
+      0,
+      BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY
+    );
     mutateDayScheduleDraft(
       targetDayId,
       () => copiedRows,
@@ -1497,7 +1398,7 @@ export default function App() {
   const handleUndo = () => {
     const stack = undoStacks[selectedDay] || [];
     if (stack.length === 0) return;
-    const previousRows = stack[stack.length - 1];
+    const previousRows = filterNonEmptyRows(stack[stack.length - 1]);
     setUndoStacks((prev) => ({
       ...prev,
       [selectedDay]: prev[selectedDay].slice(0, -1),
@@ -1515,19 +1416,29 @@ export default function App() {
     if (!userCanEditSelectedDay) return;
     if (isDaySavingOrPending(selectedDay)) return;
     const currentDay = schedulesRef.current[selectedDay];
-    if (!currentDay || currentDay.draftRows.length === 0) return;
-    if (
-      window.confirm(
-        `هل تريد مسح جميع عيادات مسودة يوم ${currentDay.dayLabel} (${currentDay.draftRows.length} عيادات)؟ لن يتأثر الجدول المنشور للجمهور إلا بعد الضغط على «اعتماد ونشر»، ويمكنك التراجع باستخدام زر «تراجع».`
-      )
-    ) {
-      mutateDayScheduleDraft(
-        selectedDay,
-        () => [],
-        'DELETE_ROW',
-        `مسح جميع عيادات مسودة يوم ${currentDay.dayLabel} (${currentDay.draftRows.length} عيادات)`
-      );
-    }
+    const cleanRows = filterNonEmptyRows(currentDay?.draftRows || []);
+    if (!currentDay || cleanRows.length === 0) return;
+    setConfirmClearDayModal({
+      dayId: selectedDay,
+      dayLabel: currentDay.dayLabel,
+      rowCount: cleanRows.length,
+    });
+  };
+
+  const executeConfirmedClearDay = () => {
+    if (!confirmClearDayModal) return;
+    const { dayId, dayLabel, rowCount } = confirmClearDayModal;
+    setConfirmClearDayModal(null);
+    if (!canUserEditDay(activeRole, allowedDays, dayId)) return;
+    if (isDaySavingOrPending(dayId)) return;
+    mutateDayScheduleDraft(
+      dayId,
+      () => [],
+      'DELETE_ROW',
+      `مسح جميع عيادات يوم ${dayLabel} (${rowCount} عيادات)`,
+      true,
+      true
+    );
   };
 
   const handleSaveSettings = async (newSettings: CenterSettings) => {
@@ -1755,14 +1666,9 @@ export default function App() {
             {DAYS_LIST.map((day) => {
               const isSelected = selectedDay === day.id;
               const daySched = schedules[day.id];
-              const rowCount =
-                viewMode === 'public' || isStrictPublicUrl || !firebaseUser
-                  ? daySched?.publishedRows?.length || 0
-                  : daySched?.draftRows?.length || 0;
-              const hasDraftDiff =
-                viewMode === 'manage' &&
-                Boolean(firebaseUser) &&
-                daySched?.hasUnpublishedChanges;
+              const rowCount = filterNonEmptyRows(
+                daySched?.draftRows || daySched?.publishedRows || []
+              ).length;
 
               return (
                 <button
@@ -1790,20 +1696,44 @@ export default function App() {
                   >
                     {rowCount}
                   </span>
-                  {hasDraftDiff && (
-                    <span
-                      title="توجد مسودة غير منشورة لهذا اليوم"
-                      className="absolute -top-1 -left-1 h-2.5 w-2.5 rounded-full bg-emerald-400 ring-2 ring-purple-950"
-                    />
-                  )}
                 </button>
               );
             })}
           </nav>
 
-          {/* Top Bar Controls: Header Undo + Login/Logout */}
+          {/* Top Bar Controls: Save Status + Header Undo + Login/Logout */}
           {!isStrictPublicUrl && (
             <div className="flex items-center gap-1.5 shrink-0">
+              {userCanEditSelectedDay && (
+                <span
+                  data-testid="header-save-status"
+                  className={`inline-flex items-center gap-1 rounded-xl px-2.5 py-1 text-[11px] font-extrabold shrink-0 border ${
+                    saveStatus === 'saving'
+                      ? 'bg-amber-500/20 text-amber-200 border-amber-400/40'
+                      : saveStatus === 'error'
+                      ? 'bg-rose-500/25 text-rose-200 border-rose-400/40'
+                      : 'bg-emerald-500/20 text-emerald-200 border-emerald-400/40'
+                  }`}
+                >
+                  <span
+                    className={`h-2 w-2 rounded-full ${
+                      saveStatus === 'saving'
+                        ? 'bg-amber-400 animate-pulse'
+                        : saveStatus === 'error'
+                        ? 'bg-rose-400'
+                        : 'bg-emerald-400'
+                    }`}
+                  />
+                  <span>
+                    {saveStatus === 'saving'
+                      ? 'جارٍ الحفظ...'
+                      : saveStatus === 'error'
+                      ? 'خطأ في الحفظ'
+                      : 'تم الحفظ'}
+                  </span>
+                </span>
+              )}
+
               {/* Persistent Header Undo Button — Shown ONLY when an edit/action has been performed */}
               {userCanEditSelectedDay && canUndo && (
                 <button
@@ -1937,40 +1867,26 @@ export default function App() {
                 </div>
 
                 {userCanEditSelectedDay && (
-                  <div className="rounded-xl bg-emerald-50/70 border border-emerald-200 p-2.5 space-y-2">
+                  <div className="rounded-xl bg-emerald-50/70 border border-emerald-200 p-2.5">
                     <div
                       data-testid="save-status-indicator"
                       className="flex items-center gap-1.5 text-xs font-extrabold text-emerald-800"
                     >
-                      <span className="h-2 w-2 rounded-full bg-emerald-500 shrink-0" />
+                      <span
+                        className={`h-2 w-2 rounded-full shrink-0 ${
+                          saveStatus === 'saving'
+                            ? 'bg-amber-500 animate-pulse'
+                            : 'bg-emerald-500'
+                        }`}
+                      />
                       <span>
                         {saveStatus === 'saving'
-                          ? 'جارٍ الحفظ الفوري...'
+                          ? 'جارٍ الحفظ...'
                           : saveStatus === 'error'
                           ? 'تعذر الحفظ (راجع الاتصال)'
-                          : 'حفظ فوري تلقائي على Firestore'}
+                          : 'تم الحفظ'}
                       </span>
                     </div>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        handlePublishDay();
-                        setIsSidebarOpen(false);
-                      }}
-                      className={`w-full inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-xs font-extrabold text-white shadow-xs transition cursor-pointer ${
-                        currentSchedule.hasUnpublishedChanges
-                          ? 'bg-emerald-600 hover:bg-emerald-700'
-                          : 'bg-purple-700 hover:bg-purple-800'
-                      }`}
-                    >
-                      <Send className="w-3.5 h-3.5 shrink-0" />
-                      <span>
-                        {currentSchedule.hasUnpublishedChanges
-                          ? 'اعتماد ونشر التعديلات للجمهور'
-                          : 'معتمد ومنشور للجمهور'}
-                      </span>
-                    </button>
                   </div>
                 )}
 
@@ -2252,9 +2168,7 @@ export default function App() {
               <ScheduleEditorPanel
                 dayId={selectedDay}
                 dayLabel={currentSchedule.dayLabel}
-                draftRows={currentSchedule.draftRows}
-                publishedRows={currentSchedule.publishedRows}
-                hasUnpublishedChanges={currentSchedule.hasUnpublishedChanges}
+                draftRows={displayedRows}
                 saveStatus={saveStatus}
                 canUndo={canUndo}
                 undoCount={undoCount}
@@ -2268,7 +2182,6 @@ export default function App() {
                 onCopyRowToDay={handleCopyRowToDay}
                 onCopyDayToDay={handleCopyDayToDay}
                 onUndo={handleUndo}
-                onPublishDay={handlePublishDay}
                 conflict={conflict}
                 onResolveConflict={handleResolveConflict}
               />
@@ -2297,8 +2210,6 @@ export default function App() {
               onCopyRowToDay={handleCopyRowToDay}
               onClearDay={handleClearDay}
               isSaving={saveStatus === 'saving'}
-              hasUnpublishedChanges={currentSchedule.hasUnpublishedChanges}
-              onPublishDay={handlePublishDay}
             />
           </div>
         </div>
@@ -2327,7 +2238,61 @@ export default function App() {
         </div>
       </main>
 
-      {/* Copy Full Day Confirmation Modal (Requirement 3.3) */}
+      {/* Clear Day Confirmation Modal stating the number of rows */}
+      {confirmClearDayModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          data-testid="confirm-clear-day-modal"
+          aria-label="تأكيد مسح عيادات اليوم"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs"
+        >
+          <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl border border-rose-200">
+            <div className="flex items-center justify-between mb-3">
+              <h4 className="text-base font-extrabold text-rose-900 flex items-center gap-2">
+                <Trash2 className="w-5 h-5 text-rose-600" />
+                <span>تأكيد مسح عيادات يوم {confirmClearDayModal.dayLabel}</span>
+              </h4>
+              <button
+                type="button"
+                onClick={() => setConfirmClearDayModal(null)}
+                className="text-slate-500 hover:text-slate-800"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs font-bold text-slate-700 mb-4 leading-relaxed">
+              هل أنت متأكد من مسح جميع عيادات يوم{' '}
+              <strong className="text-rose-700">
+                {confirmClearDayModal.dayLabel} ({confirmClearDayModal.rowCount} عيادات)
+              </strong>
+              ؟ سيتم تفريغ الجدول بالكامل وحفظ التعديل مباشرة للجميع، ويمكنك التراجع باستخدام زر «تراجع».
+            </p>
+
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmClearDayModal(null)}
+                className="rounded-xl border border-slate-300 px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 cursor-pointer"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                disabled={saveStatus === 'saving'}
+                onClick={executeConfirmedClearDay}
+                data-testid="confirm-clear-day-submit-btn"
+                className="rounded-xl bg-rose-600 px-4 py-2 text-xs font-extrabold text-white hover:bg-rose-700 disabled:opacity-50 cursor-pointer shadow-xs"
+              >
+                نعم، مسح ({confirmClearDayModal.rowCount}) عيادات
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Copy Full Day Confirmation Modal */}
       {showCopyDayModal && (
         <div
           role="dialog"
@@ -2353,10 +2318,10 @@ export default function App() {
             <p className="text-xs font-semibold text-slate-600 mb-4 leading-relaxed">
               سيتم نسخ جميع عيادات ومواعيد يوم{' '}
               <strong className="text-slate-900">
-                {currentSchedule.dayLabel} ({currentSchedule.draftRows.length} عيادات)
+                {currentSchedule.dayLabel} ({displayedRows.length} عيادات)
               </strong>{' '}
-              إلى مسودة اليوم المختار أدناه، مع استبدال عياداته الحالية (
-              {schedules[copyDayTarget]?.draftRows?.length || 0} عيادات):
+              إلى جدول اليوم المختار أدناه، مع استبدال عياداته الحالية (
+              {filterNonEmptyRows(schedules[copyDayTarget]?.draftRows || []).length} عيادات):
             </p>
 
             <div className="mb-4">
@@ -2371,7 +2336,7 @@ export default function App() {
               >
                 {DAYS_LIST.filter((d) => d.id !== selectedDay).map((d) => (
                   <option key={d.id} value={d.id}>
-                    {d.label} (حالياً {schedules[d.id]?.draftRows?.length || 0} عيادات)
+                    {d.label} (حالياً {filterNonEmptyRows(schedules[d.id]?.draftRows || []).length} عيادات)
                   </option>
                 ))}
               </select>

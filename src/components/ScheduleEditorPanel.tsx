@@ -5,11 +5,9 @@ import {
   Check,
   Copy,
   Edit3,
-  Eye,
   GripVertical,
   Plus,
   RotateCcw,
-  Send,
   Trash2,
   AlertTriangle,
   X,
@@ -25,7 +23,7 @@ import {
   CLINIC_COLOR_SWATCHES,
   CLINIC_ICONS_CATALOG,
   DAYS_LIST,
-  normalizeSortOrders,
+  filterNonEmptyRows,
   validateRowInput,
 } from '../utils/scheduleLogic';
 import { ClinicMedicalIcon } from './MedicalIcons';
@@ -34,8 +32,6 @@ interface ScheduleEditorPanelProps {
   dayId: DayId;
   dayLabel: string;
   draftRows: ScheduleRow[];
-  publishedRows: ScheduleRow[];
-  hasUnpublishedChanges: boolean;
   saveStatus: SaveStatus;
   canUndo: boolean;
   undoCount: number;
@@ -49,7 +45,6 @@ interface ScheduleEditorPanelProps {
   onCopyRowToDay: (row: ScheduleRow, targetDayId: DayId) => void;
   onCopyDayToDay: (targetDayId: DayId) => void;
   onUndo: () => void;
-  onPublishDay: () => void;
   conflict: ConflictInfo | null;
   onResolveConflict: (resolution: 'merge' | 'remote' | 'local') => void;
 }
@@ -58,8 +53,6 @@ export const ScheduleEditorPanel: React.FC<ScheduleEditorPanelProps> = ({
   dayId,
   dayLabel,
   draftRows,
-  publishedRows,
-  hasUnpublishedChanges,
   saveStatus,
   canUndo,
   undoCount,
@@ -73,11 +66,10 @@ export const ScheduleEditorPanel: React.FC<ScheduleEditorPanelProps> = ({
   onCopyRowToDay,
   onCopyDayToDay,
   onUndo,
-  onPublishDay,
   conflict,
   onResolveConflict,
 }) => {
-  const orderedRows = normalizeSortOrders(draftRows);
+  const orderedRows = filterNonEmptyRows(draftRows);
 
   // Add New Row form state
   const [clinicName, setClinicName] = useState('');
@@ -105,9 +97,6 @@ export const ScheduleEditorPanel: React.FC<ScheduleEditorPanelProps> = ({
   const [copyDayTarget, setCopyDayTarget] = useState<DayId>(
     dayId === 'saturday' ? 'sunday' : 'saturday'
   );
-
-  // Publish preview modal state
-  const [showPublishPreview, setShowPublishPreview] = useState(false);
 
   // Drag & Drop state
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
@@ -146,7 +135,7 @@ export const ScheduleEditorPanel: React.FC<ScheduleEditorPanelProps> = ({
     });
     setClinicName('');
     setDoctorName('');
-    showToast('تمت إضافة العيادة إلى المسودة وحفظها تلقائيًا');
+    showToast('تمت إضافة العيادة وحفظها تلقائيًا');
   };
 
   const startEditingRow = (row: ScheduleRow) => {
@@ -245,22 +234,6 @@ export const ScheduleEditorPanel: React.FC<ScheduleEditorPanelProps> = ({
           >
             <Copy className="w-4 h-4" />
             <span>نسخ يوم {dayLabel} ليوم آخر</span>
-          </button>
-
-          {/* Preview & Publish Button */}
-          <button
-            type="button"
-            onClick={() => setShowPublishPreview(true)}
-            className={`inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-extrabold text-white shadow-sm transition ${
-              hasUnpublishedChanges
-                ? 'bg-emerald-600 hover:bg-emerald-700 ring-2 ring-emerald-300'
-                : 'bg-purple-700 hover:bg-purple-800'
-            }`}
-          >
-            <Send className="w-4 h-4" />
-            <span>
-              {hasUnpublishedChanges ? 'معاينة ونشر التعديلات الجديدة' : 'معاينة ونشر الجدول'}
-            </span>
           </button>
         </div>
       </div>
@@ -876,7 +849,7 @@ export const ScheduleEditorPanel: React.FC<ScheduleEditorPanelProps> = ({
             </div>
             <p className="text-xs font-semibold text-slate-600 mb-4 leading-relaxed">
               سيتم نسخ جميع العيادات والمواعيد الحالية في يوم <strong>{dayLabel}</strong> (
-              {orderedRows.length} عيادات) إلى مسودة اليوم المختار أدناه:
+              {orderedRows.length} عيادات) إلى جدول اليوم المختار أدناه:
             </p>
             <div className="mb-4">
               <label className="block text-xs font-bold text-slate-700 mb-1.5">
@@ -914,81 +887,6 @@ export const ScheduleEditorPanel: React.FC<ScheduleEditorPanelProps> = ({
                 className="rounded-xl bg-indigo-600 px-4 py-2 text-xs font-extrabold text-white hover:bg-indigo-700"
               >
                 نسخ الجدول الآن
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Modal: Preview Changes Before Publishing */}
-      {showPublishPreview && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="معاينة التغييرات قبل النشر"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs"
-        >
-          <div className="w-full max-w-lg rounded-2xl bg-white p-5 shadow-2xl border border-slate-200">
-            <div className="flex items-center justify-between mb-3">
-              <h4 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
-                <Eye className="w-5 h-5 text-emerald-600" />
-                <span>معاينة واعتماد نشر جدول يوم {dayLabel}</span>
-              </h4>
-              <button
-                type="button"
-                onClick={() => setShowPublishPreview(false)}
-                aria-label="إغلاق المعاينة"
-                className="text-slate-500 hover:text-slate-800"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="rounded-xl bg-slate-50 p-3.5 border border-slate-200 mb-4 text-xs space-y-2">
-              <div className="flex items-center justify-between font-bold text-slate-700">
-                <span>عدد العيادات في النسخة المنشورة حاليًا:</span>
-                <span>{publishedRows.length} عيادات</span>
-              </div>
-              <div className="flex items-center justify-between font-extrabold text-emerald-800">
-                <span>عدد العيادات في المسودة الجاهزة للنشر:</span>
-                <span>{orderedRows.length} عيادات</span>
-              </div>
-              <div className="pt-2 border-t border-slate-200 max-h-48 overflow-y-auto space-y-1">
-                {orderedRows.map((r, i) => (
-                  <div
-                    key={r.id}
-                    className="flex items-center justify-between text-slate-800 font-semibold py-1 border-b border-slate-100 last:border-0"
-                  >
-                    <span>
-                      {i + 1}. {r.clinicName} ({r.doctorName})
-                    </span>
-                    <span className="text-purple-700 font-bold">
-                      {r.startTime} - {r.endTime}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setShowPublishPreview(false)}
-                className="rounded-xl border border-slate-300 px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50"
-              >
-                العودة للمحرر
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  onPublishDay();
-                  setShowPublishPreview(false);
-                  showToast(`تم نشر جدول يوم ${dayLabel} للجمهور بنجاح!`);
-                }}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-5 py-2 text-xs font-extrabold text-white hover:bg-emerald-700 shadow-sm"
-              >
-                <Send className="w-4 h-4" />
-                <span>اعتماد ونشر للجمهور الآن</span>
               </button>
             </div>
           </div>

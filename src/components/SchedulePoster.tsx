@@ -26,11 +26,14 @@ import {
   CLINIC_PRESETS_LIST,
   DAYS_LIST,
   TIME_PRESETS_LIST,
+  filterNonEmptyRows,
+  isCompletelyEmptyRow,
   normalizeLeftLogoUrl,
   normalizeRightLogoUrl,
-  normalizeSortOrders,
 } from '../utils/scheduleLogic';
 import { AssociationBrandLogo, ComplexBrandLogo } from './BrandLogos';
+
+const PENDING_NEW_ROW_ID = '__pending_new_row__';
 
 interface SchedulePosterProps {
   dayId?: DayId;
@@ -50,8 +53,6 @@ interface SchedulePosterProps {
   onCopyRowToDay?: (row: ScheduleRow, targetDayId: DayId) => void;
   onClearDay?: () => void;
   isSaving?: boolean;
-  hasUnpublishedChanges?: boolean;
-  onPublishDay?: () => void;
 }
 
 type ActiveCellPopup =
@@ -73,10 +74,9 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
   onCopyRowToDay,
   onClearDay,
   isSaving = false,
-  hasUnpublishedChanges = false,
-  onPublishDay,
 }) => {
-  const orderedRows = normalizeSortOrders(rows);
+  const savedRows = filterNonEmptyRows(rows);
+  const [pendingNewRow, setPendingNewRow] = useState<ScheduleRow | null>(null);
   const [activePopup, setActivePopup] = useState<ActiveCellPopup>(null);
   const [doctorDraft, setDoctorDraft] = useState('');
   const [customClinicDraft, setCustomClinicDraft] = useState('');
@@ -86,7 +86,16 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
   );
   const containerRef = useRef<HTMLDivElement | null>(null);
 
+  useEffect(() => {
+    setPendingNewRow(null);
+    setActivePopup(null);
+  }, [dayId]);
+
   const showControls = isEditable && !isExporting;
+  const orderedRows =
+    showControls && pendingNewRow
+      ? [...savedRows, { ...pendingNewRow, sortOrder: savedRows.length }]
+      : savedRows;
   const rowCount = orderedRows.length;
   const isCompactExport = isExporting && rowCount >= 8;
 
@@ -153,14 +162,38 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
     setActivePopup({ rowId: row.id, field });
   };
 
+  const applyRowPatchOrCommitPending = (
+    rowId: string,
+    patch: Partial<Omit<ScheduleRow, 'id' | 'sortOrder'>>
+  ) => {
+    if (rowId === PENDING_NEW_ROW_ID) {
+      if (!pendingNewRow) return;
+      const merged: Omit<ScheduleRow, 'id' | 'sortOrder'> = {
+        clinicName: patch.clinicName ?? pendingNewRow.clinicName,
+        doctorName: patch.doctorName ?? pendingNewRow.doctorName,
+        startTime: patch.startTime ?? pendingNewRow.startTime,
+        endTime: patch.endTime ?? pendingNewRow.endTime,
+        icon: patch.icon ?? pendingNewRow.icon,
+        iconColor: patch.iconColor ?? pendingNewRow.iconColor,
+      };
+      if (isCompletelyEmptyRow(merged)) {
+        setPendingNewRow({ ...pendingNewRow, ...merged });
+        return;
+      }
+      setPendingNewRow(null);
+      onAddRow?.(merged);
+      return;
+    }
+    onUpdateRow?.(rowId, patch);
+  };
+
   const handleSelectClinicPreset = (
     rowId: string,
     name: string,
     icon: ClinicIconId,
     color: string
   ) => {
-    if (!onUpdateRow) return;
-    onUpdateRow(rowId, {
+    applyRowPatchOrCommitPending(rowId, {
       clinicName: name,
       icon,
       iconColor: color,
@@ -169,9 +202,8 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
   };
 
   const handleSaveDoctorName = (rowId: string) => {
-    if (!onUpdateRow) return;
     const trimmed = doctorDraft.trim();
-    onUpdateRow(rowId, { doctorName: trimmed });
+    applyRowPatchOrCommitPending(rowId, { doctorName: trimmed });
     setActivePopup(null);
   };
 
@@ -180,22 +212,32 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
     field: 'startTime' | 'endTime',
     timeValue: string
   ) => {
-    if (!onUpdateRow) return;
     const trimmed = timeValue.trim();
-    onUpdateRow(rowId, { [field]: trimmed });
+    applyRowPatchOrCommitPending(rowId, { [field]: trimmed });
     setActivePopup(null);
   };
 
   const handleQuickAddRow = () => {
     if (!onAddRow) return;
-    onAddRow({
+    if (pendingNewRow) {
+      setActivePopup({ rowId: PENDING_NEW_ROW_ID, field: 'clinic' });
+      return;
+    }
+    const blankRow: ScheduleRow = {
+      id: PENDING_NEW_ROW_ID,
       clinicName: '',
       doctorName: '',
       startTime: '',
       endTime: '',
       icon: 'stethoscope',
       iconColor: '#6d28d9',
-    });
+      sortOrder: savedRows.length,
+    };
+    setPendingNewRow(blankRow);
+    setDoctorDraft('');
+    setCustomClinicDraft('');
+    setCustomTimeDraft('');
+    setActivePopup({ rowId: PENDING_NEW_ROW_ID, field: 'clinic' });
   };
 
   return (
@@ -809,8 +851,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                                 key={sw.hex}
                                 type="button"
                                 onClick={() =>
-                                  onUpdateRow &&
-                                  onUpdateRow(row.id, { iconColor: sw.hex })
+                                  applyRowPatchOrCommitPending(row.id, { iconColor: sw.hex })
                                 }
                                 style={{ backgroundColor: sw.hex }}
                                 className="h-5 w-5 rounded-full border border-white shadow-2xs"
@@ -820,8 +861,8 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                           <button
                             type="button"
                             onClick={() => {
-                              if (customClinicDraft.trim() && onUpdateRow) {
-                                onUpdateRow(row.id, {
+                              if (customClinicDraft.trim()) {
+                                applyRowPatchOrCommitPending(row.id, {
                                   clinicName: customClinicDraft.trim(),
                                 });
                               }
@@ -989,7 +1030,11 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                             <button
                               type="button"
                               onClick={() => {
-                                onDeleteRow && onDeleteRow(row.id);
+                                if (row.id === PENDING_NEW_ROW_ID) {
+                                  setPendingNewRow(null);
+                                } else {
+                                  onDeleteRow && onDeleteRow(row.id);
+                                }
                                 setActivePopup(null);
                               }}
                               className="inline-flex items-center gap-1 rounded-lg bg-rose-600 px-2.5 py-1 text-xs font-bold hover:bg-rose-700 cursor-pointer"
@@ -1030,7 +1075,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                   <span>إضافة عيادة جديدة إلى جدول يوم {dayLabel}</span>
                 </button>
 
-                {orderedRows.length > 0 && onClearDay && (
+                {savedRows.length > 0 && onClearDay && (
                   <button
                     type="button"
                     disabled={isSaving}
@@ -1039,7 +1084,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                     title={
                       isSaving
                         ? 'جارٍ الحفظ... يرجى الانتظار'
-                        : `مسح عيادات مسودة يوم ${dayLabel}`
+                        : `مسح عيادات يوم ${dayLabel}`
                     }
                     className="rounded-xl border border-rose-300 bg-rose-50 hover:bg-rose-100 disabled:opacity-45 disabled:cursor-not-allowed px-3 py-2.5 text-xs font-extrabold text-rose-700 transition flex items-center justify-center gap-1.5 cursor-pointer shrink-0 shadow-xs"
                   >
@@ -1047,46 +1092,11 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                     <span>
                       {isSaving
                         ? 'جارٍ الحفظ...'
-                        : `مسح عيادات اليوم (${orderedRows.length})`}
+                        : `مسح عيادات اليوم (${savedRows.length})`}
                     </span>
                   </button>
                 )}
               </div>
-
-              {/* Draft & Saving Status Bar + Direct Publish Button */}
-              {(isSaving || hasUnpublishedChanges) && (
-                <div
-                  data-testid="poster-draft-status-bar"
-                  className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-300 bg-amber-50/90 px-3 py-2 text-xs font-extrabold text-amber-950"
-                >
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={`h-2.5 w-2.5 rounded-full shrink-0 ${
-                        isSaving
-                          ? 'bg-amber-500 animate-pulse'
-                          : 'bg-emerald-500'
-                      }`}
-                    />
-                    <span>
-                      {isSaving
-                        ? 'جارٍ الحفظ في المسودة...'
-                        : 'مسودة غير منشورة للجمهور (محفوظة في مسودة الإدارة)'}
-                    </span>
-                  </div>
-
-                  {onPublishDay && (
-                    <button
-                      type="button"
-                      disabled={isSaving}
-                      onClick={onPublishDay}
-                      data-testid="quick-publish-day-btn"
-                      className="rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-1.5 text-xs font-black text-white transition cursor-pointer shadow-xs"
-                    >
-                      اعتماد ونشر للجمهور
-                    </button>
-                  )}
-                </div>
-              )}
             </div>
           )}
         </div>
