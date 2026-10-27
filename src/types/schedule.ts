@@ -136,6 +136,19 @@ export interface PublicDailyScheduleData {
   publishedAt: string;
 }
 
+export type FacebookPostMode =
+  | 'photo_with_caption'
+  | 'photo_only'
+  | 'text_only';
+
+export interface PosterImageData {
+  dayId: DayId;
+  version: number;
+  imageBase64: string;
+  mime: 'image/jpeg';
+  updatedAt?: unknown;
+}
+
 export interface ReminderSettings {
   enabled: boolean;
   time: string;
@@ -144,8 +157,10 @@ export interface ReminderSettings {
   title: string;
   body: string;
   fbAutoPostEnabled?: boolean;
+  fbPostMode?: FacebookPostMode;
   lastSentDate?: string;
   lastFbPostDate?: string;
+  lastFbPostWarning?: string;
   updatedBy?: string;
   updatedByEmail?: string;
   updatedAt?: unknown;

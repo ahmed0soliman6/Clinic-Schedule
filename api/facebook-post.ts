@@ -5,9 +5,14 @@ import type {
   CenterSettings,
   DailyScheduleData,
   DayId,
+  FacebookPostMode,
   PublicDailyScheduleData,
+  ReminderSettings,
   ScheduleRow,
 } from '../src/types/schedule.js';
+import {
+  decideFacebookPublishPlan,
+} from '../src/utils/facebookPostLogic.js';
 import { resolveTargetDayId } from '../src/utils/reminderLogic.js';
 import {
   DAYS_LIST,
@@ -107,7 +112,7 @@ function formatClinicRowForFacebook(row: ScheduleRow): string {
   return `🔹 ${clinicLabel} — ${doctorLabel} (من ${start} إلى ${end})`;
 }
 
-function formatFacebookSchedulePost(params: {
+function formatFacebookScheduleFullText(params: {
   dayLabel: string;
   rows: ScheduleRow[];
   settings: CenterSettings;
@@ -213,6 +218,138 @@ function parseRequestBody(body: unknown): Record<string, unknown> {
   return {};
 }
 
+/**
+ * Uploads a poster photo to Facebook Page via Meta Graph API v21.0 /{page-id}/photos
+ */
+async function publishPhotoToFacebookPage(params: {
+  pageId: string;
+  accessToken: string;
+  jpegBuffer: Buffer;
+  caption?: string;
+  dayId: string;
+}): Promise<{ ok: boolean; post_id?: string; error?: string; statusCode?: number }> {
+  const { pageId, accessToken, jpegBuffer, caption, dayId } = params;
+  const graphUrl = `https://graph.facebook.com/v21.0/${encodeURIComponent(
+    pageId
+  )}/photos`;
+
+  const form = new FormData();
+  form.append(
+    'source',
+    new Blob([new Uint8Array(jpegBuffer)], { type: 'image/jpeg' }),
+    `schedule-${dayId}.jpg`
+  );
+  if (caption && caption.trim().length > 0) {
+    form.append('caption', caption.trim());
+  }
+  form.append('published', 'true');
+  form.append('access_token', accessToken);
+
+  try {
+    const response = await fetch(graphUrl, {
+      method: 'POST',
+      body: form,
+    });
+
+    const data = (await response.json().catch(() => ({}))) as {
+      id?: string;
+      post_id?: string;
+      error?: {
+        message?: string;
+        type?: string;
+        code?: number;
+      };
+    };
+
+    if (!response.ok || data.error) {
+      const fbErrorMsg =
+        data.error?.message || `HTTP ${response.status} من خادم فيسبوك`;
+      const fbErrorCode = data.error?.code ? ` (كود ${data.error.code})` : '';
+      return {
+        ok: false,
+        statusCode: response.status || 502,
+        error: `فشل نشر صورة الجدول عبر Meta Graph API v21.0${fbErrorCode}: ${fbErrorMsg}`,
+      };
+    }
+
+    const postId = String(data.post_id || data.id || '').trim();
+    return {
+      ok: true,
+      statusCode: 200,
+      post_id: postId,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      statusCode: 502,
+      error: `تعذر الاتصال بخدمة رفع الصور في Meta Graph API v21.0: ${msg}`,
+    };
+  }
+}
+
+/**
+ * Publishes text-only post to Facebook Page via Meta Graph API v21.0 /{page-id}/feed
+ */
+async function publishTextFeedToFacebookPage(params: {
+  pageId: string;
+  accessToken: string;
+  message: string;
+}): Promise<{ ok: boolean; post_id?: string; error?: string; statusCode?: number }> {
+  const { pageId, accessToken, message } = params;
+  const graphUrl = `https://graph.facebook.com/v21.0/${encodeURIComponent(
+    pageId
+  )}/feed`;
+
+  try {
+    const response = await fetch(graphUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        message,
+        access_token: accessToken,
+      }),
+    });
+
+    const data = (await response.json().catch(() => ({}))) as {
+      id?: string;
+      post_id?: string;
+      error?: {
+        message?: string;
+        type?: string;
+        code?: number;
+      };
+    };
+
+    if (!response.ok || data.error) {
+      const fbErrorMsg =
+        data.error?.message || `HTTP ${response.status} من خادم فيسبوك`;
+      const fbErrorCode = data.error?.code ? ` (كود ${data.error.code})` : '';
+      return {
+        ok: false,
+        statusCode: response.status || 502,
+        error: `فشل النشر عبر Meta Graph API v21.0${fbErrorCode}: ${fbErrorMsg}`,
+      };
+    }
+
+    const postId = String(data.post_id || data.id || '').trim();
+    return {
+      ok: true,
+      statusCode: 200,
+      post_id: postId,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      statusCode: 502,
+      error: `تعذر الاتصال بواجهة Meta Graph API v21.0: ${msg}`,
+    };
+  }
+}
+
 export default async function facebookPostHandler(
   req: VercelRequestLike,
   res: VercelResponseLike
@@ -297,61 +434,96 @@ export default async function facebookPostHandler(
       : resolveTargetDayId(now, targetMode, 'Africa/Cairo');
 
     const dayId: DayId = targetDayMeta.dayId;
-    const dayLabel: string =
-      typeof payload.dayLabel === 'string' && payload.dayLabel.trim()
-        ? payload.dayLabel.trim()
-        : targetDayMeta.dayLabel;
+    const dayLabel: string = targetDayMeta.dayLabel;
 
-    let centerSettings: CenterSettings = {
-      ...DEFAULT_CENTER_SETTINGS,
-      ...(payload.settings && typeof payload.settings === 'object'
-        ? (payload.settings as Partial<CenterSettings>)
-        : {}),
-    };
-
-    let scheduleRows: ScheduleRow[] = Array.isArray(payload.rows)
-      ? filterNonEmptyRows(payload.rows as ScheduleRow[])
-      : [];
+    let centerSettings: CenterSettings = DEFAULT_CENTER_SETTINGS;
+    let scheduleRows: ScheduleRow[] = [];
+    let scheduleVersion = 1;
+    let storedPosterImage: {
+      dayId: string;
+      version: number;
+      imageBase64: string;
+      mime: string;
+    } | null = null;
+    let postMode: FacebookPostMode = 'photo_with_caption';
 
     if (db) {
-      const [settingsSnap, scheduleSnap, publicScheduleSnap] = await Promise.all([
+      const [
+        settingsSnap,
+        remindersSnap,
+        scheduleSnap,
+        publicScheduleSnap,
+        posterSnap,
+      ] = await Promise.all([
         db.collection('settings').doc('center').get(),
+        db.collection('appConfig').doc('reminders').get(),
         db.collection('schedules').doc(dayId).get(),
         db.collection('publicSchedules').doc(dayId).get(),
+        db.collection('posterImages').doc(dayId).get(),
       ]);
 
       if (settingsSnap.exists) {
         centerSettings = {
-          ...centerSettings,
+          ...DEFAULT_CENTER_SETTINGS,
           ...(settingsSnap.data() as Partial<CenterSettings>),
         };
       }
 
-      if (scheduleRows.length === 0) {
-        if (scheduleSnap.exists) {
-          const schedData = scheduleSnap.data() as DailyScheduleData;
-          scheduleRows = filterNonEmptyRows(
-            schedData.draftRows || schedData.publishedRows || []
-          );
-        } else if (publicScheduleSnap.exists) {
-          const pubData = publicScheduleSnap.data() as PublicDailyScheduleData;
-          scheduleRows = filterNonEmptyRows(pubData.publishedRows || []);
+      if (remindersSnap.exists) {
+        const rData = remindersSnap.data() as Partial<ReminderSettings>;
+        if (
+          rData?.fbPostMode === 'photo_only' ||
+          rData?.fbPostMode === 'text_only' ||
+          rData?.fbPostMode === 'photo_with_caption'
+        ) {
+          postMode = rData.fbPostMode;
+        }
+      }
+
+      if (scheduleSnap.exists) {
+        const schedData = scheduleSnap.data() as DailyScheduleData;
+        scheduleVersion = schedData.version || 1;
+        scheduleRows = filterNonEmptyRows(
+          schedData.draftRows || schedData.publishedRows || []
+        );
+      } else if (publicScheduleSnap.exists) {
+        const pubData = publicScheduleSnap.data() as PublicDailyScheduleData;
+        scheduleRows = filterNonEmptyRows(pubData.publishedRows || []);
+      }
+
+      if (posterSnap.exists) {
+        const pData = posterSnap.data();
+        if (pData && typeof pData.imageBase64 === 'string') {
+          storedPosterImage = {
+            dayId,
+            version: Number(pData.version || 0),
+            imageBase64: pData.imageBase64,
+            mime: String(pData.mime || 'image/jpeg'),
+          };
         }
       }
     }
 
-    const customMessage =
-      typeof payload.message === 'string' && payload.message.trim().length > 0
-        ? payload.message.trim()
-        : '';
+    // Determine publish decision strictly from server-side Firestore records
+    const plan = decideFacebookPublishPlan({
+      mode: postMode,
+      scheduleVersion,
+      storedPosterImage,
+      dayLabel,
+      settings: centerSettings,
+      isManualTrigger: !isCronAuthorized,
+    });
 
-    const formattedPostMessage =
-      customMessage ||
-      formatFacebookSchedulePost({
+    if (plan.action === 'reject_error') {
+      res.status(400).json({
+        ok: false,
+        success: false,
+        dayId,
         dayLabel,
-        rows: scheduleRows,
-        settings: centerSettings,
+        error: plan.errorMessage,
       });
+      return;
+    }
 
     const cleanPageId = normalizeFacebookPageId(process.env.FB_PAGE_ID);
     const cleanToken = normalizeEnvSecret(process.env.FB_PAGE_ACCESS_TOKEN);
@@ -368,54 +540,75 @@ export default async function facebookPostHandler(
       return;
     }
 
-    const graphUrl = `https://graph.facebook.com/v21.0/${encodeURIComponent(
-      cleanPageId
-    )}/feed`;
+    if (plan.action === 'post_photo') {
+      const publishResult = await publishPhotoToFacebookPage({
+        pageId: cleanPageId,
+        accessToken: cleanToken,
+        jpegBuffer: plan.jpegBuffer,
+        caption: plan.caption,
+        dayId,
+      });
 
-    const response = await fetch(graphUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        message: formattedPostMessage,
-        access_token: cleanToken,
-      }),
-    });
+      if (!publishResult.ok) {
+        res.status(publishResult.statusCode || 502).json({
+          ok: false,
+          success: false,
+          dayId,
+          dayLabel,
+          error: publishResult.error,
+        });
+        return;
+      }
 
-    const data = (await response.json().catch(() => ({}))) as {
-      id?: string;
-      post_id?: string;
-      error?: {
-        message?: string;
-        code?: number;
-      };
-    };
-
-    if (!response.ok || data.error) {
-      const fbErrorMsg =
-        data.error?.message || `HTTP ${response.status} من خادم فيسبوك`;
-      const fbErrorCode = data.error?.code ? ` (كود ${data.error.code})` : '';
-      res.status(response.status || 502).json({
-        ok: false,
-        success: false,
+      res.status(200).json({
+        ok: true,
+        success: true,
+        post_id: publishResult.post_id,
         dayId,
         dayLabel,
-        error: `فشل النشر عبر Meta Graph API v21.0${fbErrorCode}: ${fbErrorMsg}`,
+        postMode,
+        isPhotoPost: true,
+        caption: plan.caption,
+        message: `تم نشر صورة بوستر جدول عيادات يوم ${dayLabel} بنجاح على صفحة فيسبوك! (معرف المنشور: ${publishResult.post_id})`,
       });
       return;
     }
 
-    const postId = String(data.post_id || data.id || '').trim();
+    // Fallback or explicit text-only post
+    const formattedPostMessage = formatFacebookScheduleFullText({
+      dayLabel,
+      rows: scheduleRows,
+      settings: centerSettings,
+    });
+
+    const feedResult = await publishTextFeedToFacebookPage({
+      pageId: cleanPageId,
+      accessToken: cleanToken,
+      message: formattedPostMessage,
+    });
+
+    if (!feedResult.ok) {
+      res.status(feedResult.statusCode || 502).json({
+        ok: false,
+        success: false,
+        dayId,
+        dayLabel,
+        error: feedResult.error,
+      });
+      return;
+    }
+
     res.status(200).json({
       ok: true,
       success: true,
-      post_id: postId,
+      post_id: feedResult.post_id,
       dayId,
       dayLabel,
-      rowCount: scheduleRows.length,
+      postMode,
+      isPhotoPost: false,
       postContent: formattedPostMessage,
-      message: `تم نشر جدول عيادات يوم ${dayLabel} على صفحة فيسبوك بنجاح! (معرف المنشور: ${postId})`,
+      warning: plan.warning,
+      message: `تم نشر جدول عيادات يوم ${dayLabel} (نص) بنجاح على صفحة فيسبوك! (معرف المنشور: ${feedResult.post_id})`,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

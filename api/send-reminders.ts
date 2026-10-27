@@ -6,11 +6,13 @@ import type {
   CenterSettings,
   DailyScheduleData,
   DayId,
+  FacebookPostMode,
   PublicDailyScheduleData,
   ReminderSettings,
   ScheduleRow,
   UserProfile,
 } from '../src/types/schedule.js';
+import { decideFacebookPublishPlan } from '../src/utils/facebookPostLogic.js';
 import {
   computeTokenDocId,
   DEFAULT_REMINDER_SETTINGS,
@@ -180,13 +182,95 @@ function formatFacebookSchedulePost(params: {
   return `${headerLine}\n\n${clinicsBlock}\n\n${footerLines}`;
 }
 
-async function publishToFacebookPageGraphApi(params: {
-  pageId?: string;
-  pageAccessToken?: string;
+async function publishPhotoToFacebookPage(params: {
+  pageId: string;
+  accessToken: string;
+  jpegBuffer: Buffer;
+  caption?: string;
+  dayId: string;
+}): Promise<FacebookPostResult> {
+  const cleanPageId = normalizeFacebookPageId(params.pageId);
+  const cleanToken = normalizeEnvSecret(params.accessToken);
+
+  if (!cleanPageId || !cleanToken) {
+    return {
+      ok: false,
+      success: false,
+      statusCode: 500,
+      error:
+        'متغيرات فيسبوك (FB_PAGE_ID أو FB_PAGE_ACCESS_TOKEN) غير مضبوطة في إعدادات بيئة الخادم (Vercel Environment Variables) أو تحتاج إلى Redeploy لتفعيلها.',
+    };
+  }
+
+  const graphUrl = `https://graph.facebook.com/v21.0/${encodeURIComponent(
+    cleanPageId
+  )}/photos`;
+
+  const form = new FormData();
+  form.append(
+    'source',
+    new Blob([new Uint8Array(params.jpegBuffer)], { type: 'image/jpeg' }),
+    `schedule-${params.dayId}.jpg`
+  );
+  if (params.caption && params.caption.trim().length > 0) {
+    form.append('caption', params.caption.trim());
+  }
+  form.append('published', 'true');
+  form.append('access_token', cleanToken);
+
+  try {
+    const response = await fetch(graphUrl, {
+      method: 'POST',
+      body: form,
+    });
+
+    const data = (await response.json().catch(() => ({}))) as {
+      id?: string;
+      post_id?: string;
+      error?: {
+        message?: string;
+        type?: string;
+        code?: number;
+      };
+    };
+
+    if (!response.ok || data.error) {
+      const fbErrorMsg =
+        data.error?.message || `HTTP ${response.status} من خادم فيسبوك`;
+      const fbErrorCode = data.error?.code ? ` (كود ${data.error.code})` : '';
+      return {
+        ok: false,
+        success: false,
+        statusCode: response.status || 502,
+        error: `فشل نشر صورة الجدول عبر Meta Graph API v21.0${fbErrorCode}: ${fbErrorMsg}`,
+      };
+    }
+
+    const postId = String(data.post_id || data.id || '').trim();
+    return {
+      ok: true,
+      success: true,
+      post_id: postId,
+      statusCode: 200,
+    };
+  } catch (err) {
+    const rawMsg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      success: false,
+      statusCode: 502,
+      error: `تعذر الاتصال بخدمة رفع الصور في Meta Graph API v21.0: ${rawMsg}`,
+    };
+  }
+}
+
+async function publishFeedTextToFacebookPage(params: {
+  pageId: string;
+  accessToken: string;
   message: string;
 }): Promise<FacebookPostResult> {
   const cleanPageId = normalizeFacebookPageId(params.pageId);
-  const cleanToken = normalizeEnvSecret(params.pageAccessToken);
+  const cleanToken = normalizeEnvSecret(params.accessToken);
   const cleanMessage = (params.message || '').trim();
 
   if (!cleanPageId || !cleanToken) {
@@ -231,7 +315,6 @@ async function publishToFacebookPageGraphApi(params: {
         message?: string;
         type?: string;
         code?: number;
-        error_subcode?: number;
       };
     };
 
@@ -248,15 +331,6 @@ async function publishToFacebookPageGraphApi(params: {
     }
 
     const postId = String(data.post_id || data.id || '').trim();
-    if (!postId) {
-      return {
-        ok: false,
-        success: false,
-        statusCode: 502,
-        error: 'استجاب خادم فيسبوك بدون إرجاع معرف المنشور (post_id).',
-      };
-    }
-
     return {
       ok: true,
       success: true,
@@ -447,15 +521,29 @@ async function handleFacebookPostAction(
         : {}),
     };
 
-    let scheduleRows: ScheduleRow[] = Array.isArray(payload.rows)
-      ? filterNonEmptyRows(payload.rows as ScheduleRow[])
-      : [];
+    let scheduleRows: ScheduleRow[] = [];
+    let scheduleVersion = 1;
+    let storedPosterImage: {
+      dayId: string;
+      version: number;
+      imageBase64: string;
+      mime: string;
+    } | null = null;
+    let postMode: FacebookPostMode = 'photo_with_caption';
 
     if (db) {
-      const [settingsSnap, scheduleSnap, publicScheduleSnap] = await Promise.all([
+      const [
+        settingsSnap,
+        remindersSnap,
+        scheduleSnap,
+        publicScheduleSnap,
+        posterSnap,
+      ] = await Promise.all([
         db.collection('settings').doc('center').get(),
+        db.collection('appConfig').doc('reminders').get(),
         db.collection('schedules').doc(dayId).get(),
         db.collection('publicSchedules').doc(dayId).get(),
+        db.collection('posterImages').doc(dayId).get(),
       ]);
 
       if (settingsSnap.exists) {
@@ -465,46 +553,131 @@ async function handleFacebookPostAction(
         };
       }
 
-      if (scheduleRows.length === 0) {
-        if (scheduleSnap.exists) {
-          const schedData = scheduleSnap.data() as DailyScheduleData;
-          scheduleRows = filterNonEmptyRows(
-            schedData.draftRows || schedData.publishedRows || []
-          );
-        } else if (publicScheduleSnap.exists) {
-          const pubData = publicScheduleSnap.data() as PublicDailyScheduleData;
-          scheduleRows = filterNonEmptyRows(pubData.publishedRows || []);
+      if (remindersSnap.exists) {
+        const rData = remindersSnap.data() as Partial<ReminderSettings>;
+        if (
+          rData?.fbPostMode === 'photo_only' ||
+          rData?.fbPostMode === 'text_only' ||
+          rData?.fbPostMode === 'photo_with_caption'
+        ) {
+          postMode = rData.fbPostMode;
+        }
+      }
+
+      if (scheduleSnap.exists) {
+        const schedData = scheduleSnap.data() as DailyScheduleData;
+        scheduleVersion = schedData.version || 1;
+        scheduleRows = filterNonEmptyRows(
+          schedData.draftRows || schedData.publishedRows || []
+        );
+      } else if (publicScheduleSnap.exists) {
+        const pubData = publicScheduleSnap.data() as PublicDailyScheduleData;
+        scheduleRows = filterNonEmptyRows(pubData.publishedRows || []);
+      }
+
+      if (posterSnap.exists) {
+        const pData = posterSnap.data();
+        if (pData && typeof pData.imageBase64 === 'string') {
+          storedPosterImage = {
+            dayId,
+            version: Number(pData.version || 0),
+            imageBase64: pData.imageBase64,
+            mime: String(pData.mime || 'image/jpeg'),
+          };
         }
       }
     }
 
-    const customMessage =
-      typeof payload.message === 'string' && payload.message.trim().length > 0
-        ? payload.message.trim()
-        : '';
-
-    const formattedPostMessage =
-      customMessage ||
-      formatFacebookSchedulePost({
-        dayLabel,
-        rows: scheduleRows,
-        settings: centerSettings,
-      });
-
-    const fbResult = await publishToFacebookPageGraphApi({
-      pageId: process.env.FB_PAGE_ID,
-      pageAccessToken: process.env.FB_PAGE_ACCESS_TOKEN,
-      message: formattedPostMessage,
+    const plan = decideFacebookPublishPlan({
+      mode: postMode,
+      scheduleVersion,
+      storedPosterImage,
+      dayLabel,
+      settings: centerSettings,
+      isManualTrigger: !isCronAuthorized,
     });
 
-    if (!fbResult.ok || !fbResult.post_id) {
-      res.status(fbResult.statusCode || 500).json({
+    if (plan.action === 'reject_error') {
+      res.status(400).json({
+        ok: false,
+        success: false,
+        dayId,
+        dayLabel,
+        error: plan.errorMessage,
+      });
+      return;
+    }
+
+    const cleanPageId = normalizeFacebookPageId(process.env.FB_PAGE_ID);
+    const cleanToken = normalizeEnvSecret(process.env.FB_PAGE_ACCESS_TOKEN);
+
+    if (!cleanPageId || !cleanToken) {
+      res.status(500).json({
         ok: false,
         success: false,
         dayId,
         dayLabel,
         error:
-          fbResult.error ||
+          'متغيرات فيسبوك (FB_PAGE_ID أو FB_PAGE_ACCESS_TOKEN) غير مضبوطة في إعدادات بيئة الخادم (Vercel Environment Variables) أو تحتاج إلى Redeploy لتفعيلها.',
+      });
+      return;
+    }
+
+    if (plan.action === 'post_photo') {
+      const fbResult = await publishPhotoToFacebookPage({
+        pageId: cleanPageId,
+        accessToken: cleanToken,
+        jpegBuffer: plan.jpegBuffer,
+        caption: plan.caption,
+        dayId,
+      });
+
+      if (!fbResult.ok || !fbResult.post_id) {
+        res.status(fbResult.statusCode || 500).json({
+          ok: false,
+          success: false,
+          dayId,
+          dayLabel,
+          error:
+            fbResult.error ||
+            'تعذر رفع صورة الجدول على صفحة فيسبوك عبر Meta Graph API v21.0.',
+        });
+        return;
+      }
+
+      res.status(200).json({
+        ok: true,
+        success: true,
+        post_id: fbResult.post_id,
+        dayId,
+        dayLabel,
+        isPhotoPost: true,
+        caption: plan.caption,
+        message: `تم نشر صورة بوستر جدول عيادات يوم ${dayLabel} بنجاح على صفحة فيسبوك! (معرف المنشور: ${fbResult.post_id})`,
+      });
+      return;
+    }
+
+    const formattedPostMessage = formatFacebookSchedulePost({
+      dayLabel,
+      rows: scheduleRows,
+      settings: centerSettings,
+    });
+
+    const feedResult = await publishFeedTextToFacebookPage({
+      pageId: cleanPageId,
+      accessToken: cleanToken,
+      message: formattedPostMessage,
+    });
+
+    if (!feedResult.ok || !feedResult.post_id) {
+      res.status(feedResult.statusCode || 500).json({
+        ok: false,
+        success: false,
+        dayId,
+        dayLabel,
+        error:
+          feedResult.error ||
           'تعذر النشر على صفحة فيسبوك عبر Meta Graph API v21.0.',
       });
       return;
@@ -513,12 +686,14 @@ async function handleFacebookPostAction(
     res.status(200).json({
       ok: true,
       success: true,
-      post_id: fbResult.post_id,
+      post_id: feedResult.post_id,
       dayId,
       dayLabel,
       rowCount: scheduleRows.length,
+      isPhotoPost: false,
       postContent: formattedPostMessage,
-      message: `تم نشر جدول عيادات يوم ${dayLabel} على صفحة فيسبوك بنجاح! (معرف المنشور: ${fbResult.post_id})`,
+      warning: plan.warning,
+      message: `تم نشر جدول عيادات يوم ${dayLabel} (نص) بنجاح على صفحة فيسبوك! (معرف المنشور: ${feedResult.post_id})`,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -742,10 +917,11 @@ export default async function handler(
             'tomorrow',
             'Africa/Cairo'
           );
-          const [settingsSnap, schedSnap, pubSchedSnap] = await Promise.all([
+          const [settingsSnap, schedSnap, pubSchedSnap, posterSnap] = await Promise.all([
             db.collection('settings').doc('center').get(),
             db.collection('schedules').doc(tomorrowMeta.dayId).get(),
             db.collection('publicSchedules').doc(tomorrowMeta.dayId).get(),
+            db.collection('posterImages').doc(tomorrowMeta.dayId).get(),
           ]);
 
           const centerSettings: CenterSettings = settingsSnap.exists
@@ -756,8 +932,10 @@ export default async function handler(
             : FALLBACK_CENTER_SETTINGS;
 
           let tomorrowRows: ScheduleRow[] = [];
+          let scheduleVersion = 1;
           if (schedSnap.exists) {
             const sData = schedSnap.data() as DailyScheduleData;
+            scheduleVersion = sData.version || 1;
             tomorrowRows = filterNonEmptyRows(
               sData.draftRows || sData.publishedRows || []
             );
@@ -766,23 +944,84 @@ export default async function handler(
             tomorrowRows = filterNonEmptyRows(pData.publishedRows || []);
           }
 
-          const fbMessage = formatFacebookSchedulePost({
+          let storedPosterImage: {
+            dayId: string;
+            version: number;
+            imageBase64: string;
+            mime: string;
+          } | null = null;
+
+          if (posterSnap.exists) {
+            const pData = posterSnap.data();
+            if (pData && typeof pData.imageBase64 === 'string') {
+              storedPosterImage = {
+                dayId: tomorrowMeta.dayId,
+                version: Number(pData.version || 0),
+                imageBase64: pData.imageBase64,
+                mime: String(pData.mime || 'image/jpeg'),
+              };
+            }
+          }
+
+          const postMode: FacebookPostMode =
+            reminderConfig.fbPostMode === 'photo_only' ||
+            reminderConfig.fbPostMode === 'text_only' ||
+            reminderConfig.fbPostMode === 'photo_with_caption'
+              ? reminderConfig.fbPostMode
+              : 'photo_with_caption';
+
+          const plan = decideFacebookPublishPlan({
+            mode: postMode,
+            scheduleVersion,
+            storedPosterImage,
             dayLabel: tomorrowMeta.dayLabel,
-            rows: tomorrowRows,
             settings: centerSettings,
+            isManualTrigger: false,
           });
 
-          const fbPublish = await publishToFacebookPageGraphApi({
-            pageId: process.env.FB_PAGE_ID,
-            pageAccessToken: process.env.FB_PAGE_ACCESS_TOKEN,
-            message: fbMessage,
-          });
+          const cleanPageId = normalizeFacebookPageId(process.env.FB_PAGE_ID);
+          const cleanToken = normalizeEnvSecret(process.env.FB_PAGE_ACCESS_TOKEN);
+
+          let fbPublish: FacebookPostResult;
+
+          if (plan.action === 'post_photo') {
+            fbPublish = await publishPhotoToFacebookPage({
+              pageId: cleanPageId,
+              accessToken: cleanToken,
+              jpegBuffer: plan.jpegBuffer,
+              caption: plan.caption,
+              dayId: tomorrowMeta.dayId,
+            });
+          } else {
+            const fbMessage = formatFacebookSchedulePost({
+              dayLabel: tomorrowMeta.dayLabel,
+              rows: tomorrowRows,
+              settings: centerSettings,
+            });
+
+            fbPublish = await publishFeedTextToFacebookPage({
+              pageId: cleanPageId,
+              accessToken: cleanToken,
+              message: fbMessage,
+            });
+
+            const fallbackWarning =
+              plan.action === 'post_text_only' ? plan.warning : undefined;
+            if (fallbackWarning) {
+              await remindersRef
+                .set({ lastFbPostWarning: fallbackWarning }, { merge: true })
+                .catch(() => {});
+            }
+          }
 
           facebookAutoPostResult = {
             ok: fbPublish.ok,
             post_id: fbPublish.post_id,
             dayId: tomorrowMeta.dayId,
             dayLabel: tomorrowMeta.dayLabel,
+            isPhotoPost: plan.action === 'post_photo',
+            warning:
+              plan.action === 'post_text_only' ? plan.warning : undefined,
             error: fbPublish.error,
           };
         }

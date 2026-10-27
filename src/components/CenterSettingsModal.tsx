@@ -81,6 +81,10 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
     fbAutoPostEnabled:
       reminderSettings?.fbAutoPostEnabled ??
       DEFAULT_REMINDER_SETTINGS.fbAutoPostEnabled,
+    fbPostMode:
+      reminderSettings?.fbPostMode ||
+      DEFAULT_REMINDER_SETTINGS.fbPostMode ||
+      'photo_with_caption',
   });
   const [errors, setErrors] = useState<string[]>([]);
   const [testSending, setTestSending] = useState(false);
@@ -661,6 +665,36 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
                   />
                 </button>
               </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                نمط النشر على فيسبوك
+              </label>
+              <select
+                value={reminderDraft.fbPostMode || 'photo_with_caption'}
+                onChange={(e) =>
+                  setReminderDraft({
+                    ...reminderDraft,
+                    fbPostMode: e.target.value as 'photo_with_caption' | 'photo_only' | 'text_only',
+                  })
+                }
+                data-testid="fb-post-mode-select"
+                className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-800 focus:outline-none focus:border-blue-600"
+              >
+                <option value="photo_with_caption">
+                  صورة مع كابشن (افتراضي وموصى به — ينشر بوستر 4:5 مع نص ملخص وأرقام التواصل)
+                </option>
+                <option value="photo_only">
+                  صورة فقط (ينشر بوستر 4:5 عالي الدقة بدون نص)
+                </option>
+                <option value="text_only">
+                  نص فقط (ينشر تفاصيل العيادات كنص بدون صورة)
+                </option>
+              </select>
+              <p className="text-[10px] font-bold text-slate-500 mt-1">
+                يحدد النمط المعتمد عند الضغط على زر «نشر جدول اليوم على فيسبوك الان» وأثناء النشر التلقائي اليومي.
+              </p>
             </div>
 
             {onPublishFacebookNow && (

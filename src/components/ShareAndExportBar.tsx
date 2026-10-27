@@ -37,6 +37,7 @@ interface ShareAndExportBarProps {
     dayId?: DayId;
     dayLabel: string;
     rows: ScheduleRow[];
+    onStageChange?: (stage: 'preparing_image' | 'publishing') => void;
   }) => Promise<{ ok: boolean; message: string; post_id?: string }>;
 }
 
@@ -89,7 +90,9 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
   const [copiedPost, setCopiedPost] = useState<boolean>(false);
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
 
-  const [fbPublishing, setFbPublishing] = useState<boolean>(false);
+  const [fbPublishStage, setFbPublishStage] = useState<
+    'idle' | 'preparing_image' | 'publishing'
+  >('idle');
   const [fbStatusBanner, setFbStatusBanner] = useState<{
     ok: boolean;
     message: string;
@@ -236,13 +239,14 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
 
   const handlePublishToFacebookClick = async () => {
     if (!onPublishFacebookNow) return;
-    setFbPublishing(true);
+    setFbPublishStage('preparing_image');
     setFbStatusBanner(null);
     try {
       const result = await onPublishFacebookNow({
         dayId,
         dayLabel,
         rows,
+        onStageChange: (stage) => setFbPublishStage(stage),
       });
       setFbStatusBanner(result);
     } catch {
@@ -251,7 +255,7 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
         message: 'تعذر الاتصال بخدمة النشر على فيسبوك.',
       });
     } finally {
-      setFbPublishing(false);
+      setFbPublishStage('idle');
     }
   };
 
@@ -373,14 +377,16 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
 
           <button
             type="button"
-            disabled={fbPublishing}
+            disabled={fbPublishStage !== 'idle'}
             onClick={handlePublishToFacebookClick}
             data-testid="publish-facebook-now-btn"
             className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-60 px-3.5 py-2 text-xs font-black text-white shadow-xs transition cursor-pointer shrink-0"
           >
             <Send className="w-3.5 h-3.5 shrink-0" />
             <span>
-              {fbPublishing
+              {fbPublishStage === 'preparing_image'
+                ? 'جارٍ تجهيز الصورة...'
+                : fbPublishStage === 'publishing'
                 ? 'جارٍ النشر على فيسبوك...'
                 : 'نشر جدول اليوم على فيسبوك الان'}
             </span>

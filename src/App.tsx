@@ -89,6 +89,7 @@ import {
 } from './utils/scheduleLogic';
 import { SchedulePoster } from './components/SchedulePoster';
 import { ShareAndExportBar } from './components/ShareAndExportBar';
+import { syncPosterImageToFirestore } from './utils/posterImageSync';
 import { CenterSettingsModal } from './components/CenterSettingsModal';
 import { UsersAndAuditModal } from './components/UsersAndAuditModal';
 import { ComplexBrandLogo } from './components/BrandLogos';
@@ -1341,6 +1342,45 @@ export default function App() {
 
   const currentSchedule = schedules[selectedDay];
 
+  // Auto-sync 1080x1350 JPEG poster to Firestore posterImages/{dayId} after successful save
+  // (when version changes) with 1.5s debounce, exclusively for logged-in staff and currently active day
+  const currentDayVersion = currentSchedule?.version;
+  useEffect(() => {
+    if (!firebaseUser || !activeRole) return;
+    if (saveStatus === 'saving') return;
+    if (!canUserEditDay(activeRole, allowedDays, selectedDay)) return;
+
+    const timer = setTimeout(async () => {
+      try {
+        const sched = schedulesRef.current[selectedDay];
+        if (!sched) return;
+        const cleanRows = filterNonEmptyRows(
+          sched.draftRows || sched.publishedRows || []
+        );
+        await syncPosterImageToFirestore({
+          dayId: selectedDay,
+          version: sched.version,
+          dayLabel: sched.dayLabel,
+          rows: cleanRows,
+          settings,
+          domNode: exportPosterRef.current || posterRef.current,
+        });
+      } catch {
+        // Silently catch background poster generation errors
+      }
+    }, 1500);
+
+    return () => clearTimeout(timer);
+  }, [
+    currentDayVersion,
+    selectedDay,
+    firebaseUser,
+    activeRole,
+    allowedDays,
+    saveStatus,
+    settings,
+  ]);
+
   // Strictly require authenticated user login to edit
   const userCanEditSelectedDay =
     Boolean(firebaseUser) &&
@@ -1570,6 +1610,7 @@ export default function App() {
             title: updatedReminders.title,
             body: updatedReminders.body,
             fbAutoPostEnabled: Boolean(updatedReminders.fbAutoPostEnabled),
+            fbPostMode: updatedReminders.fbPostMode || 'photo_with_caption',
             updatedBy: firebaseUser.uid,
             updatedByEmail: firebaseUser.email || PRIMARY_ADMIN_EMAIL,
             updatedAt: serverTimestamp(),
@@ -1636,6 +1677,7 @@ export default function App() {
     dayId?: DayId;
     dayLabel?: string;
     rows?: ScheduleRow[];
+    onStageChange?: (stage: 'preparing_image' | 'publishing') => void;
   }): Promise<{ ok: boolean; message: string; post_id?: string }> => {
     const targetDayId = params?.dayId || selectedDay;
     const targetSched = schedulesRef.current[targetDayId];
@@ -1646,8 +1688,34 @@ export default function App() {
       filterNonEmptyRows(
         targetSched?.draftRows || targetSched?.publishedRows || []
       );
+    const targetVersion = targetSched?.version || 1;
 
     try {
+      // Stage 1: Pre-generate exact 1080x1350 JPEG poster and store into Firestore posterImages/{dayId}
+      params?.onStageChange?.('preparing_image');
+      if (firebaseUser) {
+        const syncRes = await syncPosterImageToFirestore({
+          dayId: targetDayId,
+          version: targetVersion,
+          dayLabel: targetDayLabel,
+          rows: targetRows,
+          settings,
+          domNode: exportPosterRef.current || posterRef.current,
+        });
+
+        if (!syncRes.ok) {
+          return {
+            ok: false,
+            message:
+              syncRes.error ||
+              'تعذر تجهيز وحفظ صورة البوستر في السحابة قبل النشر على فيسبوك.',
+          };
+        }
+      }
+
+      // Stage 2: Call Facebook post endpoint
+      params?.onStageChange?.('publishing');
+
       const idToken = firebaseUser
         ? await firebaseUser.getIdToken()
         : 'local-preview-token';
@@ -1664,9 +1732,6 @@ export default function App() {
           },
           body: JSON.stringify({
             dayId: targetDayId,
-            dayLabel: targetDayLabel,
-            rows: targetRows,
-            settings,
           }),
         }
       );
@@ -1699,7 +1764,7 @@ export default function App() {
         post_id: data.post_id,
         message:
           data.message ||
-          `✅ تم نشر جدول عيادات يوم ${targetDayLabel} على صفحة فيسبوك بنجاح! (post_id: ${data.post_id})`,
+          `✅ تم نشر صورة جدول عيادات يوم ${targetDayLabel} على صفحة فيسبوك بنجاح! (post_id: ${data.post_id})`,
       };
     } catch {
       return {

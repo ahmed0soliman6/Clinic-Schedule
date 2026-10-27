@@ -9,7 +9,7 @@ export const PUBLIC_SUBSCRIBER_EMAIL = 'public@subscriber.local';
 
 export const DEFAULT_REMINDER_SETTINGS: Omit<
   ReminderSettings,
-  'lastSentDate' | 'lastFbPostDate' | 'updatedBy' | 'updatedByEmail' | 'updatedAt'
+  'lastSentDate' | 'lastFbPostDate' | 'lastFbPostWarning' | 'updatedBy' | 'updatedByEmail' | 'updatedAt'
 > = {
   enabled: true,
   time: '19:00',
@@ -18,6 +18,7 @@ export const DEFAULT_REMINDER_SETTINGS: Omit<
   title: 'تذكير جدول العيادات — مجمع ميت عزون الطبي',
   body: 'يرجى مراجعة وتجهيز جدول عيادات {اليوم} ومشاركته.',
   fbAutoPostEnabled: false,
+  fbPostMode: 'photo_with_caption',
 };
 
 const WEEKDAY_ORDER: DayId[] = [
@@ -341,12 +342,16 @@ export function validateReminderSettings(input: Partial<ReminderSettings>): {
   errors: string[];
   sanitized: Omit<
     ReminderSettings,
-    'lastSentDate' | 'lastFbPostDate' | 'updatedBy' | 'updatedByEmail' | 'updatedAt'
+    'lastSentDate' | 'lastFbPostDate' | 'lastFbPostWarning' | 'updatedBy' | 'updatedByEmail' | 'updatedAt'
   >;
 } {
   const errors: string[] = [];
   const enabled = Boolean(input.enabled);
   const fbAutoPostEnabled = Boolean(input.fbAutoPostEnabled);
+  const fbPostMode =
+    input.fbPostMode === 'photo_only' || input.fbPostMode === 'text_only'
+      ? input.fbPostMode
+      : 'photo_with_caption';
   const time = (input.time ?? DEFAULT_REMINDER_SETTINGS.time).trim();
   const targetDay =
     input.targetDay === 'today' || input.targetDay === 'tomorrow'
@@ -376,6 +381,7 @@ export function validateReminderSettings(input: Partial<ReminderSettings>): {
       title: title.slice(0, 160),
       body: body.slice(0, 500),
       fbAutoPostEnabled,
+      fbPostMode,
     },
   };
 }

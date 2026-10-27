@@ -469,6 +469,38 @@
         }
       },
       "required": ["enabled", "time", "targetDay", "title", "body"]
+    },
+    "PosterImage": {
+      "title": "PosterImage",
+      "description": "Rendered 1080x1350 JPEG schedule poster for Facebook Graph API publishing",
+      "type": "object",
+      "properties": {
+        "dayId": {
+          "type": "string",
+          "description": "Day identifier",
+          "enum": ["saturday", "sunday", "monday", "tuesday", "wednesday", "thursday", "friday"]
+        },
+        "version": {
+          "type": "number",
+          "description": "Version of the schedule matching the poster image"
+        },
+        "imageBase64": {
+          "type": "string",
+          "description": "Base64 encoded JPEG binary data without data: URI prefix (max 900KB)",
+          "maxLength": 900000
+        },
+        "mime": {
+          "type": "string",
+          "description": "MIME type (image/jpeg)",
+          "enum": ["image/jpeg"]
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when image was generated and cached"
+        }
+      },
+      "required": ["dayId", "version", "imageBase64", "mime"]
     }
   },
   "firestore": {
@@ -495,6 +527,10 @@
     "/appConfig/{id}": {
       "schema": { "$ref": "#/entities/ReminderSettings" },
       "description": "Daily reminder and Facebook Page automatic publishing configuration"
+    },
+    "/posterImages/{dayId}": {
+      "schema": { "$ref": "#/entities/PosterImage" },
+      "description": "Cached 1080x1350 JPEG poster images for Meta Graph API v21.0 publishing"
     }
   }
 }

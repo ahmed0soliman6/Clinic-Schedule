@@ -1,15 +1,12 @@
-import test from 'node:test';
 import assert from 'node:assert/strict';
+import test, { describe } from 'node:test';
+import { CenterSettings, FacebookPostMode } from '../types/schedule.js';
 import {
-  formatClinicRowForFacebook,
-  formatFacebookSchedulePost,
-  normalizeEnvSecret,
-  normalizeFacebookPageId,
-  publishToFacebookPageGraphApi,
-  resolveDayMetaById,
+  MAX_PHOTO_BYTES,
+  buildShortFacebookCaption,
+  decideFacebookPublishPlan,
+  validateJpegBuffer,
 } from './facebookPostLogic.js';
-import type { CenterSettings, ScheduleRow } from '../types/schedule.js';
-import { DEFAULT_POST_TEMPLATE } from './scheduleLogic.js';
 
 const MOCK_SETTINGS: CenterSettings = {
   complexName: 'مجمع ميت عزون الطبي',
@@ -29,153 +26,205 @@ const MOCK_SETTINGS: CenterSettings = {
   fromHeaderColor: '#f59e0b',
   toHeaderColor: '#0088cc',
   footerBgColor: '#1e295b',
-  postTemplate: DEFAULT_POST_TEMPLATE,
 };
 
-const SAMPLE_ROWS: ScheduleRow[] = [
-  {
-    id: 'row-1',
-    clinicName: 'الباطنة',
-    doctorName: 'أحمد سليمان',
-    startTime: '4:00 م',
-    endTime: '6:00 م',
-    icon: 'internal',
-    iconColor: '#0284c7',
-    sortOrder: 0,
-  },
-  {
-    id: 'row-2',
-    clinicName: 'عيادة الأطفال',
-    doctorName: 'د/ سارة محمود',
-    startTime: '5:00 م',
-    endTime: '8:00 م',
-    icon: 'baby',
-    iconColor: '#ec4899',
-    sortOrder: 1,
-  },
-];
+// Minimal valid JPEG header (FF D8 FF E0 00 10 4A 46 49 46 00 01 ...)
+function createDummyJpegBuffer(byteLength = 128): Buffer {
+  const buf = Buffer.alloc(byteLength);
+  buf[0] = 0xff;
+  buf[1] = 0xd8;
+  buf[2] = 0xff;
+  buf[3] = 0xe0;
+  return buf;
+}
 
-test('formatClinicRowForFacebook formats specialty, doctor prefix, and times cleanly', () => {
-  const line1 = formatClinicRowForFacebook(SAMPLE_ROWS[0]);
-  assert.equal(line1, '🔹 عيادة الباطنة — د/ أحمد سليمان (من 4:00 م إلى 6:00 م)');
-
-  const line2 = formatClinicRowForFacebook(SAMPLE_ROWS[1]);
-  assert.equal(line2, '🔹 عيادة الأطفال — د/ سارة محمود (من 5:00 م إلى 8:00 م)');
-});
-
-test('formatFacebookSchedulePost includes dayLabel, formatted clinic rows, and contact info even when {العيادات} is omitted from postTemplate', () => {
-  const text = formatFacebookSchedulePost({
-    dayLabel: 'الأحد',
-    rows: SAMPLE_ROWS,
-    settings: MOCK_SETTINGS,
-  });
-
-  assert.ok(text.includes('جدول عيادات يوم الأحد'));
-  assert.ok(text.includes('🔹 عيادة الباطنة — د/ أحمد سليمان (من 4:00 م إلى 6:00 م)'));
-  assert.ok(text.includes('🔹 عيادة الأطفال — د/ سارة محمود (من 5:00 م إلى 8:00 م)'));
-  assert.ok(text.includes('01202027567'));
-  assert.ok(text.includes('0502053187'));
-});
-
-test('formatFacebookSchedulePost replaces {العيادات} placeholder when present in postTemplate', () => {
-  const customSettings: CenterSettings = {
-    ...MOCK_SETTINGS,
-    postTemplate: 'عيادات يوم {اليوم} في {المجمع}:\n{العيادات}\nللتواصل: {الواتساب}',
-  };
-
-  const text = formatFacebookSchedulePost({
-    dayLabel: 'الإثنين',
-    rows: SAMPLE_ROWS,
-    settings: customSettings,
-  });
-
-  assert.ok(text.startsWith('عيادات يوم الإثنين في مجمع ميت عزون الطبي:'));
-  assert.ok(text.includes('🔹 عيادة الباطنة — د/ أحمد سليمان'));
-  assert.ok(text.endsWith('للتواصل: 01202027567'));
-});
-
-test('publishToFacebookPageGraphApi validates credentials and returns post_id on Graph API v21.0 success', async () => {
-  const missingCreds = await publishToFacebookPageGraphApi({
-    pageId: '',
-    pageAccessToken: '',
-    message: 'اختبار',
-  });
-  assert.equal(missingCreds.ok, false);
-  assert.equal(missingCreds.statusCode, 500);
-
-  let capturedUrl = '';
-  let capturedBody: Record<string, unknown> = {};
-
-  const fakeFetch: typeof fetch = async (input, init) => {
-    capturedUrl = String(input);
-    capturedBody = JSON.parse(String(init?.body || '{}'));
-    return new Response(JSON.stringify({ id: '123456_987654321' }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
+describe('Facebook Post Pure Logic Tests', () => {
+  test('buildShortFacebookCaption includes contact info and links without repeating clinics', () => {
+    const caption = buildShortFacebookCaption({
+      dayLabel: 'السبت',
+      settings: MOCK_SETTINGS,
     });
-  };
 
-  const successRes = await publishToFacebookPageGraphApi({
-    pageId: '123456',
-    pageAccessToken: 'EAA_TEST_TOKEN',
-    message: 'جدول عيادات يوم الأحد',
-    fetchImpl: fakeFetch,
+    assert.ok(caption.includes('جدول عيادات يوم السبت'), 'Should contain day label');
+    assert.ok(caption.includes('مجمع ميت عزون الطبي'), 'Should contain complex name');
+    assert.ok(caption.includes('01202027567'), 'Should contain whatsapp phone');
+    assert.ok(caption.includes('https://wa.me/201202027567'), 'Should contain whatsapp link');
+    assert.ok(caption.includes('0502053187'), 'Should contain landline phone');
+    assert.ok(caption.includes('01515674347'), 'Should contain dental clinic phone');
+    assert.ok(caption.includes('https://is.gd/cDsyaR'), 'Should contain whatsapp channel url');
+    assert.ok(caption.includes('https://www.instagram.com/mit.azzoun.medical'), 'Should contain instagram url');
+
+    // Should NOT repeat the clinics list as text because the poster image contains it all
+    assert.ok(!caption.includes('الجراحة العامة'), 'Must not contain specific clinic row text');
+    assert.ok(!caption.includes('الباطنة'), 'Must not contain specific clinic row text');
   });
 
-  assert.equal(
-    capturedUrl,
-    'https://graph.facebook.com/v21.0/123456/feed'
-  );
-  assert.equal(capturedBody.message, 'جدول عيادات يوم الأحد');
-  assert.equal(capturedBody.access_token, 'EAA_TEST_TOKEN');
-  assert.equal(successRes.ok, true);
-  assert.equal(successRes.success, true);
-  assert.equal(successRes.post_id, '123456_987654321');
-});
+  test('validateJpegBuffer correctly verifies JPEG magic bytes (FF D8 FF)', () => {
+    const validJpeg = createDummyJpegBuffer(256);
+    const validResult = validateJpegBuffer(validJpeg);
+    assert.equal(validResult.valid, true);
+    assert.equal(validResult.sizeBytes, 256);
 
-test('publishToFacebookPageGraphApi handles Meta Graph API error responses cleanly', async () => {
-  const errorFetch: typeof fetch = async () => {
-    return new Response(
-      JSON.stringify({
-        error: {
-          message: 'Invalid OAuth access token.',
-          type: 'OAuthException',
-          code: 190,
-        },
-      }),
-      { status: 400 }
-    );
-  };
+    // PNG magic bytes (89 50 4E 47)
+    const pngBuffer = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
+    const pngResult = validateJpegBuffer(pngBuffer);
+    assert.equal(pngResult.valid, false);
+    assert.ok(pngResult.error?.includes('Magic Bytes'));
 
-  const errRes = await publishToFacebookPageGraphApi({
-    pageId: '123456',
-    pageAccessToken: 'BAD_TOKEN',
-    message: 'منشور تجريبي',
-    fetchImpl: errorFetch,
+    // Empty buffer
+    const emptyResult = validateJpegBuffer(Buffer.alloc(0));
+    assert.equal(emptyResult.valid, false);
+
+    // Oversized buffer (> 3MB)
+    const oversized = Buffer.alloc(MAX_PHOTO_BYTES + 10);
+    oversized[0] = 0xff;
+    oversized[1] = 0xd8;
+    oversized[2] = 0xff;
+    const oversizedResult = validateJpegBuffer(oversized);
+    assert.equal(oversizedResult.valid, false);
+    assert.ok(oversizedResult.error?.includes('3MB'));
   });
 
-  assert.equal(errRes.ok, false);
-  assert.equal(errRes.statusCode, 400);
-  assert.ok(errRes.error?.includes('190'));
-  assert.ok(errRes.error?.includes('Invalid OAuth access token'));
-});
+  test('decideFacebookPublishPlan returns reject_error on manual trigger when image is missing or version mismatch', () => {
+    // Missing image
+    const planMissing = decideFacebookPublishPlan({
+      mode: 'photo_with_caption',
+      scheduleVersion: 5,
+      storedPosterImage: null,
+      dayLabel: 'السبت',
+      settings: MOCK_SETTINGS,
+      isManualTrigger: true,
+    });
+    assert.equal(planMissing.action, 'reject_error');
+    if (planMissing.action === 'reject_error') {
+      assert.ok(
+        planMissing.errorMessage.includes('صورة الجدول غير محدّثة'),
+        'Must return user-friendly Arabic error'
+      );
+    }
 
-test('resolveDayMetaById and normalizeFacebookPageId handle URLs, quotes, and day IDs', () => {
-  assert.deepEqual(resolveDayMetaById('tuesday'), {
-    dayId: 'tuesday',
-    dayLabel: 'الثلاثاء',
+    // Version mismatch (schedule is version 6, poster is version 5)
+    const dummyJpeg = createDummyJpegBuffer(200);
+    const planMismatch = decideFacebookPublishPlan({
+      mode: 'photo_with_caption',
+      scheduleVersion: 6,
+      storedPosterImage: {
+        dayId: 'saturday',
+        version: 5,
+        imageBase64: dummyJpeg.toString('base64'),
+        mime: 'image/jpeg',
+      },
+      dayLabel: 'السبت',
+      settings: MOCK_SETTINGS,
+      isManualTrigger: true,
+    });
+    assert.equal(planMismatch.action, 'reject_error');
+    if (planMismatch.action === 'reject_error') {
+      assert.ok(planMismatch.errorMessage.includes('صورة الجدول غير محدّثة'));
+    }
   });
-  assert.deepEqual(resolveDayMetaById('unknown'), {
-    dayId: 'saturday',
-    dayLabel: 'السبت',
+
+  test('decideFacebookPublishPlan falls back to text on automatic cron when image version mismatches', () => {
+    const dummyJpeg = createDummyJpegBuffer(200);
+    const planCron = decideFacebookPublishPlan({
+      mode: 'photo_with_caption',
+      scheduleVersion: 6,
+      storedPosterImage: {
+        dayId: 'saturday',
+        version: 5,
+        imageBase64: dummyJpeg.toString('base64'),
+        mime: 'image/jpeg',
+      },
+      dayLabel: 'السبت',
+      settings: MOCK_SETTINGS,
+      isManualTrigger: false, // Cron trigger!
+    });
+
+    assert.equal(planCron.action, 'post_text_only');
+    if (planCron.action === 'post_text_only') {
+      assert.ok(planCron.warning, 'Must record warning for cron log/appConfig');
+    }
   });
-  assert.equal(normalizeEnvSecret(' "EAA123" '), 'EAA123');
-  assert.equal(
-    normalizeFacebookPageId('https://www.facebook.com/profile.php?id=6155001122'),
-    '6155001122'
-  );
-  assert.equal(
-    normalizeFacebookPageId('https://www.facebook.com/mitazoun.medical/'),
-    'mitazoun.medical'
-  );
+
+  test('decideFacebookPublishPlan produces post_photo with caption when mode is photo_with_caption and versions match', () => {
+    const dummyJpeg = createDummyJpegBuffer(300);
+    const plan = decideFacebookPublishPlan({
+      mode: 'photo_with_caption',
+      scheduleVersion: 4,
+      storedPosterImage: {
+        dayId: 'saturday',
+        version: 4,
+        imageBase64: dummyJpeg.toString('base64'),
+        mime: 'image/jpeg',
+      },
+      dayLabel: 'السبت',
+      settings: MOCK_SETTINGS,
+      isManualTrigger: true,
+    });
+
+    assert.equal(plan.action, 'post_photo');
+    if (plan.action === 'post_photo') {
+      assert.ok(plan.jpegBuffer instanceof Buffer);
+      assert.ok(plan.caption && plan.caption.includes('جدول عيادات يوم السبت'));
+    }
+  });
+
+  test('decideFacebookPublishPlan produces post_photo without caption when mode is photo_only', () => {
+    const dummyJpeg = createDummyJpegBuffer(300);
+    const plan = decideFacebookPublishPlan({
+      mode: 'photo_only',
+      scheduleVersion: 4,
+      storedPosterImage: {
+        dayId: 'saturday',
+        version: 4,
+        imageBase64: dummyJpeg.toString('base64'),
+        mime: 'image/jpeg',
+      },
+      dayLabel: 'السبت',
+      settings: MOCK_SETTINGS,
+      isManualTrigger: true,
+    });
+
+    assert.equal(plan.action, 'post_photo');
+    if (plan.action === 'post_photo') {
+      assert.equal(plan.caption, undefined);
+    }
+  });
+
+  test('decideFacebookPublishPlan respects text_only mode', () => {
+    const dummyJpeg = createDummyJpegBuffer(300);
+    const plan = decideFacebookPublishPlan({
+      mode: 'text_only',
+      scheduleVersion: 4,
+      storedPosterImage: {
+        dayId: 'saturday',
+        version: 4,
+        imageBase64: dummyJpeg.toString('base64'),
+        mime: 'image/jpeg',
+      },
+      dayLabel: 'السبت',
+      settings: MOCK_SETTINGS,
+      isManualTrigger: true,
+    });
+
+    assert.equal(plan.action, 'post_text_only');
+  });
+
+  test('server relies exclusively on server-side Firestore posterImages, ignoring unverified client payload', () => {
+    // If storedPosterImage in Firestore is null, even if client sends an arbitrary base64 image,
+    // the server logic rejects it and refuses to publish unverified client bytes
+    const plan = decideFacebookPublishPlan({
+      mode: 'photo_with_caption',
+      scheduleVersion: 3,
+      storedPosterImage: null, // Firestore has no verified record
+      dayLabel: 'السبت',
+      settings: MOCK_SETTINGS,
+      isManualTrigger: true,
+    });
+
+    assert.equal(plan.action, 'reject_error');
+    if (plan.action === 'reject_error') {
+      assert.ok(plan.errorMessage.includes('صورة الجدول غير محدّثة'));
+    }
+  });
 });

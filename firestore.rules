@@ -232,7 +232,8 @@ service cloud.firestore {
         data.targetDay in ['today', 'tomorrow'] &&
         data.title is string && data.title.size() <= 160 &&
         data.body is string && data.body.size() <= 500 &&
-        (!('fbAutoPostEnabled' in data) || data.fbAutoPostEnabled is bool);
+        (!('fbAutoPostEnabled' in data) || data.fbAutoPostEnabled is bool) &&
+        (!('fbPostMode' in data) || data.fbPostMode in ['photo_with_caption', 'photo_only', 'text_only']);
     }
 
     // 4. Collection Rules
@@ -312,6 +313,16 @@ service cloud.firestore {
         isValidReminderConfig(incoming()) &&
         !('lastSentDate' in incoming().diff(existing()).affectedKeys()) &&
         !('lastFbPostDate' in incoming().diff(existing()).affectedKeys());
+      allow delete: if false;
+    }
+
+    match /posterImages/{dayId} {
+      allow get, list: if isStaff();
+      allow create, update: if isSignedIn() && isValidId(dayId) && isEditorForDay(dayId) &&
+        incoming().dayId == dayId &&
+        incoming().version is int && incoming().version >= 1 &&
+        incoming().imageBase64 is string && incoming().imageBase64.size() < 900000 &&
+        incoming().mime == 'image/jpeg';
       allow delete: if false;
     }
   }

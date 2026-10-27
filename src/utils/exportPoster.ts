@@ -1,5 +1,6 @@
 import { toPng } from 'html-to-image';
 import { CenterSettings, ClinicIconId, ScheduleRow } from '../types/schedule';
+import { CAIRO_FONT_EMBED_CSS } from './cairoFontEmbed';
 import {
   POSTER_EXPORT_HEIGHT,
   POSTER_EXPORT_WIDTH,
@@ -183,7 +184,7 @@ export async function renderHighResPosterDataUrl(
         quality: 1,
         pixelRatio: 2,
         cacheBust: true,
-        skipFonts: true,
+        fontEmbedCSS: CAIRO_FONT_EMBED_CSS,
         backgroundColor: settings.bgStartColor,
         filter: (node) => {
           if (node instanceof HTMLElement && node.dataset?.exportIgnore === 'true') {
@@ -454,5 +455,115 @@ export async function exportPosterAsPng(
   );
   triggerInstantPngDownload(dataUrl, dayLabel);
   return { dataUrl, file };
+}
+
+export const FACEBOOK_POSTER_WIDTH = 1080;
+export const FACEBOOK_POSTER_HEIGHT = 1350; // exact 4:5 aspect ratio
+
+/**
+ * Renders an exact 1080x1350 JPEG poster for Meta Graph API v21.0 Facebook posting.
+ * Uses local Cairo font embed CSS and steps down compression quality if raw base64 > 900,000 chars.
+ */
+export async function generatePosterJpeg1080x1350(
+  dayLabel: string,
+  rows: ScheduleRow[],
+  settings: CenterSettings,
+  domNode?: HTMLElement | null
+): Promise<{ base64: string; mime: 'image/jpeg'; qualityUsed: number }> {
+  const targetW = FACEBOOK_POSTER_WIDTH; // 1080
+  const targetH = FACEBOOK_POSTER_HEIGHT; // 1350
+
+  const canvas = document.createElement('canvas');
+  canvas.width = targetW;
+  canvas.height = targetH;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    throw new Error('Canvas 2D context is not available');
+  }
+
+  // 1. Draw matching radial gradient background
+  const bgGrad = ctx.createRadialGradient(
+    targetW / 2,
+    targetH * 0.25,
+    45,
+    targetW / 2,
+    targetH * 0.5,
+    targetH * 0.8
+  );
+  bgGrad.addColorStop(0, '#ffffff');
+  bgGrad.addColorStop(0.48, settings.bgStartColor);
+  bgGrad.addColorStop(1, settings.bgEndColor);
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, targetW, targetH);
+
+  let sourceImage: HTMLImageElement | null = null;
+
+  if (domNode) {
+    try {
+      await document.fonts?.ready;
+      const rawDataUrl = await toPng(domNode, {
+        quality: 1,
+        pixelRatio: 2,
+        cacheBust: true,
+        fontEmbedCSS: CAIRO_FONT_EMBED_CSS,
+        backgroundColor: settings.bgStartColor,
+        filter: (node) => {
+          if (node instanceof HTMLElement && node.dataset?.exportIgnore === 'true') {
+            return false;
+          }
+          return true;
+        },
+      });
+      if (rawDataUrl && rawDataUrl.startsWith('data:image/')) {
+        sourceImage = await loadImage(rawDataUrl);
+      }
+    } catch {
+      // Ignore and fall back to fallback canvas
+    }
+  }
+
+  if (!sourceImage) {
+    // Generate fallback 1440x1800 canvas and load it
+    const fallbackDataUrl = await renderHighResPosterDataUrl(
+      dayLabel,
+      rows,
+      settings,
+      null
+    );
+    sourceImage = await loadImage(fallbackDataUrl);
+  }
+
+  if (sourceImage) {
+    const scale = Math.min(targetW / sourceImage.width, targetH / sourceImage.height);
+    const drawW = Math.round(sourceImage.width * scale);
+    const drawH = Math.round(sourceImage.height * scale);
+    const offsetX = Math.round((targetW - drawW) / 2);
+    const offsetY = Math.round((targetH - drawH) / 2);
+
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(sourceImage, offsetX, offsetY, drawW, drawH);
+  }
+
+  // Progressively compress until base64 length is strictly < 900,000 characters
+  // (< 900KB) to safely fit inside Firestore's 1MB document limit.
+  const qualitySteps = [0.85, 0.78, 0.70, 0.60, 0.50, 0.40, 0.30];
+  let finalBase64 = '';
+  let finalQuality = 0.85;
+
+  for (const q of qualitySteps) {
+    finalQuality = q;
+    const dataUrl = canvas.toDataURL('image/jpeg', q);
+    finalBase64 = dataUrl.replace(/^data:image\/jpeg;base64,/, '').trim();
+    if (finalBase64.length < 900000) {
+      break;
+    }
+  }
+
+  return {
+    base64: finalBase64,
+    mime: 'image/jpeg',
+    qualityUsed: finalQuality,
+  };
 }
 
