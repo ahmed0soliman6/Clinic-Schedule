@@ -797,21 +797,31 @@ export default function App() {
           return;
         }
 
-        const sanitizedDraft = normalizeSortOrders(latestDay.draftRows || []).map(
-          (r, i) => sanitizeRowForFirestore(r, i)
-        );
+        const sanitizedDraft = normalizeSortOrders(latestDay.draftRows || [])
+          .slice(0, 60)
+          .map((r, i) => sanitizeRowForFirestore(r, i));
         const baseVersion =
           localVersionRef.current[targetDayId] ||
           confirmedSchedulesRef.current[targetDayId]?.version ||
           1;
         const scheduleDocRef = doc(db, 'schedules', targetDayId);
         const auditMeta = pendingAuditMetaRef.current[targetDayId];
+        const dayMeta =
+          DAYS_LIST.find((d) => d.id === targetDayId) || DAYS_LIST[0];
 
         try {
-          let finalVersion = baseVersion + 1;
-          let finalPublishedRows = latestDay.publishedRows || [];
+          let finalVersion = Math.max(1, Math.floor(baseVersion)) + 1;
+          let finalPublishedRows = normalizeSortOrders(
+            latestDay.publishedRows || []
+          )
+            .slice(0, 60)
+            .map((r, i) => sanitizeRowForFirestore(r, i));
           let finalPublishedAt =
-            latestDay.publishedAt || new Date().toISOString();
+            typeof latestDay.publishedAt === 'string' &&
+            latestDay.publishedAt.trim().length > 0 &&
+            latestDay.publishedAt.length <= 60
+              ? latestDay.publishedAt
+              : new Date().toISOString();
 
           await executeWithRetry(
             async () => {
@@ -819,7 +829,11 @@ export default function App() {
                 const remoteSnap = await transaction.get(scheduleDocRef);
                 if (remoteSnap.exists()) {
                   const remoteData = remoteSnap.data() as DailyScheduleData;
-                  const remoteVer = remoteData.version || 1;
+                  const remoteVer =
+                    typeof remoteData.version === 'number' &&
+                    Number.isFinite(remoteData.version)
+                      ? Math.max(1, Math.floor(remoteData.version))
+                      : 1;
                   if (
                     remoteVer > baseVersion &&
                     remoteData.updatedByEmail &&
@@ -831,10 +845,19 @@ export default function App() {
                   }
                   finalVersion = remoteVer + 1;
                   finalPublishedRows = normalizeSortOrders(
-                    remoteData.publishedRows || []
-                  ).map((r, i) => sanitizeRowForFirestore(r, i));
-                  finalPublishedAt =
-                    remoteData.publishedAt || finalPublishedAt;
+                    Array.isArray(remoteData.publishedRows)
+                      ? remoteData.publishedRows
+                      : []
+                  )
+                    .slice(0, 60)
+                    .map((r, i) => sanitizeRowForFirestore(r, i));
+                  if (
+                    typeof remoteData.publishedAt === 'string' &&
+                    remoteData.publishedAt.trim().length > 0 &&
+                    remoteData.publishedAt.length <= 60
+                  ) {
+                    finalPublishedAt = remoteData.publishedAt;
+                  }
                 } else {
                   finalVersion = 1;
                 }
@@ -843,23 +866,32 @@ export default function App() {
                   sanitizedDraft,
                   finalPublishedRows
                 );
+                const safeUpdatedBy =
+                  (currentUser.uid || 'admin').slice(0, 128) || 'admin';
+                const safeUpdatedByEmail = (
+                  currentUser.email || PRIMARY_ADMIN_EMAIL
+                )
+                  .trim()
+                  .toLowerCase()
+                  .slice(0, 160);
+                const safeUpdatedByName = (
+                  latestDay.updatedByName?.trim() ||
+                  currentUser.displayName?.trim() ||
+                  'مدير النظام'
+                ).slice(0, 120);
 
                 transaction.set(scheduleDocRef, {
-                  dayId: latestDay.dayId,
-                  dayLabel: latestDay.dayLabel,
-                  dayOrder: latestDay.dayOrder,
+                  dayId: dayMeta.id,
+                  dayLabel: dayMeta.label,
+                  dayOrder: dayMeta.order,
                   isPublic: true,
                   hasUnpublishedChanges: hasDiff,
                   version: finalVersion,
                   draftRows: sanitizedDraft,
                   publishedRows: finalPublishedRows,
-                  updatedBy: currentUser.uid,
-                  updatedByEmail: currentUser.email || PRIMARY_ADMIN_EMAIL,
-                  updatedByName: (
-                    latestDay.updatedByName ||
-                    currentUser.displayName ||
-                    'مدير النظام'
-                  ).slice(0, 120),
+                  updatedBy: safeUpdatedBy,
+                  updatedByEmail: safeUpdatedByEmail,
+                  updatedByName: safeUpdatedByName,
                   updatedAt: serverTimestamp(),
                   publishedAt: finalPublishedAt,
                 });
@@ -877,6 +909,9 @@ export default function App() {
 
           const confirmedDay: DailyScheduleData = {
             ...latestDay,
+            dayId: dayMeta.id,
+            dayLabel: dayMeta.label,
+            dayOrder: dayMeta.order,
             draftRows: sanitizedDraft,
             publishedRows: finalPublishedRows,
             hasUnpublishedChanges: !areRowsEqual(
@@ -906,7 +941,7 @@ export default function App() {
               await appendAuditLog(
                 auditMeta.action,
                 targetDayId,
-                latestDay.dayLabel,
+                dayMeta.label,
                 auditMeta.details
               );
             } catch {
@@ -914,7 +949,7 @@ export default function App() {
             }
           }
         } catch (err: unknown) {
-          console.error('Schedule commit failed:', err);
+          console.warn('Schedule commit error:', err);
           committedGenRef.current[targetDayId] = dirtyGenRef.current[targetDayId];
           const errMsg = err instanceof Error ? err.message : String(err);
 
@@ -1111,12 +1146,16 @@ export default function App() {
 
         const sanitizedRows = normalizeSortOrders(
           latestDay.draftRows || []
-        ).map((r, i) => sanitizeRowForFirestore(r, i));
+        )
+          .slice(0, 60)
+          .map((r, i) => sanitizeRowForFirestore(r, i));
 
         const scheduleDocRef = doc(db, 'schedules', targetDayId);
         const publicDocRef = doc(db, 'publicSchedules', targetDayId);
+        const dayMeta =
+          DAYS_LIST.find((d) => d.id === targetDayId) || DAYS_LIST[0];
         let finalVersion =
-          (localVersionRef.current[targetDayId] || baseVersion) + 1;
+          Math.max(1, Math.floor(localVersionRef.current[targetDayId] || baseVersion)) + 1;
 
         try {
           await executeWithRetry(
@@ -1125,31 +1164,48 @@ export default function App() {
                 const remoteSnap = await transaction.get(scheduleDocRef);
                 if (remoteSnap.exists()) {
                   const remoteData = remoteSnap.data() as DailyScheduleData;
-                  finalVersion = (remoteData.version || 1) + 1;
+                  const remoteVer =
+                    typeof remoteData.version === 'number' &&
+                    Number.isFinite(remoteData.version)
+                      ? Math.max(1, Math.floor(remoteData.version))
+                      : 1;
+                  finalVersion = remoteVer + 1;
                 } else {
                   finalVersion = 1;
                 }
 
+                const safeUpdatedBy =
+                  (currentUser.uid || 'admin').slice(0, 128) || 'admin';
+                const safeUpdatedByEmail = (
+                  currentUser.email || PRIMARY_ADMIN_EMAIL
+                )
+                  .trim()
+                  .toLowerCase()
+                  .slice(0, 160);
+                const safeUpdatedByName = (
+                  editorInfo.displayName?.trim() || 'مدير النظام'
+                ).slice(0, 120);
+
                 transaction.set(scheduleDocRef, {
-                  dayId: latestDay.dayId,
-                  dayLabel: latestDay.dayLabel,
-                  dayOrder: latestDay.dayOrder,
+                  dayId: dayMeta.id,
+                  dayLabel: dayMeta.label,
+                  dayOrder: dayMeta.order,
                   isPublic: true,
                   hasUnpublishedChanges: false,
                   version: finalVersion,
                   draftRows: sanitizedRows,
                   publishedRows: sanitizedRows,
-                  updatedBy: currentUser.uid,
-                  updatedByEmail: currentUser.email || PRIMARY_ADMIN_EMAIL,
-                  updatedByName: editorInfo.displayName.slice(0, 120),
+                  updatedBy: safeUpdatedBy,
+                  updatedByEmail: safeUpdatedByEmail,
+                  updatedByName: safeUpdatedByName,
                   updatedAt: serverTimestamp(),
                   publishedAt: publishTimestamp,
                 });
 
                 transaction.set(publicDocRef, {
-                  dayId: latestDay.dayId,
-                  dayLabel: latestDay.dayLabel,
-                  dayOrder: latestDay.dayOrder,
+                  dayId: dayMeta.id,
+                  dayLabel: dayMeta.label,
+                  dayOrder: dayMeta.order,
                   isPublic: true,
                   publishedRows: sanitizedRows,
                   publishedAt: publishTimestamp,
@@ -1169,6 +1225,9 @@ export default function App() {
 
           const confirmedPublished: DailyScheduleData = {
             ...latestDay,
+            dayId: dayMeta.id,
+            dayLabel: dayMeta.label,
+            dayOrder: dayMeta.order,
             draftRows: sanitizedRows,
             publishedRows: sanitizedRows,
             hasUnpublishedChanges: false,
@@ -1187,22 +1246,22 @@ export default function App() {
           }));
 
           await showLocalNotification(
-            `تحديث جدول يوم ${latestDay.dayLabel}`,
-            `تم اعتماد ونشر جدول عيادات يوم ${latestDay.dayLabel} (${sanitizedRows.length} عيادات) للجمهور بنجاح.`
+            `تحديث جدول يوم ${dayMeta.label}`,
+            `تم اعتماد ونشر جدول عيادات يوم ${dayMeta.label} (${sanitizedRows.length} عيادات) للجمهور بنجاح.`
           );
 
           try {
             await appendAuditLog(
               'PUBLISH_DAY',
               targetDayId,
-              latestDay.dayLabel,
-              `اعتماد ونشر جدول يوم ${latestDay.dayLabel} للجمهور (${sanitizedRows.length} عيادات)`
+              dayMeta.label,
+              `اعتماد ونشر جدول يوم ${dayMeta.label} للجمهور (${sanitizedRows.length} عيادات)`
             );
           } catch {
             // Non-blocking
           }
         } catch (err: unknown) {
-          console.error('Publish failed:', err);
+          console.warn('Publish error:', err);
           committedGenRef.current[targetDayId] = dirtyGenRef.current[targetDayId];
           const formatted = formatFirestoreCommitError(err, latestDay.dayLabel);
           setAuthErrorBanner(formatted.message);

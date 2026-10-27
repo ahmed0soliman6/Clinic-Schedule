@@ -253,15 +253,47 @@ export function validateRowInput(input: {
   };
 }
 
-export function sanitizeRowForFirestore(row: ScheduleRow, index: number): ScheduleRow {
+export function sanitizeRowForFirestore(
+  row: Partial<ScheduleRow> | undefined,
+  index: number
+): ScheduleRow {
+  const safeId =
+    typeof row?.id === 'string'
+      ? row.id.replace(/[^a-zA-Z0-9_\-]/g, '').slice(0, 80)
+      : '';
+  const safeClinic =
+    typeof row?.clinicName === 'string'
+      ? row.clinicName.trim().slice(0, BLUEPRINT_LIMITS.CLINIC_NAME_MAX)
+      : '';
+  const safeDoctor =
+    typeof row?.doctorName === 'string'
+      ? row.doctorName.trim().slice(0, BLUEPRINT_LIMITS.DOCTOR_NAME_MAX)
+      : '';
+  const safeStart =
+    typeof row?.startTime === 'string'
+      ? row.startTime.trim().slice(0, BLUEPRINT_LIMITS.TIME_MAX)
+      : '';
+  const safeEnd =
+    typeof row?.endTime === 'string'
+      ? row.endTime.trim().slice(0, BLUEPRINT_LIMITS.TIME_MAX)
+      : '';
+  const safeIcon: ClinicIconId =
+    row?.icon && CLINIC_ICONS_CATALOG.some((i) => i.id === row.icon)
+      ? row.icon
+      : 'stethoscope';
+  const safeColor =
+    typeof row?.iconColor === 'string' && row.iconColor.trim().length >= 4
+      ? row.iconColor.trim().slice(0, 30)
+      : '#0284c7';
+
   return {
-    id: row.id.replace(/[^a-zA-Z0-9_\-]/g, '').slice(0, 80) || `row-${index}`,
-    clinicName: row.clinicName.trim().slice(0, BLUEPRINT_LIMITS.CLINIC_NAME_MAX),
-    doctorName: row.doctorName.trim().slice(0, BLUEPRINT_LIMITS.DOCTOR_NAME_MAX),
-    startTime: row.startTime.trim().slice(0, BLUEPRINT_LIMITS.TIME_MAX),
-    endTime: row.endTime.trim().slice(0, BLUEPRINT_LIMITS.TIME_MAX),
-    icon: row.icon,
-    iconColor: row.iconColor.trim().slice(0, 30) || '#0284c7',
+    id: safeId || `row-${index}`,
+    clinicName: safeClinic,
+    doctorName: safeDoctor,
+    startTime: safeStart,
+    endTime: safeEnd,
+    icon: safeIcon,
+    iconColor: safeColor,
     sortOrder: Math.max(0, Math.min(500, Math.floor(index))),
   };
 }

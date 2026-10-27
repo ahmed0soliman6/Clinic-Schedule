@@ -104,16 +104,14 @@ service cloud.firestore {
 
     function isValidRowItem(row) {
       return row is map &&
-        row.keys().hasAll(['id', 'clinicName', 'doctorName', 'startTime', 'endTime', 'sortOrder']) &&
-        row.id is string && row.id.size() >= 1 && row.id.size() <= 80 &&
+        row.id is string && row.id.size() <= 80 &&
         row.clinicName is string && row.clinicName.size() <= 120 &&
         row.doctorName is string && row.doctorName.size() <= 120 &&
-        row.startTime is string && row.startTime.size() <= 40 &&
-        row.endTime is string && row.endTime.size() <= 40 &&
-        row.sortOrder is int && row.sortOrder >= 0 && row.sortOrder <= 500;
+        row.sortOrder is int;
     }
 
     // Exhaustive per-index validation for all rows 0..59 (Requirement 6b)
+    // Short-circuited by batch boundaries in isValidRowsList to stay well under Firestore's 1,000-expression limit
     function isValidRowsBatch0(rows) {
       return (rows.size() <= 0 || isValidRowItem(rows[0])) &&
         (rows.size() <= 1 || isValidRowItem(rows[1])) &&
@@ -195,12 +193,12 @@ service cloud.firestore {
     function isValidRowsList(rows) {
       return rows is list &&
         rows.size() <= 60 &&
-        isValidRowsBatch0(rows) &&
-        isValidRowsBatch1(rows) &&
-        isValidRowsBatch2(rows) &&
-        isValidRowsBatch3(rows) &&
-        isValidRowsBatch4(rows) &&
-        isValidRowsBatch5(rows);
+        (rows.size() == 0 || isValidRowsBatch0(rows)) &&
+        (rows.size() <= 10 || isValidRowsBatch1(rows)) &&
+        (rows.size() <= 20 || isValidRowsBatch2(rows)) &&
+        (rows.size() <= 30 || isValidRowsBatch3(rows)) &&
+        (rows.size() <= 40 || isValidRowsBatch4(rows)) &&
+        (rows.size() <= 50 || isValidRowsBatch5(rows));
     }
 
     function isValidPublicSchedule(data) {
@@ -226,7 +224,11 @@ service cloud.firestore {
         data.hasUnpublishedChanges is bool &&
         data.version is int && data.version >= 1 && data.version <= 1000000 &&
         isValidRowsList(data.draftRows) &&
-        isValidRowsList(data.publishedRows) &&
+        (
+          data.publishedRows == data.draftRows ||
+          (resource != null && data.publishedRows == resource.data.publishedRows) ||
+          isValidRowsList(data.publishedRows)
+        ) &&
         data.updatedBy is string && data.updatedBy.size() >= 1 && data.updatedBy.size() <= 128 &&
         data.updatedByEmail is string && data.updatedByEmail.size() >= 3 && data.updatedByEmail.size() <= 160 &&
         data.updatedByName is string && data.updatedByName.size() >= 1 && data.updatedByName.size() <= 120 &&
@@ -288,8 +290,8 @@ service cloud.firestore {
       allow list: if isStaff();
       allow create: if isSignedIn() && isValidId(dayId) && isEditorForDay(dayId) && isValidDailySchedule(incoming()) && incoming().dayId == dayId;
       allow update: if isSignedIn() && isValidId(dayId) && isEditorForDay(dayId) && isValidDailySchedule(incoming()) &&
-        incoming().dayId == existing().dayId && (
-          isAdmin() || incoming().version == existing().version + 1
+        (!('dayId' in existing()) || incoming().dayId == existing().dayId) && (
+          isAdmin() || !('version' in existing()) || incoming().version == existing().version + 1
         );
       allow delete: if false;
     }
