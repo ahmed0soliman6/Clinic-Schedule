@@ -62,6 +62,9 @@ import {
   DAYS_LIST,
   PRIMARY_ADMIN_EMAIL,
   addScheduleRow,
+  applyDraftMutationToDay,
+  applyPublishToDay,
+  areRowsEqual,
   canUserEditDay,
   copyFullDayRows,
   copyRowToDay,
@@ -69,6 +72,8 @@ import {
   deleteUserFromList,
   detectConcurrentConflict,
   emailToDocId,
+  executeWithRetry,
+  formatFirestoreCommitError,
   isFictionalOrBlockedEmail,
   mergeConflictingRowsThreeWay,
   moveScheduleRow,
@@ -77,6 +82,7 @@ import {
   resolveAuthorizedUserAccess,
   sanitizeRowForFirestore,
   sanitizeUsersList,
+  shouldAcceptIncomingSnapshot,
   updateScheduleRow,
   upsertUserByEmail,
 } from './utils/scheduleLogic';
@@ -166,7 +172,7 @@ export default function App() {
   const [settings, setSettings] = useState<CenterSettings>(FALLBACK_SETTINGS);
   const [defaultSettings, setDefaultSettings] =
     useState<CenterSettings>(FALLBACK_SETTINGS);
-  const [schedules, setSchedules] = useState<Record<DayId, DailyScheduleData>>(
+  const [schedules, setSchedulesState] = useState<Record<DayId, DailyScheduleData>>(
     () => {
       const emptyMap = {} as Record<DayId, DailyScheduleData>;
       DAYS_LIST.forEach((d) => {
@@ -188,6 +194,28 @@ export default function App() {
       return emptyMap;
     }
   );
+  const schedulesRef = useRef<Record<DayId, DailyScheduleData>>(schedules);
+  const confirmedSchedulesRef = useRef<Record<DayId, DailyScheduleData>>(schedules);
+
+  // Synchronously update schedulesRef with every state transition (Requirement 1)
+  const setSchedules = (
+    updater:
+      | Record<DayId, DailyScheduleData>
+      | ((prev: Record<DayId, DailyScheduleData>) => Record<DayId, DailyScheduleData>)
+  ) => {
+    const next =
+      typeof updater === 'function' ? updater(schedulesRef.current) : updater;
+    schedulesRef.current = next;
+    setSchedulesState(next);
+  };
+
+  const firebaseUserRef = useRef<FirebaseUser | null>(null);
+  const activeRoleRef = useRef<UserRole | null>(null);
+  useEffect(() => {
+    firebaseUserRef.current = firebaseUser;
+    activeRoleRef.current = activeRole;
+  }, [firebaseUser, activeRole]);
+
   const [isLoaded, setIsLoaded] = useState(false);
 
   const [undoStacks, setUndoStacks] = useState<Record<DayId, ScheduleRow[][]>>({
@@ -222,6 +250,74 @@ export default function App() {
     thursday: 1,
     friday: 1,
   });
+
+  // Per-Day Save Queue, In-Flight Counter, Debounce Timer, and Generation Tracking (Requirements 1, 2, 4)
+  const daySaveQueueRef = useRef<Record<DayId, Promise<void>>>({
+    saturday: Promise.resolve(),
+    sunday: Promise.resolve(),
+    monday: Promise.resolve(),
+    tuesday: Promise.resolve(),
+    wednesday: Promise.resolve(),
+    thursday: Promise.resolve(),
+    friday: Promise.resolve(),
+  });
+  const inFlightCountRef = useRef<Record<DayId, number>>({
+    saturday: 0,
+    sunday: 0,
+    monday: 0,
+    tuesday: 0,
+    wednesday: 0,
+    thursday: 0,
+    friday: 0,
+  });
+  const pendingDebounceTimerRef = useRef<
+    Record<DayId, ReturnType<typeof setTimeout> | null>
+  >({
+    saturday: null,
+    sunday: null,
+    monday: null,
+    tuesday: null,
+    wednesday: null,
+    thursday: null,
+    friday: null,
+  });
+  const dirtyGenRef = useRef<Record<DayId, number>>({
+    saturday: 0,
+    sunday: 0,
+    monday: 0,
+    tuesday: 0,
+    wednesday: 0,
+    thursday: 0,
+    friday: 0,
+  });
+  const committedGenRef = useRef<Record<DayId, number>>({
+    saturday: 0,
+    sunday: 0,
+    monday: 0,
+    tuesday: 0,
+    wednesday: 0,
+    thursday: 0,
+    friday: 0,
+  });
+  const pendingAuditMetaRef = useRef<
+    Record<DayId, { action: AuditAction; details: string } | null>
+  >({
+    saturday: null,
+    sunday: null,
+    monday: null,
+    tuesday: null,
+    wednesday: null,
+    thursday: null,
+    friday: null,
+  });
+
+  const isDaySavingOrPending = (dayId: DayId): boolean => {
+    return (
+      inFlightCountRef.current[dayId] > 0 ||
+      pendingDebounceTimerRef.current[dayId] !== null ||
+      dirtyGenRef.current[dayId] > committedGenRef.current[dayId]
+    );
+  };
 
   // Handle redirect result on mount if user signed in via redirect fallback
   useEffect(() => {
@@ -476,9 +572,12 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // 3. Firestore Real-Time Subscriptions:
-  // - Public Visitors: Subscribe to publicSchedules/{selectedDay} & settings/center
+  // 3. Firestore Real-Time Subscriptions (Requirements 2 & 5):
+  // - Public Visitors: Subscribe ONLY to publicSchedules/{selectedDay} & settings/center
   // - Authenticated Staff: Subscribe to schedules/{selectedDay} & settings/center
+  // - Does NOT re-subscribe when firebaseUser object reference changes (uses boolean isStaffAuthenticated)
+  const isStaffAuthenticated = Boolean(firebaseUser && activeRole);
+
   useEffect(() => {
     if (!authReady || !isLoaded) return;
 
@@ -497,11 +596,11 @@ export default function App() {
       }
     );
 
-    // Schedule listener depending on authentication
+    // Schedule listener depending on staff authentication boolean
     let unsubSchedule: () => void;
 
-    if (!firebaseUser) {
-      // Visitor: Read public approved schedule only
+    if (!isStaffAuthenticated) {
+      // Visitor: Read public approved schedule ONLY from publicSchedules/{selectedDay}
       const publicRef = doc(db, 'publicSchedules', selectedDay);
       unsubSchedule = onSnapshot(
         publicRef,
@@ -511,14 +610,19 @@ export default function App() {
             setSchedules((prev) => {
               const current = prev[selectedDay];
               if (!current) return prev;
+              const nextDay: DailyScheduleData = {
+                ...current,
+                publishedRows: pubData.publishedRows || [],
+                publishedAt: pubData.publishedAt || current.publishedAt,
+                isPublic: pubData.isPublic ?? true,
+              };
+              confirmedSchedulesRef.current = {
+                ...confirmedSchedulesRef.current,
+                [selectedDay]: nextDay,
+              };
               return {
                 ...prev,
-                [selectedDay]: {
-                  ...current,
-                  publishedRows: pubData.publishedRows || [],
-                  publishedAt: pubData.publishedAt || current.publishedAt,
-                  isPublic: pubData.isPublic ?? true,
-                },
+                [selectedDay]: nextDay,
               };
             });
           }
@@ -529,42 +633,66 @@ export default function App() {
       );
     } else {
       // Staff / Editor / Admin: Read full draft schedule from schedules/{selectedDay}
+      // Protected against active saves, pending writes, and older versions (Requirement 2)
       const scheduleRef = doc(db, 'schedules', selectedDay);
       unsubSchedule = onSnapshot(
         scheduleRef,
         (snap) => {
-          if (snap.exists()) {
-            const remoteDoc = snap.data() as DailyScheduleData;
-            setSchedules((prev) => {
-              const currentLocal = prev[selectedDay];
-              const conflictCheck = detectConcurrentConflict({
-                localBaseVersion: localVersionRef.current[selectedDay] || 1,
-                incomingRemoteSchedule: remoteDoc,
-                currentUserId: auth.currentUser?.uid,
-                hasLocalUnsavedChanges: saveStatusRef.current === 'unsaved',
-                localDraftRows: currentLocal?.draftRows || [],
-              });
+          if (!snap.exists()) return;
 
-              if (conflictCheck.hasConflict) {
-                setConflict({
-                  dayId: selectedDay,
-                  baseRows: currentLocal?.draftRows,
-                  localRows: currentLocal?.draftRows || [],
-                  remoteSchedule: remoteDoc,
-                  detectedAt: new Date().toISOString(),
-                });
-                setSaveStatus('conflict');
-                saveStatusRef.current = 'conflict';
-                return prev;
-              }
+          const remoteDoc = snap.data() as DailyScheduleData;
+          const accepted = shouldAcceptIncomingSnapshot({
+            isSavingOrPendingForDay: isDaySavingOrPending(selectedDay),
+            hasPendingWrites: snap.metadata.hasPendingWrites,
+            remoteVersion: remoteDoc.version || 1,
+            localVersion: localVersionRef.current[selectedDay] || 1,
+          });
 
-              localVersionRef.current[selectedDay] = remoteDoc.version || 1;
-              return {
-                ...prev,
-                [selectedDay]: remoteDoc,
-              };
-            });
+          if (!accepted) {
+            return;
           }
+
+          setSchedules((prev) => {
+            const currentLocal = prev[selectedDay];
+            const conflictCheck = detectConcurrentConflict({
+              localBaseVersion: localVersionRef.current[selectedDay] || 1,
+              incomingRemoteSchedule: remoteDoc,
+              currentUserId: auth.currentUser?.uid,
+              hasLocalUnsavedChanges: isDaySavingOrPending(selectedDay),
+              localDraftRows: currentLocal?.draftRows || [],
+            });
+
+            if (conflictCheck.hasConflict) {
+              setConflict({
+                dayId: selectedDay,
+                baseRows: confirmedSchedulesRef.current[selectedDay]?.draftRows,
+                localRows: currentLocal?.draftRows || [],
+                remoteSchedule: remoteDoc,
+                detectedAt: new Date().toISOString(),
+              });
+              setSaveStatus('conflict');
+              saveStatusRef.current = 'conflict';
+              return prev;
+            }
+
+            const normalizedRemote: DailyScheduleData = {
+              ...remoteDoc,
+              hasUnpublishedChanges: !areRowsEqual(
+                remoteDoc.draftRows || [],
+                remoteDoc.publishedRows || []
+              ),
+            };
+
+            localVersionRef.current[selectedDay] = normalizedRemote.version || 1;
+            confirmedSchedulesRef.current = {
+              ...confirmedSchedulesRef.current,
+              [selectedDay]: normalizedRemote,
+            };
+            return {
+              ...prev,
+              [selectedDay]: normalizedRemote,
+            };
+          });
         },
         (error) => {
           if (auth.currentUser) {
@@ -586,7 +714,7 @@ export default function App() {
       unsubSettings();
       unsubSchedule();
     };
-  }, [authReady, isLoaded, firebaseUser, selectedDay]);
+  }, [authReady, isLoaded, isStaffAuthenticated, selectedDay]);
 
   // Non-blocking audit log append
   const appendAuditLog = async (
@@ -634,295 +762,479 @@ export default function App() {
   };
 
   /**
-   * Commit schedule edit to draftRows in schedules/{targetDayId}.
-   * Uses runTransaction for optimistic concurrency version check.
-   * On failure: rollbacks local state and displays error banner in Arabic.
+   * Enqueues an atomic Firestore transaction for `schedules/{targetDayId}` onto the per-day promise queue.
+   * - Never starts before the previous save for `targetDayId` finishes (Requirement 1).
+   * - Writes ONLY `draftRows` and `hasUnpublishedChanges` without touching `publishedRows` or `publicSchedules` (Requirement 5).
+   * - Uses `executeWithRetry` (up to 3 retries with exponential backoff on `aborted`/`unavailable`) and NO `setDoc` fallback (Requirement 3).
+   * - Displays the real error in `authErrorBanner` (persistent until user closes) before rolling back to `confirmedSchedulesRef` (Requirement 3).
    */
-  const commitDayScheduleChange = async (
+  const enqueueDayDraftCommit = (targetDayId: DayId, targetGen: number) => {
+    inFlightCountRef.current[targetDayId] += 1;
+    setSaveStatus('saving');
+    saveStatusRef.current = 'saving';
+
+    const nextPromise = daySaveQueueRef.current[targetDayId]
+      .catch(() => {
+        // Keep per-day queue alive after any prior error
+      })
+      .then(async () => {
+        // If already committed by a newer flush cycle, skip redundant transaction
+        if (committedGenRef.current[targetDayId] >= targetGen) {
+          return;
+        }
+
+        const currentGen = dirtyGenRef.current[targetDayId];
+        const latestDay = schedulesRef.current[targetDayId];
+        if (!latestDay) return;
+
+        const currentUser = firebaseUserRef.current;
+        if (!currentUser) {
+          committedGenRef.current[targetDayId] = currentGen;
+          confirmedSchedulesRef.current = {
+            ...confirmedSchedulesRef.current,
+            [targetDayId]: latestDay,
+          };
+          return;
+        }
+
+        const sanitizedDraft = normalizeSortOrders(latestDay.draftRows || []).map(
+          (r, i) => sanitizeRowForFirestore(r, i)
+        );
+        const baseVersion =
+          localVersionRef.current[targetDayId] ||
+          confirmedSchedulesRef.current[targetDayId]?.version ||
+          1;
+        const scheduleDocRef = doc(db, 'schedules', targetDayId);
+        const auditMeta = pendingAuditMetaRef.current[targetDayId];
+
+        try {
+          let finalVersion = baseVersion + 1;
+          let finalPublishedRows = latestDay.publishedRows || [];
+          let finalPublishedAt =
+            latestDay.publishedAt || new Date().toISOString();
+
+          await executeWithRetry(
+            async () => {
+              await runTransaction(db, async (transaction) => {
+                const remoteSnap = await transaction.get(scheduleDocRef);
+                if (remoteSnap.exists()) {
+                  const remoteData = remoteSnap.data() as DailyScheduleData;
+                  const remoteVer = remoteData.version || 1;
+                  if (
+                    remoteVer > baseVersion &&
+                    remoteData.updatedByEmail &&
+                    remoteData.updatedByEmail !== currentUser.email
+                  ) {
+                    throw new Error(
+                      `CONCURRENT_CONFLICT:${JSON.stringify(remoteData)}`
+                    );
+                  }
+                  finalVersion = remoteVer + 1;
+                  finalPublishedRows = normalizeSortOrders(
+                    remoteData.publishedRows || []
+                  ).map((r, i) => sanitizeRowForFirestore(r, i));
+                  finalPublishedAt =
+                    remoteData.publishedAt || finalPublishedAt;
+                } else {
+                  finalVersion = 1;
+                }
+
+                const hasDiff = !areRowsEqual(
+                  sanitizedDraft,
+                  finalPublishedRows
+                );
+
+                transaction.set(scheduleDocRef, {
+                  dayId: latestDay.dayId,
+                  dayLabel: latestDay.dayLabel,
+                  dayOrder: latestDay.dayOrder,
+                  isPublic: true,
+                  hasUnpublishedChanges: hasDiff,
+                  version: finalVersion,
+                  draftRows: sanitizedDraft,
+                  publishedRows: finalPublishedRows,
+                  updatedBy: currentUser.uid,
+                  updatedByEmail: currentUser.email || PRIMARY_ADMIN_EMAIL,
+                  updatedByName: (
+                    latestDay.updatedByName ||
+                    currentUser.displayName ||
+                    'مدير النظام'
+                  ).slice(0, 120),
+                  updatedAt: serverTimestamp(),
+                  publishedAt: finalPublishedAt,
+                });
+              });
+            },
+            3,
+            150
+          );
+
+          localVersionRef.current[targetDayId] = finalVersion;
+          committedGenRef.current[targetDayId] = Math.max(
+            committedGenRef.current[targetDayId],
+            currentGen
+          );
+
+          const confirmedDay: DailyScheduleData = {
+            ...latestDay,
+            draftRows: sanitizedDraft,
+            publishedRows: finalPublishedRows,
+            hasUnpublishedChanges: !areRowsEqual(
+              sanitizedDraft,
+              finalPublishedRows
+            ),
+            version: finalVersion,
+            publishedAt: finalPublishedAt,
+          };
+
+          confirmedSchedulesRef.current = {
+            ...confirmedSchedulesRef.current,
+            [targetDayId]: confirmedDay,
+          };
+
+          // Apply confirmed state if no newer local edits happened while in-flight
+          if (dirtyGenRef.current[targetDayId] === currentGen) {
+            setSchedules((prev) => ({
+              ...prev,
+              [targetDayId]: confirmedDay,
+            }));
+          }
+
+          if (auditMeta) {
+            pendingAuditMetaRef.current[targetDayId] = null;
+            try {
+              await appendAuditLog(
+                auditMeta.action,
+                targetDayId,
+                latestDay.dayLabel,
+                auditMeta.details
+              );
+            } catch {
+              // Non-blocking
+            }
+          }
+        } catch (err: unknown) {
+          console.error('Schedule commit failed:', err);
+          committedGenRef.current[targetDayId] = dirtyGenRef.current[targetDayId];
+          const errMsg = err instanceof Error ? err.message : String(err);
+
+          if (errMsg.startsWith('CONCURRENT_CONFLICT:')) {
+            const remoteData = JSON.parse(
+              errMsg.slice('CONCURRENT_CONFLICT:'.length)
+            ) as DailyScheduleData;
+            setConflict({
+              dayId: targetDayId,
+              baseRows:
+                confirmedSchedulesRef.current[targetDayId]?.draftRows || [],
+              localRows: sanitizedDraft,
+              remoteSchedule: remoteData,
+              detectedAt: new Date().toISOString(),
+            });
+            setSaveStatus('conflict');
+            saveStatusRef.current = 'conflict';
+            setAuthErrorBanner(
+              formatFirestoreCommitError(err, latestDay.dayLabel).message
+            );
+          } else {
+            const formatted = formatFirestoreCommitError(
+              err,
+              latestDay.dayLabel
+            );
+            // 1. Show persistent real error banner clearly first (does not auto-dismiss)
+            setAuthErrorBanner(formatted.message);
+            setSaveStatus('error');
+            saveStatusRef.current = 'error';
+
+            // 2. Rollback local state to last confirmed schedule for this day
+            const rollbackDay =
+              confirmedSchedulesRef.current[targetDayId] || latestDay;
+            setSchedules((prev) => ({
+              ...prev,
+              [targetDayId]: rollbackDay,
+            }));
+          }
+        }
+      })
+      .finally(() => {
+        inFlightCountRef.current[targetDayId] = Math.max(
+          0,
+          inFlightCountRef.current[targetDayId] - 1
+        );
+        if (!isDaySavingOrPending(targetDayId)) {
+          if (
+            saveStatusRef.current !== 'error' &&
+            saveStatusRef.current !== 'conflict'
+          ) {
+            setSaveStatus('saved');
+            saveStatusRef.current = 'saved';
+          }
+        }
+      });
+
+    daySaveQueueRef.current[targetDayId] = nextPromise;
+    return nextPromise;
+  };
+
+  /**
+   * Functional draft mutation handler (Requirements 1, 4, 5):
+   * - Builds on `schedulesRef.current[targetDayId].draftRows` using `(prevRows) => nextRows` (never stale render state).
+   * - Updates ONLY `draftRows` and `hasUnpublishedChanges` (never touches `publishedRows` or `publicSchedules`).
+   * - Coalesces rapid consecutive edits with a 700ms debounce before enqueuing into `daySaveQueueRef`.
+   */
+  const mutateDayScheduleDraft = (
     targetDayId: DayId,
-    newDraftRows: ScheduleRow[],
+    updater: (prevRows: ScheduleRow[]) => ScheduleRow[],
     action: AuditAction,
-    details: string,
+    detailsOrBuilder: string | ((prevRows: ScheduleRow[], nextRows: ScheduleRow[]) => string),
     recordUndo = true
   ) => {
-    const currentDay = schedules[targetDayId];
+    const currentDay = schedulesRef.current[targetDayId];
     if (!currentDay) return;
+
+    const prevDraftRows = currentDay.draftRows || [];
 
     if (recordUndo) {
       setUndoStacks((prev) => ({
         ...prev,
-        [targetDayId]: [
-          ...(prev[targetDayId] || []).slice(-19),
-          currentDay.draftRows,
-        ],
+        [targetDayId]: [...(prev[targetDayId] || []).slice(-19), prevDraftRows],
       }));
     }
 
-    const sanitizedDraft = normalizeSortOrders(newDraftRows).map((r, i) =>
-      sanitizeRowForFirestore(r, i)
-    );
-    const baseVersion =
-      localVersionRef.current[targetDayId] || currentDay.version || 1;
-
-    const optimisticDay: DailyScheduleData = {
-      ...currentDay,
-      draftRows: sanitizedDraft,
-      publishedRows: sanitizedDraft,
-      hasUnpublishedChanges: false,
-      version: baseVersion + 1,
-      updatedBy: firebaseUser?.uid || 'local-staff',
-      updatedByEmail: firebaseUser?.email || PRIMARY_ADMIN_EMAIL,
-      updatedByName:
-        firebaseUser?.displayName ||
-        (activeRole === 'ADMIN' ? 'مدير النظام' : 'محرر الجداول'),
+    const editorInfo = {
+      uid: firebaseUserRef.current?.uid || 'local-staff',
+      email: firebaseUserRef.current?.email || PRIMARY_ADMIN_EMAIL,
+      displayName:
+        firebaseUserRef.current?.displayName ||
+        (activeRoleRef.current === 'ADMIN' ? 'مدير النظام' : 'محرر الجداول'),
     };
 
+    const updatedDay = applyDraftMutationToDay(currentDay, updater, editorInfo);
+    const resolvedDetails =
+      typeof detailsOrBuilder === 'function'
+        ? detailsOrBuilder(prevDraftRows, updatedDay.draftRows)
+        : detailsOrBuilder;
+
+    pendingAuditMetaRef.current[targetDayId] = {
+      action,
+      details: resolvedDetails,
+    };
+
+    dirtyGenRef.current[targetDayId] += 1;
     setSaveStatus('saving');
     saveStatusRef.current = 'saving';
+
     setSchedules((prev) => ({
       ...prev,
-      [targetDayId]: optimisticDay,
+      [targetDayId]: updatedDay,
     }));
 
-    if (!firebaseUser) {
-      setSaveStatus('saved');
-      saveStatusRef.current = 'saved';
-      return;
+    if (pendingDebounceTimerRef.current[targetDayId] !== null) {
+      clearTimeout(pendingDebounceTimerRef.current[targetDayId]!);
+      pendingDebounceTimerRef.current[targetDayId] = null;
     }
 
-    const scheduleDocRef = doc(db, 'schedules', targetDayId);
-    const nowIso = new Date().toISOString();
-
-    const schedulePayload = {
-      dayId: optimisticDay.dayId,
-      dayLabel: optimisticDay.dayLabel,
-      dayOrder: optimisticDay.dayOrder,
-      isPublic: true,
-      hasUnpublishedChanges: false,
-      version: baseVersion + 1,
-      draftRows: sanitizedDraft,
-      publishedRows: sanitizedDraft,
-      updatedBy: firebaseUser.uid,
-      updatedByEmail: firebaseUser.email || PRIMARY_ADMIN_EMAIL,
-      updatedByName: optimisticDay.updatedByName.slice(0, 120),
-      updatedAt: serverTimestamp(),
-      publishedAt: nowIso,
-    };
-
-    try {
-      let finalVersion = baseVersion + 1;
-
-      try {
-        await runTransaction(db, async (transaction) => {
-          const remoteSnap = await transaction.get(scheduleDocRef);
-          if (remoteSnap.exists()) {
-            const remoteData = remoteSnap.data() as DailyScheduleData;
-            const remoteVer = remoteData.version || 1;
-            if (
-              remoteVer > baseVersion &&
-              remoteData.updatedByEmail !== firebaseUser.email
-            ) {
-              throw new Error(`CONCURRENT_CONFLICT:${JSON.stringify(remoteData)}`);
-            }
-            finalVersion = remoteVer + 1;
-          }
-
-          transaction.set(scheduleDocRef, {
-            ...schedulePayload,
-            version: finalVersion,
-          });
-        });
-      } catch (transErr: unknown) {
-        const transErrMsg =
-          transErr instanceof Error ? transErr.message : String(transErr);
-        if (transErrMsg.startsWith('CONCURRENT_CONFLICT:')) {
-          throw transErr;
-        }
-        // Direct setDoc write fallback
-        await setDoc(scheduleDocRef, schedulePayload);
-      }
-
-      // Also persist to publicSchedules/{targetDayId} so public visitors see changes immediately
-      try {
-        await setDoc(doc(db, 'publicSchedules', targetDayId), {
-          dayId: optimisticDay.dayId,
-          dayLabel: optimisticDay.dayLabel,
-          dayOrder: optimisticDay.dayOrder,
-          isPublic: true,
-          publishedRows: sanitizedDraft,
-          publishedAt: nowIso,
-        });
-      } catch {
-        // Non-blocking
-      }
-
-      localVersionRef.current[targetDayId] = finalVersion;
-      setSaveStatus('saved');
-      saveStatusRef.current = 'saved';
-
-      try {
-        await appendAuditLog(action, targetDayId, currentDay.dayLabel, details);
-      } catch {
-        // Non-blocking
-      }
-    } catch (err: unknown) {
-      console.error('Schedule commit failed:', err);
-      const errMsg = err instanceof Error ? err.message : String(err);
-      if (errMsg.startsWith('CONCURRENT_CONFLICT:')) {
-        const remoteData = JSON.parse(
-          errMsg.slice('CONCURRENT_CONFLICT:'.length)
-        ) as DailyScheduleData;
-        setConflict({
-          dayId: targetDayId,
-          baseRows: currentDay.draftRows,
-          localRows: sanitizedDraft,
-          remoteSchedule: remoteData,
-          detectedAt: new Date().toISOString(),
-        });
-        setSaveStatus('conflict');
-        saveStatusRef.current = 'conflict';
-      } else {
-        // Rollback local state
-        setSchedules((prev) => ({
-          ...prev,
-          [targetDayId]: currentDay,
-        }));
-        setSaveStatus('error');
-        saveStatusRef.current = 'error';
-        setAuthErrorBanner(
-          'حدث خطأ أثناء حفظ التعديلات في قاعدة البيانات. تم استرجاع النسخة السابقة، يرجى إعادة المحاولة.'
-        );
-      }
-    }
+    pendingDebounceTimerRef.current[targetDayId] = setTimeout(() => {
+      pendingDebounceTimerRef.current[targetDayId] = null;
+      enqueueDayDraftCommit(targetDayId, dirtyGenRef.current[targetDayId]);
+    }, 700);
   };
 
   /**
-   * "اعتماد ونشر التعديلات":
-   * Copies draftRows to publishedRows, sets hasUnpublishedChanges: false,
-   * and commits both schedules/{selectedDay} and publicSchedules/{selectedDay}.
+   * "اعتماد ونشر التعديلات" (Requirements 3 & 5):
+   * - Cancels any pending debounce timer for `selectedDay` and chains onto `daySaveQueueRef.current[selectedDay]`.
+   * - Copies `draftRows` to `publishedRows`, sets `hasUnpublishedChanges: false`,
+   *   and writes BOTH `schedules/{selectedDay}` and `publicSchedules/{selectedDay}` atomically in ONE `runTransaction`.
+   * - Retries up to 3 times on `aborted`/`unavailable` without any `setDoc` fallback.
    */
   const handlePublishDay = async () => {
     if (!userCanEditSelectedDay) return;
-    const currentDay = schedules[selectedDay];
+    const targetDayId = selectedDay;
+
+    // Cancel any pending debounce timer so publish commits the latest draft in a single atomic transaction
+    if (pendingDebounceTimerRef.current[targetDayId] !== null) {
+      clearTimeout(pendingDebounceTimerRef.current[targetDayId]!);
+      pendingDebounceTimerRef.current[targetDayId] = null;
+    }
+
+    const currentDay = schedulesRef.current[targetDayId];
     if (!currentDay) return;
 
-    const sanitizedRows = normalizeSortOrders(currentDay.draftRows).map((r, i) =>
-      sanitizeRowForFirestore(r, i)
-    );
     const publishTimestamp = new Date().toISOString();
     const baseVersion =
-      localVersionRef.current[selectedDay] || currentDay.version || 1;
-
-    const publishedDay: DailyScheduleData = {
-      ...currentDay,
-      publishedRows: sanitizedRows,
-      hasUnpublishedChanges: false,
-      version: baseVersion + 1,
-      publishedAt: publishTimestamp,
-      updatedBy: firebaseUser?.uid || 'local-staff',
-      updatedByEmail: firebaseUser?.email || PRIMARY_ADMIN_EMAIL,
-      updatedByName:
-        firebaseUser?.displayName ||
-        (activeRole === 'ADMIN' ? 'مدير النظام' : 'محرر الجداول'),
+      localVersionRef.current[targetDayId] || currentDay.version || 1;
+    const editorInfo = {
+      uid: firebaseUserRef.current?.uid || 'local-staff',
+      email: firebaseUserRef.current?.email || PRIMARY_ADMIN_EMAIL,
+      displayName:
+        firebaseUserRef.current?.displayName ||
+        (activeRoleRef.current === 'ADMIN' ? 'مدير النظام' : 'محرر الجداول'),
     };
+
+    const optimisticPublished = applyPublishToDay(
+      currentDay,
+      publishTimestamp,
+      baseVersion + 1,
+      editorInfo
+    );
+
+    dirtyGenRef.current[targetDayId] += 1;
+    const publishGen = dirtyGenRef.current[targetDayId];
 
     setSaveStatus('saving');
     saveStatusRef.current = 'saving';
     setSchedules((prev) => ({
       ...prev,
-      [selectedDay]: publishedDay,
+      [targetDayId]: optimisticPublished,
     }));
 
-    if (!firebaseUser) {
+    if (!firebaseUserRef.current) {
+      committedGenRef.current[targetDayId] = publishGen;
+      confirmedSchedulesRef.current = {
+        ...confirmedSchedulesRef.current,
+        [targetDayId]: optimisticPublished,
+      };
       setSaveStatus('saved');
       saveStatusRef.current = 'saved';
       return;
     }
 
-    const scheduleDocRef = doc(db, 'schedules', selectedDay);
-    const publicDocRef = doc(db, 'publicSchedules', selectedDay);
+    inFlightCountRef.current[targetDayId] += 1;
 
-    const staffPayload = {
-      dayId: publishedDay.dayId,
-      dayLabel: publishedDay.dayLabel,
-      dayOrder: publishedDay.dayOrder,
-      isPublic: true,
-      hasUnpublishedChanges: false,
-      version: baseVersion + 1,
-      draftRows: sanitizedRows,
-      publishedRows: sanitizedRows,
-      updatedBy: firebaseUser.uid,
-      updatedByEmail: firebaseUser.email || PRIMARY_ADMIN_EMAIL,
-      updatedByName: publishedDay.updatedByName.slice(0, 120),
-      updatedAt: serverTimestamp(),
-      publishedAt: publishTimestamp,
-    };
+    const nextPromise = daySaveQueueRef.current[targetDayId]
+      .catch(() => {
+        // Keep queue alive
+      })
+      .then(async () => {
+        const latestDay = schedulesRef.current[targetDayId];
+        const currentUser = firebaseUserRef.current;
+        if (!latestDay || !currentUser) return;
 
-    const publicPayload = {
-      dayId: publishedDay.dayId,
-      dayLabel: publishedDay.dayLabel,
-      dayOrder: publishedDay.dayOrder,
-      isPublic: true,
-      publishedRows: sanitizedRows,
-      publishedAt: publishTimestamp,
-      updatedAt: serverTimestamp(),
-    };
+        const sanitizedRows = normalizeSortOrders(
+          latestDay.draftRows || []
+        ).map((r, i) => sanitizeRowForFirestore(r, i));
 
-    try {
-      let finalVersion = baseVersion + 1;
+        const scheduleDocRef = doc(db, 'schedules', targetDayId);
+        const publicDocRef = doc(db, 'publicSchedules', targetDayId);
+        let finalVersion =
+          (localVersionRef.current[targetDayId] || baseVersion) + 1;
 
-      try {
-        await runTransaction(db, async (transaction) => {
-          const remoteSnap = await transaction.get(scheduleDocRef);
-          if (remoteSnap.exists()) {
-            const remoteData = remoteSnap.data() as DailyScheduleData;
-            finalVersion = (remoteData.version || 1) + 1;
-          }
+        try {
+          await executeWithRetry(
+            async () => {
+              await runTransaction(db, async (transaction) => {
+                const remoteSnap = await transaction.get(scheduleDocRef);
+                if (remoteSnap.exists()) {
+                  const remoteData = remoteSnap.data() as DailyScheduleData;
+                  finalVersion = (remoteData.version || 1) + 1;
+                } else {
+                  finalVersion = 1;
+                }
 
-          transaction.set(scheduleDocRef, {
-            ...staffPayload,
+                transaction.set(scheduleDocRef, {
+                  dayId: latestDay.dayId,
+                  dayLabel: latestDay.dayLabel,
+                  dayOrder: latestDay.dayOrder,
+                  isPublic: true,
+                  hasUnpublishedChanges: false,
+                  version: finalVersion,
+                  draftRows: sanitizedRows,
+                  publishedRows: sanitizedRows,
+                  updatedBy: currentUser.uid,
+                  updatedByEmail: currentUser.email || PRIMARY_ADMIN_EMAIL,
+                  updatedByName: editorInfo.displayName.slice(0, 120),
+                  updatedAt: serverTimestamp(),
+                  publishedAt: publishTimestamp,
+                });
+
+                transaction.set(publicDocRef, {
+                  dayId: latestDay.dayId,
+                  dayLabel: latestDay.dayLabel,
+                  dayOrder: latestDay.dayOrder,
+                  isPublic: true,
+                  publishedRows: sanitizedRows,
+                  publishedAt: publishTimestamp,
+                  updatedAt: serverTimestamp(),
+                });
+              });
+            },
+            3,
+            150
+          );
+
+          localVersionRef.current[targetDayId] = finalVersion;
+          committedGenRef.current[targetDayId] = Math.max(
+            committedGenRef.current[targetDayId],
+            publishGen
+          );
+
+          const confirmedPublished: DailyScheduleData = {
+            ...latestDay,
+            draftRows: sanitizedRows,
+            publishedRows: sanitizedRows,
+            hasUnpublishedChanges: false,
             version: finalVersion,
-          });
+            publishedAt: publishTimestamp,
+          };
 
-          transaction.set(publicDocRef, publicPayload);
-        });
-      } catch {
-        // Direct setDoc fallback if transaction fails
-        await setDoc(scheduleDocRef, staffPayload);
-        await setDoc(publicDocRef, publicPayload);
-      }
+          confirmedSchedulesRef.current = {
+            ...confirmedSchedulesRef.current,
+            [targetDayId]: confirmedPublished,
+          };
 
-      localVersionRef.current[selectedDay] = finalVersion;
-      setSaveStatus('saved');
-      saveStatusRef.current = 'saved';
+          setSchedules((prev) => ({
+            ...prev,
+            [targetDayId]: confirmedPublished,
+          }));
 
-      await showLocalNotification(
-        `تحديث جدول يوم ${currentDay.dayLabel}`,
-        `تم اعتماد ونشر جدول عيادات يوم ${currentDay.dayLabel} (${sanitizedRows.length} عيادات) للجمهور بنجاح.`
-      );
+          await showLocalNotification(
+            `تحديث جدول يوم ${latestDay.dayLabel}`,
+            `تم اعتماد ونشر جدول عيادات يوم ${latestDay.dayLabel} (${sanitizedRows.length} عيادات) للجمهور بنجاح.`
+          );
 
-      try {
-        await appendAuditLog(
-          'PUBLISH_DAY',
-          selectedDay,
-          currentDay.dayLabel,
-          `اعتماد ونشر جدول يوم ${currentDay.dayLabel} للجمهور (${sanitizedRows.length} عيادات)`
+          try {
+            await appendAuditLog(
+              'PUBLISH_DAY',
+              targetDayId,
+              latestDay.dayLabel,
+              `اعتماد ونشر جدول يوم ${latestDay.dayLabel} للجمهور (${sanitizedRows.length} عيادات)`
+            );
+          } catch {
+            // Non-blocking
+          }
+        } catch (err: unknown) {
+          console.error('Publish failed:', err);
+          committedGenRef.current[targetDayId] = dirtyGenRef.current[targetDayId];
+          const formatted = formatFirestoreCommitError(err, latestDay.dayLabel);
+          setAuthErrorBanner(formatted.message);
+          setSaveStatus('error');
+          saveStatusRef.current = 'error';
+
+          const rollbackDay =
+            confirmedSchedulesRef.current[targetDayId] || currentDay;
+          setSchedules((prev) => ({
+            ...prev,
+            [targetDayId]: rollbackDay,
+          }));
+        }
+      })
+      .finally(() => {
+        inFlightCountRef.current[targetDayId] = Math.max(
+          0,
+          inFlightCountRef.current[targetDayId] - 1
         );
-      } catch {
-        // Non-blocking
-      }
-    } catch (err) {
-      console.error('Publish failed:', err);
-      setSchedules((prev) => ({
-        ...prev,
-        [selectedDay]: currentDay,
-      }));
-      setSaveStatus('error');
-      saveStatusRef.current = 'error';
-      setAuthErrorBanner(
-        'حدث خطأ أثناء اعتماد ونشر الجدول للجمهور في قاعدة البيانات.'
-      );
-    }
+        if (!isDaySavingOrPending(targetDayId)) {
+          if (
+            saveStatusRef.current !== 'error' &&
+            saveStatusRef.current !== 'conflict'
+          ) {
+            setSaveStatus('saved');
+            saveStatusRef.current = 'saved';
+          }
+        }
+      });
+
+    daySaveQueueRef.current[targetDayId] = nextPromise;
+    await nextPromise;
   };
 
   /**
@@ -973,7 +1285,7 @@ export default function App() {
       // 3. Schedules & PublicSchedules for all 7 days
       for (const day of DAYS_LIST) {
         const scheduleSnap = await getDoc(doc(db, 'schedules', day.id));
-        const daySched = schedules[day.id];
+        const daySched = schedulesRef.current[day.id];
         const draftRows = normalizeSortOrders(daySched?.draftRows || []).map(
           (r, i) => sanitizeRowForFirestore(r, i)
         );
@@ -1040,12 +1352,12 @@ export default function App() {
       ? currentSchedule.publishedRows
       : currentSchedule.draftRows;
 
+  // Functional row handlers building on schedulesRef.current (Requirement 1)
   const handleAddRow = (input: Omit<ScheduleRow, 'id' | 'sortOrder'>) => {
     if (!userCanEditSelectedDay) return;
-    const nextRows = addScheduleRow(currentSchedule.draftRows, input);
-    commitDayScheduleChange(
+    mutateDayScheduleDraft(
       selectedDay,
-      nextRows,
+      (prevRows) => addScheduleRow(prevRows, input),
       'CREATE_ROW',
       `إضافة عيادة «${input.clinicName}» (${input.doctorName})`
     );
@@ -1056,41 +1368,32 @@ export default function App() {
     patch: Partial<Omit<ScheduleRow, 'id' | 'sortOrder'>>
   ) => {
     if (!userCanEditSelectedDay) return;
-    const nextRows = updateScheduleRow(
-      currentSchedule.draftRows,
-      rowId,
-      patch
-    );
-    commitDayScheduleChange(
+    mutateDayScheduleDraft(
       selectedDay,
-      nextRows,
+      (prevRows) => updateScheduleRow(prevRows, rowId, patch),
       'UPDATE_ROW',
-      `تعديل بيانات عيادة في يوم ${currentSchedule.dayLabel}`
+      `تعديل بيانات عيادة في يوم ${schedulesRef.current[selectedDay]?.dayLabel || ''}`
     );
   };
 
   const handleDeleteRow = (rowId: string) => {
     if (!userCanEditSelectedDay) return;
-    const target = currentSchedule.draftRows.find((r) => r.id === rowId);
-    const nextRows = deleteScheduleRow(currentSchedule.draftRows, rowId);
-    commitDayScheduleChange(
+    mutateDayScheduleDraft(
       selectedDay,
-      nextRows,
+      (prevRows) => deleteScheduleRow(prevRows, rowId),
       'DELETE_ROW',
-      `حذف عيادة «${target?.clinicName || rowId}»`
+      (prevRows) => {
+        const target = prevRows.find((r) => r.id === rowId);
+        return `حذف عيادة «${target?.clinicName || rowId}»`;
+      }
     );
   };
 
   const handleMoveRow = (rowId: string, direction: 'up' | 'down') => {
     if (!userCanEditSelectedDay) return;
-    const nextRows = moveScheduleRow(
-      currentSchedule.draftRows,
-      rowId,
-      direction
-    );
-    commitDayScheduleChange(
+    mutateDayScheduleDraft(
       selectedDay,
-      nextRows,
+      (prevRows) => moveScheduleRow(prevRows, rowId, direction),
       'REORDER_ROWS',
       `تحريك موعد ${direction === 'up' ? 'لأعلى' : 'لأسفل'}`
     );
@@ -1098,14 +1401,9 @@ export default function App() {
 
   const handleReorderRows = (fromIndex: number, toIndex: number) => {
     if (!userCanEditSelectedDay) return;
-    const nextRows = reorderScheduleRows(
-      currentSchedule.draftRows,
-      fromIndex,
-      toIndex
-    );
-    commitDayScheduleChange(
+    mutateDayScheduleDraft(
       selectedDay,
-      nextRows,
+      (prevRows) => reorderScheduleRows(prevRows, fromIndex, toIndex),
       'REORDER_ROWS',
       `إعادة ترتيب الصفوف من #${fromIndex + 1} إلى #${toIndex + 1}`
     );
@@ -1113,28 +1411,27 @@ export default function App() {
 
   const handleCopyRowToDay = (row: ScheduleRow, targetDayId: DayId) => {
     if (!canUserEditDay(activeRole, allowedDays, targetDayId)) return;
-    const targetSchedule = schedules[targetDayId];
-    const nextTargetRows = copyRowToDay(targetSchedule.draftRows, row);
-    commitDayScheduleChange(
+    const sourceLabel = schedulesRef.current[selectedDay]?.dayLabel || '';
+    const targetLabel = schedulesRef.current[targetDayId]?.dayLabel || '';
+    mutateDayScheduleDraft(
       targetDayId,
-      nextTargetRows,
+      (prevTargetRows) => copyRowToDay(prevTargetRows, row),
       'COPY_ROW',
-      `نسخ عيادة «${row.clinicName}» من يوم ${currentSchedule.dayLabel} إلى يوم ${targetSchedule.dayLabel}`
+      `نسخ عيادة «${row.clinicName}» من يوم ${sourceLabel} إلى يوم ${targetLabel}`
     );
   };
 
   const handleCopyDayToDay = (targetDayId: DayId) => {
     if (!canUserEditDay(activeRole, allowedDays, targetDayId)) return;
-    const targetSchedule = schedules[targetDayId];
-    const copiedRows = copyFullDayRows(
-      currentSchedule.draftRows,
-      targetDayId
-    );
-    commitDayScheduleChange(
+    const sourceRows = schedulesRef.current[selectedDay]?.draftRows || [];
+    const sourceLabel = schedulesRef.current[selectedDay]?.dayLabel || '';
+    const targetLabel = schedulesRef.current[targetDayId]?.dayLabel || '';
+    const copiedRows = copyFullDayRows(sourceRows, targetDayId);
+    mutateDayScheduleDraft(
       targetDayId,
-      copiedRows,
+      () => copiedRows,
       'COPY_DAY',
-      `نسخ جدول يوم ${currentSchedule.dayLabel} بالكامل (${copiedRows.length} عيادات) إلى يوم ${targetSchedule.dayLabel}`
+      `نسخ جدول يوم ${sourceLabel} بالكامل (${copiedRows.length} عيادات) إلى يوم ${targetLabel}`
     );
   };
 
@@ -1146,29 +1443,30 @@ export default function App() {
       ...prev,
       [selectedDay]: prev[selectedDay].slice(0, -1),
     }));
-    commitDayScheduleChange(
+    mutateDayScheduleDraft(
       selectedDay,
-      previousRows,
+      () => previousRows,
       'UNDO',
-      `التراجع عن آخر تعديل في جدول يوم ${currentSchedule.dayLabel}`,
+      `التراجع عن آخر تعديل في جدول يوم ${schedulesRef.current[selectedDay]?.dayLabel || ''}`,
       false
     );
   };
 
   const handleClearDay = () => {
     if (!userCanEditSelectedDay) return;
-    const currentDay = schedules[selectedDay];
+    if (isDaySavingOrPending(selectedDay)) return;
+    const currentDay = schedulesRef.current[selectedDay];
     if (!currentDay || currentDay.draftRows.length === 0) return;
     if (
       window.confirm(
-        `هل تريد مسح جميع عيادات يوم ${currentDay.dayLabel} (${currentDay.draftRows.length} عيادات) من السحابة وقاعدة البيانات؟ يمكنك التراجع عن هذا الإجراء في أي وقت باستخدام زر «تراجع».`
+        `هل تريد مسح جميع عيادات مسودة يوم ${currentDay.dayLabel} (${currentDay.draftRows.length} عيادات)؟ لن يتأثر الجدول المنشور للجمهور إلا بعد الضغط على «اعتماد ونشر»، ويمكنك التراجع باستخدام زر «تراجع».`
       )
     ) {
-      commitDayScheduleChange(
+      mutateDayScheduleDraft(
         selectedDay,
-        [],
+        () => [],
         'DELETE_ROW',
-        `مسح جميع عيادات يوم ${currentDay.dayLabel} (${currentDay.draftRows.length} عيادات) للبدء بجدول نظيف`
+        `مسح جميع عيادات مسودة يوم ${currentDay.dayLabel} (${currentDay.draftRows.length} عيادات)`
       );
     }
   };
@@ -1304,7 +1602,7 @@ export default function App() {
 
   const handleResolveConflict = (resolution: 'merge' | 'remote' | 'local') => {
     if (!conflict) return;
-    let resolvedRows: ScheduleRow[] = currentSchedule.draftRows;
+    let resolvedRows: ScheduleRow[] = schedulesRef.current[selectedDay]?.draftRows || [];
     if (resolution === 'merge') {
       const mergeResult = mergeConflictingRowsThreeWay(
         conflict.baseRows || [],
@@ -1317,10 +1615,12 @@ export default function App() {
     } else {
       resolvedRows = conflict.localRows;
     }
+    localVersionRef.current[selectedDay] =
+      conflict.remoteSchedule.version || localVersionRef.current[selectedDay];
     setConflict(null);
-    commitDayScheduleChange(
+    mutateDayScheduleDraft(
       selectedDay,
-      resolvedRows,
+      () => resolvedRows,
       'UPDATE_ROW',
       `حل تعارض التعديلات المتزامنة`
     );
@@ -1937,6 +2237,9 @@ export default function App() {
               onMoveRow={handleMoveRow}
               onCopyRowToDay={handleCopyRowToDay}
               onClearDay={handleClearDay}
+              isSaving={saveStatus === 'saving'}
+              hasUnpublishedChanges={currentSchedule.hasUnpublishedChanges}
+              onPublishDay={handlePublishDay}
             />
           </div>
         </div>

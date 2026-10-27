@@ -60,6 +60,19 @@ service cloud.firestore {
       return day in ['saturday', 'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday'];
     }
 
+    // Validate all 7 elements (indices 0..6) of allowedDays (Requirement 6c)
+    function isValidAllowedDaysList(days) {
+      return days is list &&
+        days.size() <= 7 &&
+        (days.size() <= 0 || isValidAllowedDay(days[0])) &&
+        (days.size() <= 1 || isValidAllowedDay(days[1])) &&
+        (days.size() <= 2 || isValidAllowedDay(days[2])) &&
+        (days.size() <= 3 || isValidAllowedDay(days[3])) &&
+        (days.size() <= 4 || isValidAllowedDay(days[4])) &&
+        (days.size() <= 5 || isValidAllowedDay(days[5])) &&
+        (days.size() <= 6 || isValidAllowedDay(days[6]));
+    }
+
     // 3. Entity Validation Blueprints
     function isValidCenterSettings(data) {
       return data.keys().hasAll([
@@ -100,10 +113,94 @@ service cloud.firestore {
         row.sortOrder is int && row.sortOrder >= 0 && row.sortOrder <= 500;
     }
 
+    // Exhaustive per-index validation for all rows 0..59 (Requirement 6b)
+    function isValidRowsBatch0(rows) {
+      return (rows.size() <= 0 || isValidRowItem(rows[0])) &&
+        (rows.size() <= 1 || isValidRowItem(rows[1])) &&
+        (rows.size() <= 2 || isValidRowItem(rows[2])) &&
+        (rows.size() <= 3 || isValidRowItem(rows[3])) &&
+        (rows.size() <= 4 || isValidRowItem(rows[4])) &&
+        (rows.size() <= 5 || isValidRowItem(rows[5])) &&
+        (rows.size() <= 6 || isValidRowItem(rows[6])) &&
+        (rows.size() <= 7 || isValidRowItem(rows[7])) &&
+        (rows.size() <= 8 || isValidRowItem(rows[8])) &&
+        (rows.size() <= 9 || isValidRowItem(rows[9]));
+    }
+
+    function isValidRowsBatch1(rows) {
+      return (rows.size() <= 10 || isValidRowItem(rows[10])) &&
+        (rows.size() <= 11 || isValidRowItem(rows[11])) &&
+        (rows.size() <= 12 || isValidRowItem(rows[12])) &&
+        (rows.size() <= 13 || isValidRowItem(rows[13])) &&
+        (rows.size() <= 14 || isValidRowItem(rows[14])) &&
+        (rows.size() <= 15 || isValidRowItem(rows[15])) &&
+        (rows.size() <= 16 || isValidRowItem(rows[16])) &&
+        (rows.size() <= 17 || isValidRowItem(rows[17])) &&
+        (rows.size() <= 18 || isValidRowItem(rows[18])) &&
+        (rows.size() <= 19 || isValidRowItem(rows[19]));
+    }
+
+    function isValidRowsBatch2(rows) {
+      return (rows.size() <= 20 || isValidRowItem(rows[20])) &&
+        (rows.size() <= 21 || isValidRowItem(rows[21])) &&
+        (rows.size() <= 22 || isValidRowItem(rows[22])) &&
+        (rows.size() <= 23 || isValidRowItem(rows[23])) &&
+        (rows.size() <= 24 || isValidRowItem(rows[24])) &&
+        (rows.size() <= 25 || isValidRowItem(rows[25])) &&
+        (rows.size() <= 26 || isValidRowItem(rows[26])) &&
+        (rows.size() <= 27 || isValidRowItem(rows[27])) &&
+        (rows.size() <= 28 || isValidRowItem(rows[28])) &&
+        (rows.size() <= 29 || isValidRowItem(rows[29]));
+    }
+
+    function isValidRowsBatch3(rows) {
+      return (rows.size() <= 30 || isValidRowItem(rows[30])) &&
+        (rows.size() <= 31 || isValidRowItem(rows[31])) &&
+        (rows.size() <= 32 || isValidRowItem(rows[32])) &&
+        (rows.size() <= 33 || isValidRowItem(rows[33])) &&
+        (rows.size() <= 34 || isValidRowItem(rows[34])) &&
+        (rows.size() <= 35 || isValidRowItem(rows[35])) &&
+        (rows.size() <= 36 || isValidRowItem(rows[36])) &&
+        (rows.size() <= 37 || isValidRowItem(rows[37])) &&
+        (rows.size() <= 38 || isValidRowItem(rows[38])) &&
+        (rows.size() <= 39 || isValidRowItem(rows[39]));
+    }
+
+    function isValidRowsBatch4(rows) {
+      return (rows.size() <= 40 || isValidRowItem(rows[40])) &&
+        (rows.size() <= 41 || isValidRowItem(rows[41])) &&
+        (rows.size() <= 42 || isValidRowItem(rows[42])) &&
+        (rows.size() <= 43 || isValidRowItem(rows[43])) &&
+        (rows.size() <= 44 || isValidRowItem(rows[44])) &&
+        (rows.size() <= 45 || isValidRowItem(rows[45])) &&
+        (rows.size() <= 46 || isValidRowItem(rows[46])) &&
+        (rows.size() <= 47 || isValidRowItem(rows[47])) &&
+        (rows.size() <= 48 || isValidRowItem(rows[48])) &&
+        (rows.size() <= 49 || isValidRowItem(rows[49]));
+    }
+
+    function isValidRowsBatch5(rows) {
+      return (rows.size() <= 50 || isValidRowItem(rows[50])) &&
+        (rows.size() <= 51 || isValidRowItem(rows[51])) &&
+        (rows.size() <= 52 || isValidRowItem(rows[52])) &&
+        (rows.size() <= 53 || isValidRowItem(rows[53])) &&
+        (rows.size() <= 54 || isValidRowItem(rows[54])) &&
+        (rows.size() <= 55 || isValidRowItem(rows[55])) &&
+        (rows.size() <= 56 || isValidRowItem(rows[56])) &&
+        (rows.size() <= 57 || isValidRowItem(rows[57])) &&
+        (rows.size() <= 58 || isValidRowItem(rows[58])) &&
+        (rows.size() <= 59 || isValidRowItem(rows[59]));
+    }
+
     function isValidRowsList(rows) {
       return rows is list &&
         rows.size() <= 60 &&
-        (rows.size() == 0 || isValidRowItem(rows[0]));
+        isValidRowsBatch0(rows) &&
+        isValidRowsBatch1(rows) &&
+        isValidRowsBatch2(rows) &&
+        isValidRowsBatch3(rows) &&
+        isValidRowsBatch4(rows) &&
+        isValidRowsBatch5(rows);
     }
 
     function isValidPublicSchedule(data) {
@@ -143,8 +240,7 @@ service cloud.firestore {
         data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
         data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
         data.role is string && data.role in ['ADMIN', 'EDITOR'] &&
-        data.allowedDays is list && data.allowedDays.size() <= 7 &&
-        (data.allowedDays.size() == 0 || isValidAllowedDay(data.allowedDays[0])) &&
+        isValidAllowedDaysList(data.allowedDays) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -180,18 +276,21 @@ service cloud.firestore {
     }
 
     match /publicSchedules/{dayId} {
-      // Public visitors can read approved schedules
+      // Public visitors read ONLY approved schedules from publicSchedules/{dayId}
       allow get, list: if true;
       allow create, update: if isSignedIn() && isValidId(dayId) && isEditorForDay(dayId) && isValidPublicSchedule(incoming());
       allow delete: if false;
     }
 
     match /schedules/{dayId} {
-      // Authorized staff can read; public visitors can also read if document is missing or isPublic is true
-      allow get: if isStaff() || resource == null || (resource.data.isPublic == true);
-      allow list: if isStaff() || resource == null || (resource.data.isPublic == true);
+      // Requirement 6a & 6d: Staff-only read access; version increment enforced on update for editors
+      allow get: if isValidId(dayId) && isStaff();
+      allow list: if isStaff();
       allow create: if isSignedIn() && isValidId(dayId) && isEditorForDay(dayId) && isValidDailySchedule(incoming()) && incoming().dayId == dayId;
-      allow update: if isSignedIn() && isValidId(dayId) && isEditorForDay(dayId) && isValidDailySchedule(incoming()) && incoming().dayId == dayId;
+      allow update: if isSignedIn() && isValidId(dayId) && isEditorForDay(dayId) && isValidDailySchedule(incoming()) &&
+        incoming().dayId == existing().dayId && (
+          isAdmin() || incoming().version == existing().version + 1
+        );
       allow delete: if false;
     }
 

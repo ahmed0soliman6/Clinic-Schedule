@@ -923,5 +923,433 @@ export function deleteUserFromList(
   };
 }
 
+/**
+ * Snapshot guard (Requirement 2):
+ * Rejects any incoming snapshot when:
+ * (a) A save or debounced mutation is currently active for the same day
+ * (b) snap.metadata.hasPendingWrites is true
+ * (c) remote.version < localVersion for this day
+ */
+export function shouldAcceptIncomingSnapshot(params: {
+  isSavingOrPendingForDay: boolean;
+  hasPendingWrites: boolean;
+  remoteVersion: number;
+  localVersion: number;
+}): boolean {
+  if (params.isSavingOrPendingForDay) return false;
+  if (params.hasPendingWrites) return false;
+  const remoteVer = typeof params.remoteVersion === 'number' ? params.remoteVersion : 0;
+  const localVer = typeof params.localVersion === 'number' ? params.localVersion : 1;
+  if (remoteVer < localVer) return false;
+  return true;
+}
 
+/**
+ * Checks whether a Firestore transaction/commit error is transient (`aborted` or `unavailable`)
+ * and should be retried with exponential backoff (Requirement 3).
+ */
+export function isRetryableFirestoreError(err: unknown): boolean {
+  if (!err) return false;
+  const code = (err as { code?: string })?.code?.toLowerCase() || '';
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  if (msg.includes('concurrent_conflict:')) return false;
+  if (
+    code === 'aborted' ||
+    code === 'unavailable' ||
+    code === 'firestore/aborted' ||
+    code === 'firestore/unavailable' ||
+    msg.includes('aborted') ||
+    msg.includes('unavailable') ||
+    msg.includes('failed-precondition')
+  ) {
+    return true;
+  }
+  return false;
+}
 
+/**
+ * Retries an async Firestore transaction up to `maxRetries` times (default 3)
+ * with exponential backoff when `aborted` or `unavailable` occurs (Requirement 3).
+ */
+export async function executeWithRetry<T>(
+  operation: (attempt: number) => Promise<T>,
+  maxRetries = 3,
+  baseDelayMs = 150
+): Promise<T> {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await operation(attempt);
+    } catch (err: unknown) {
+      if (attempt < maxRetries && isRetryableFirestoreError(err)) {
+        const delay = baseDelayMs * Math.pow(2, attempt);
+        attempt += 1;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+/**
+ * Extracts the real Firestore error cause (permission-denied / offline / conflict / aborted)
+ * for clear display in the persistent error banner (Requirement 3).
+ */
+export function formatFirestoreCommitError(
+  err: unknown,
+  dayLabel: string
+): { code: string; message: string } {
+  const rawCode = (err as { code?: string })?.code || '';
+  let rawMsg = err instanceof Error ? err.message : String(err);
+
+  // If wrapped in JSON by handleFirestoreError, unwrap error message
+  if (rawMsg.startsWith('{') && rawMsg.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(rawMsg);
+      if (parsed.error) rawMsg = String(parsed.error);
+    } catch {
+      // Keep original
+    }
+  }
+
+  const lower = `${rawCode} ${rawMsg}`.toLowerCase();
+
+  if (rawMsg.startsWith('CONCURRENT_CONFLICT:')) {
+    return {
+      code: 'conflict',
+      message: `تعارض إصدارات متزامن (conflict) في جدول يوم ${dayLabel}: قام مستخدم آخر بتحديث الجدول في نفس الوقت.`,
+    };
+  }
+
+  if (
+    lower.includes('permission-denied') ||
+    lower.includes('missing or insufficient permissions')
+  ) {
+    return {
+      code: 'permission-denied',
+      message: `خطأ صلاحيات (permission-denied) أثناء حفظ جدول يوم ${dayLabel}: ليس لديك صلاحية الكتابة أو أن البيانات تخالف قواعد الأمان. تم إرجاع الجدول لآخر نسخة مؤكدة.`,
+    };
+  }
+
+  if (
+    lower.includes('unavailable') ||
+    lower.includes('offline') ||
+    lower.includes('network')
+  ) {
+    return {
+      code: 'offline',
+      message: `خطأ اتصال (offline / unavailable) أثناء حفظ جدول يوم ${dayLabel}: تعذر الوصول إلى خادم Firestore بعد عدة محاولات. تم إرجاع الجدول لآخر نسخة مؤكدة.`,
+    };
+  }
+
+  if (lower.includes('aborted')) {
+    return {
+      code: 'aborted',
+      message: `توقف المعاملة (aborted) أثناء حفظ جدول يوم ${dayLabel} بسبب تداخل العمليات بعد 3 محاولات. تم إرجاع الجدول لآخر نسخة مؤكدة.`,
+    };
+  }
+
+  return {
+    code: rawCode || 'unknown',
+    message: `فشل حفظ جدول يوم ${dayLabel} (${rawCode || rawMsg}). تم إرجاع الجدول لآخر نسخة مؤكدة.`,
+  };
+}
+
+/**
+ * Pure draft mutation helper (Requirement 5):
+ * Updates ONLY `draftRows` and sets `hasUnpublishedChanges` without touching `publishedRows`.
+ */
+export function applyDraftMutationToDay(
+  currentDay: DailyScheduleData,
+  updater: (prevRows: ScheduleRow[]) => ScheduleRow[],
+  editorInfo: { uid: string; email: string; displayName: string }
+): DailyScheduleData {
+  const rawNextRows = updater(currentDay.draftRows || []);
+  const sanitizedDraft = normalizeSortOrders(rawNextRows)
+    .slice(0, BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY)
+    .map((r, i) => sanitizeRowForFirestore(r, i));
+
+  const publishedRows = currentDay.publishedRows || [];
+  const hasDiff = !areRowsEqual(sanitizedDraft, publishedRows);
+
+  return {
+    ...currentDay,
+    draftRows: sanitizedDraft,
+    // Strictly preserve publishedRows untouched during draft edits
+    publishedRows,
+    hasUnpublishedChanges: hasDiff,
+    updatedBy: editorInfo.uid,
+    updatedByEmail: editorInfo.email,
+    updatedByName: editorInfo.displayName.slice(0, 120),
+  };
+}
+
+/**
+ * Pure publish helper (Requirement 5):
+ * Copies `draftRows` to `publishedRows` and clears `hasUnpublishedChanges`.
+ */
+export function applyPublishToDay(
+  currentDay: DailyScheduleData,
+  publishIso: string,
+  nextVersion: number,
+  editorInfo: { uid: string; email: string; displayName: string }
+): DailyScheduleData {
+  const sanitizedRows = normalizeSortOrders(currentDay.draftRows || [])
+    .slice(0, BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY)
+    .map((r, i) => sanitizeRowForFirestore(r, i));
+
+  return {
+    ...currentDay,
+    draftRows: sanitizedRows,
+    publishedRows: sanitizedRows,
+    hasUnpublishedChanges: false,
+    isPublic: true,
+    version: nextVersion,
+    publishedAt: publishIso,
+    updatedBy: editorInfo.uid,
+    updatedByEmail: editorInfo.email,
+    updatedByName: editorInfo.displayName.slice(0, 120),
+  };
+}
+
+/**
+ * Per-Day Save Queue + 700ms Debounce + Snapshot Guard Controller (Requirements 1, 2, 3, 4, 5).
+ * Ensures:
+ * - Every mutation builds functionally `(prevRows) => nextRows` on the latest `schedulesByDay[dayId].draftRows`.
+ * - Rapid mutations within `debounceMs` (700ms) coalesce into a single transaction write.
+ * - Per-day promise queue guarantees no commit starts before the previous commit for that day finishes.
+ * - Incoming snapshots are ignored while a day has pending debounce or in-flight commit, or if `hasPendingWrites`, or if `remote.version < localVersion`.
+ */
+export interface PerDaySyncControllerOptions {
+  initialSchedules: Record<DayId, DailyScheduleData>;
+  debounceMs?: number;
+  commitDraftToRemote: (params: {
+    dayId: DayId;
+    daySnapshot: DailyScheduleData;
+    baseVersion: number;
+  }) => Promise<{ committedVersion: number; serverDoc?: DailyScheduleData }>;
+  onSchedulesChange?: (schedules: Record<DayId, DailyScheduleData>) => void;
+  onSaveStatusChange?: (dayId: DayId, status: 'saved' | 'saving' | 'unsaved' | 'error' | 'conflict') => void;
+  onError?: (dayId: DayId, err: unknown, rolledBackTo: DailyScheduleData) => void;
+}
+
+export function createPerDayScheduleSyncController(options: PerDaySyncControllerOptions) {
+  const debounceMs = options.debounceMs ?? 700;
+
+  const schedulesByDay: Record<DayId, DailyScheduleData> = {
+    ...options.initialSchedules,
+  };
+  const confirmedByDay: Record<DayId, DailyScheduleData> = {
+    ...options.initialSchedules,
+  };
+  const localVersionByDay: Record<DayId, number> = {
+    saturday: options.initialSchedules.saturday?.version || 1,
+    sunday: options.initialSchedules.sunday?.version || 1,
+    monday: options.initialSchedules.monday?.version || 1,
+    tuesday: options.initialSchedules.tuesday?.version || 1,
+    wednesday: options.initialSchedules.wednesday?.version || 1,
+    thursday: options.initialSchedules.thursday?.version || 1,
+    friday: options.initialSchedules.friday?.version || 1,
+  };
+  const inFlightCountByDay: Record<DayId, number> = {
+    saturday: 0,
+    sunday: 0,
+    monday: 0,
+    tuesday: 0,
+    wednesday: 0,
+    thursday: 0,
+    friday: 0,
+  };
+  const pendingTimerByDay: Record<DayId, ReturnType<typeof setTimeout> | null> = {
+    saturday: null,
+    sunday: null,
+    monday: null,
+    tuesday: null,
+    wednesday: null,
+    thursday: null,
+    friday: null,
+  };
+  const pendingFlushResolvers: Record<DayId, Array<() => void>> = {
+    saturday: [],
+    sunday: [],
+    monday: [],
+    tuesday: [],
+    wednesday: [],
+    thursday: [],
+    friday: [],
+  };
+  const queueByDay: Record<DayId, Promise<void>> = {
+    saturday: Promise.resolve(),
+    sunday: Promise.resolve(),
+    monday: Promise.resolve(),
+    tuesday: Promise.resolve(),
+    wednesday: Promise.resolve(),
+    thursday: Promise.resolve(),
+    friday: Promise.resolve(),
+  };
+  const dirtyGenerationByDay: Record<DayId, number> = {
+    saturday: 0,
+    sunday: 0,
+    monday: 0,
+    tuesday: 0,
+    wednesday: 0,
+    thursday: 0,
+    friday: 0,
+  };
+  const committedGenerationByDay: Record<DayId, number> = {
+    saturday: 0,
+    sunday: 0,
+    monday: 0,
+    tuesday: 0,
+    wednesday: 0,
+    thursday: 0,
+    friday: 0,
+  };
+
+  function isDayBusy(dayId: DayId): boolean {
+    return (
+      inFlightCountByDay[dayId] > 0 ||
+      pendingTimerByDay[dayId] !== null ||
+      dirtyGenerationByDay[dayId] > committedGenerationByDay[dayId]
+    );
+  }
+
+  function enqueueDayCommit(dayId: DayId, targetGen: number): Promise<void> {
+    inFlightCountByDay[dayId] += 1;
+    options.onSaveStatusChange?.(dayId, 'saving');
+
+    const nextPromise = queueByDay[dayId]
+      .catch(() => {
+        // Keep queue alive after prior failure
+      })
+      .then(async () => {
+        // If a newer debounce cycle already superseded or committed this generation, skip redundant write
+        if (committedGenerationByDay[dayId] >= targetGen) {
+          return;
+        }
+        const currentGen = dirtyGenerationByDay[dayId];
+        const snapshotToCommit = schedulesByDay[dayId];
+        const baseVersion = localVersionByDay[dayId] || snapshotToCommit.version || 1;
+
+        try {
+          const result = await options.commitDraftToRemote({
+            dayId,
+            daySnapshot: snapshotToCommit,
+            baseVersion,
+          });
+
+          localVersionByDay[dayId] = result.committedVersion;
+          committedGenerationByDay[dayId] = Math.max(
+            committedGenerationByDay[dayId],
+            currentGen
+          );
+
+          const confirmedDoc: DailyScheduleData = result.serverDoc || {
+            ...snapshotToCommit,
+            version: result.committedVersion,
+          };
+          confirmedByDay[dayId] = confirmedDoc;
+
+          // Only overwrite schedulesByDay if no newer local edits occurred while in flight
+          if (dirtyGenerationByDay[dayId] === currentGen) {
+            schedulesByDay[dayId] = confirmedDoc;
+            options.onSchedulesChange?.({ ...schedulesByDay });
+          }
+        } catch (err) {
+          // Rollback to last confirmed state for this day
+          committedGenerationByDay[dayId] = dirtyGenerationByDay[dayId];
+          const rollbackDoc = confirmedByDay[dayId];
+          schedulesByDay[dayId] = rollbackDoc;
+          options.onSchedulesChange?.({ ...schedulesByDay });
+          options.onSaveStatusChange?.(dayId, 'error');
+          options.onError?.(dayId, err, rollbackDoc);
+        }
+      })
+      .finally(() => {
+        inFlightCountByDay[dayId] = Math.max(0, inFlightCountByDay[dayId] - 1);
+        if (!isDayBusy(dayId)) {
+          options.onSaveStatusChange?.(dayId, 'saved');
+          const resolvers = pendingFlushResolvers[dayId].splice(0);
+          resolvers.forEach((r) => r());
+        }
+      });
+
+    queueByDay[dayId] = nextPromise;
+    return nextPromise;
+  }
+
+  function mutateDayDraft(
+    dayId: DayId,
+    updater: (prevRows: ScheduleRow[]) => ScheduleRow[],
+    editorInfo: { uid: string; email: string; displayName: string }
+  ): DailyScheduleData {
+    const currentDay = schedulesByDay[dayId];
+    const updatedDay = applyDraftMutationToDay(currentDay, updater, editorInfo);
+    schedulesByDay[dayId] = updatedDay;
+    dirtyGenerationByDay[dayId] += 1;
+    const gen = dirtyGenerationByDay[dayId];
+
+    options.onSchedulesChange?.({ ...schedulesByDay });
+    options.onSaveStatusChange?.(dayId, 'saving');
+
+    if (pendingTimerByDay[dayId] !== null) {
+      clearTimeout(pendingTimerByDay[dayId]!);
+      pendingTimerByDay[dayId] = null;
+    }
+
+    return new Promise<void>((resolve) => {
+      pendingFlushResolvers[dayId].push(resolve);
+      if (debounceMs <= 0) {
+        enqueueDayCommit(dayId, gen);
+      } else {
+        pendingTimerByDay[dayId] = setTimeout(() => {
+          pendingTimerByDay[dayId] = null;
+          enqueueDayCommit(dayId, dirtyGenerationByDay[dayId]);
+        }, debounceMs);
+      }
+    }) as unknown as DailyScheduleData & Promise<void>, updatedDay;
+  }
+
+  function receiveRemoteSnapshot(
+    dayId: DayId,
+    remoteDoc: DailyScheduleData,
+    metadata: { hasPendingWrites: boolean }
+  ): boolean {
+    const accepted = shouldAcceptIncomingSnapshot({
+      isSavingOrPendingForDay: isDayBusy(dayId),
+      hasPendingWrites: metadata.hasPendingWrites,
+      remoteVersion: remoteDoc.version || 1,
+      localVersion: localVersionByDay[dayId] || 1,
+    });
+
+    if (!accepted) {
+      return false;
+    }
+
+    localVersionByDay[dayId] = remoteDoc.version || 1;
+    confirmedByDay[dayId] = remoteDoc;
+    schedulesByDay[dayId] = remoteDoc;
+    options.onSchedulesChange?.({ ...schedulesByDay });
+    return true;
+  }
+
+  async function waitForDayIdle(dayId: DayId): Promise<void> {
+    if (!isDayBusy(dayId)) return;
+    await new Promise<void>((resolve) => {
+      pendingFlushResolvers[dayId].push(resolve);
+    });
+    await queueByDay[dayId];
+  }
+
+  return {
+    getSchedules: () => ({ ...schedulesByDay }),
+    getDaySchedule: (dayId: DayId) => schedulesByDay[dayId],
+    getConfirmedDaySchedule: (dayId: DayId) => confirmedByDay[dayId],
+    getLocalVersion: (dayId: DayId) => localVersionByDay[dayId],
+    isDayBusy,
+    mutateDayDraft,
+    receiveRemoteSnapshot,
+    waitForDayIdle,
+  };
+}

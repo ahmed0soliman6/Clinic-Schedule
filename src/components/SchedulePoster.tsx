@@ -49,6 +49,9 @@ interface SchedulePosterProps {
   onMoveRow?: (rowId: string, direction: 'up' | 'down') => void;
   onCopyRowToDay?: (row: ScheduleRow, targetDayId: DayId) => void;
   onClearDay?: () => void;
+  isSaving?: boolean;
+  hasUnpublishedChanges?: boolean;
+  onPublishDay?: () => void;
 }
 
 type ActiveCellPopup =
@@ -69,6 +72,9 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
   onMoveRow,
   onCopyRowToDay,
   onClearDay,
+  isSaving = false,
+  hasUnpublishedChanges = false,
+  onPublishDay,
 }) => {
   const orderedRows = normalizeSortOrders(rows);
   const [activePopup, setActivePopup] = useState<ActiveCellPopup>(null);
@@ -1012,28 +1018,74 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
 
           {/* Quick Controls at Bottom of Table (Hidden on Export) */}
           {showControls && (
-            <div data-export-ignore="true" className="mt-2 pt-1 flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={handleQuickAddRow}
-                data-testid="quick-add-row-btn"
-                className="flex-1 min-w-[200px] rounded-xl border-2 border-dashed border-purple-300 bg-purple-50/50 py-2.5 text-xs font-extrabold text-purple-800 hover:bg-purple-100/70 hover:border-purple-400 transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
-              >
-                <Plus className="w-4 h-4" />
-                <span>إضافة عيادة جديدة إلى جدول يوم {dayLabel}</span>
-              </button>
-
-              {orderedRows.length > 0 && onClearDay && (
+            <div data-export-ignore="true" className="mt-2 pt-1 space-y-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  onClick={onClearDay}
-                  data-testid="quick-clear-day-btn"
-                  title={`مسح جميع عيادات يوم ${dayLabel} من السحابة وقاعدة البيانات`}
-                  className="rounded-xl border border-rose-300 bg-rose-50 hover:bg-rose-100 px-3 py-2.5 text-xs font-extrabold text-rose-700 transition flex items-center justify-center gap-1.5 cursor-pointer shrink-0 shadow-xs"
+                  onClick={handleQuickAddRow}
+                  data-testid="quick-add-row-btn"
+                  className="flex-1 min-w-[180px] rounded-xl border-2 border-dashed border-purple-300 bg-purple-50/50 py-2.5 text-xs font-extrabold text-purple-800 hover:bg-purple-100/70 hover:border-purple-400 transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
                 >
-                  <Trash2 className="w-3.5 h-3.5 text-rose-600" />
-                  <span>مسح عيادات اليوم ({orderedRows.length})</span>
+                  <Plus className="w-4 h-4" />
+                  <span>إضافة عيادة جديدة إلى جدول يوم {dayLabel}</span>
                 </button>
+
+                {orderedRows.length > 0 && onClearDay && (
+                  <button
+                    type="button"
+                    disabled={isSaving}
+                    onClick={onClearDay}
+                    data-testid="quick-clear-day-btn"
+                    title={
+                      isSaving
+                        ? 'جارٍ الحفظ... يرجى الانتظار'
+                        : `مسح عيادات مسودة يوم ${dayLabel}`
+                    }
+                    className="rounded-xl border border-rose-300 bg-rose-50 hover:bg-rose-100 disabled:opacity-45 disabled:cursor-not-allowed px-3 py-2.5 text-xs font-extrabold text-rose-700 transition flex items-center justify-center gap-1.5 cursor-pointer shrink-0 shadow-xs"
+                  >
+                    <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+                    <span>
+                      {isSaving
+                        ? 'جارٍ الحفظ...'
+                        : `مسح عيادات اليوم (${orderedRows.length})`}
+                    </span>
+                  </button>
+                )}
+              </div>
+
+              {/* Draft & Saving Status Bar + Direct Publish Button */}
+              {(isSaving || hasUnpublishedChanges) && (
+                <div
+                  data-testid="poster-draft-status-bar"
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-300 bg-amber-50/90 px-3 py-2 text-xs font-extrabold text-amber-950"
+                >
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`h-2.5 w-2.5 rounded-full shrink-0 ${
+                        isSaving
+                          ? 'bg-amber-500 animate-pulse'
+                          : 'bg-emerald-500'
+                      }`}
+                    />
+                    <span>
+                      {isSaving
+                        ? 'جارٍ الحفظ في المسودة...'
+                        : 'مسودة غير منشورة للجمهور (محفوظة في مسودة الإدارة)'}
+                    </span>
+                  </div>
+
+                  {onPublishDay && (
+                    <button
+                      type="button"
+                      disabled={isSaving}
+                      onClick={onPublishDay}
+                      data-testid="quick-publish-day-btn"
+                      className="rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-1.5 text-xs font-black text-white transition cursor-pointer shadow-xs"
+                    >
+                      اعتماد ونشر للجمهور
+                    </button>
+                  )}
+                </div>
               )}
             </div>
           )}

@@ -31,8 +31,38 @@ import {
   sanitizeUsersList,
   upsertUserByEmail,
   deleteUserFromList,
+  shouldAcceptIncomingSnapshot,
+  isRetryableFirestoreError,
+  executeWithRetry,
+  formatFirestoreCommitError,
+  applyDraftMutationToDay,
+  applyPublishToDay,
+  createPerDayScheduleSyncController,
 } from './scheduleLogic';
-import { DailyScheduleData, ScheduleRow, UserProfile } from '../types/schedule';
+import { DailyScheduleData, DayId, ScheduleRow, UserProfile } from '../types/schedule';
+import fs from 'node:fs';
+import path from 'node:path';
+
+const INITIAL_SCHEDULES: Record<DayId, DailyScheduleData> = DAYS_LIST.reduce(
+  (acc, day) => {
+    acc[day.id] = {
+      dayId: day.id,
+      dayLabel: day.label,
+      dayOrder: day.order,
+      isPublic: true,
+      hasUnpublishedChanges: false,
+      version: 1,
+      draftRows: [],
+      publishedRows: [],
+      updatedBy: 'system',
+      updatedByEmail: PRIMARY_ADMIN_EMAIL,
+      updatedByName: 'مدير النظام',
+      publishedAt: '2026-01-01T00:00:00.000Z',
+    };
+    return acc;
+  },
+  {} as Record<DayId, DailyScheduleData>
+);
 
 const sampleRows: ScheduleRow[] = [
   {
@@ -470,3 +500,312 @@ test('Empty initial schedules start clean and undo stack tracks state transition
   assert.ok(revertedState);
   assert.equal(revertedState.length, 0);
 });
+
+test('Requirement 1, 2 & 4: 6 rapid consecutive deletes with delayed/stale snapshots never resurrect a deleted row', async () => {
+  const sixRows: ScheduleRow[] = Array.from({ length: 6 }, (_, i) => ({
+    id: `clinic-row-${i + 1}`,
+    clinicName: `عيادة ${i + 1}`,
+    doctorName: `د/ طبيب ${i + 1}`,
+    startTime: '4:00 م',
+    endTime: '6:00 م',
+    icon: 'stethoscope',
+    iconColor: '#6d28d9',
+    sortOrder: i,
+  }));
+
+  const initialSchedules = {
+    ...INITIAL_SCHEDULES,
+    saturday: {
+      ...INITIAL_SCHEDULES.saturday,
+      version: 10,
+      draftRows: sixRows,
+      publishedRows: sixRows,
+      hasUnpublishedChanges: false,
+    },
+  };
+
+  const committedPayloads: DailyScheduleData[] = [];
+
+  const controller = createPerDayScheduleSyncController({
+    initialSchedules,
+    debounceMs: 30, // Fast debounce for unit test speed
+    commitDraftToRemote: async ({ daySnapshot, baseVersion }) => {
+      // Simulate network latency while stale snapshots try to arrive
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      const nextVersion = baseVersion + 1;
+      const serverDoc: DailyScheduleData = {
+        ...daySnapshot,
+        version: nextVersion,
+      };
+      committedPayloads.push(serverDoc);
+      return { committedVersion: nextVersion, serverDoc };
+    },
+  });
+
+  const editor = {
+    uid: 'ahmed0soliman6_at_gmail_dot_com',
+    email: PRIMARY_ADMIN_EMAIL,
+    displayName: 'مدير النظام',
+  };
+
+  // Fire 6 rapid consecutive deletes without awaiting between clicks
+  for (let i = 1; i <= 6; i++) {
+    const targetId = `clinic-row-${i}`;
+    controller.mutateDayDraft(
+      'saturday',
+      (prevRows) => deleteScheduleRow(prevRows, targetId),
+      editor
+    );
+
+    // Simulate a stale/delayed onSnapshot arriving with old rows during rapid clicks
+    const staleSnapshotAccepted = controller.receiveRemoteSnapshot(
+      'saturday',
+      {
+        ...initialSchedules.saturday,
+        version: 10,
+        draftRows: sixRows.slice(i - 1), // Still contains rows that were just deleted
+      },
+      { hasPendingWrites: false }
+    );
+    assert.equal(
+      staleSnapshotAccepted,
+      false,
+      'Stale snapshot during active debounce/save MUST be rejected'
+    );
+  }
+
+  // Immediately after 6 rapid deletes, local draftRows is empty and publishedRows is untouched
+  assert.equal(controller.getDaySchedule('saturday').draftRows.length, 0);
+  assert.equal(controller.getDaySchedule('saturday').publishedRows.length, 6);
+  assert.equal(controller.getDaySchedule('saturday').hasUnpublishedChanges, true);
+
+  // While the commit is in-flight, simulate another snapshot with hasPendingWrites = true
+  await new Promise((resolve) => setTimeout(resolve, 45));
+  const pendingWriteAccepted = controller.receiveRemoteSnapshot(
+    'saturday',
+    {
+      ...initialSchedules.saturday,
+      version: 11,
+      draftRows: [sixRows[5]], // Bogus partial state
+    },
+    { hasPendingWrites: true }
+  );
+  assert.equal(pendingWriteAccepted, false);
+
+  // Wait for the per-day queue and debounce to finish
+  await controller.waitForDayIdle('saturday');
+
+  // Verify all 6 rapid deletes coalesced into a single Firestore transaction write
+  assert.equal(committedPayloads.length, 1);
+  assert.equal(committedPayloads[0].draftRows.length, 0);
+  assert.equal(controller.getDaySchedule('saturday').draftRows.length, 0);
+  assert.equal(controller.getLocalVersion('saturday'), 11);
+
+  // Even after save completes, an older late-arriving snapshot (version 10 < localVersion 11) is rejected
+  const lateOldSnapshotAccepted = controller.receiveRemoteSnapshot(
+    'saturday',
+    {
+      ...initialSchedules.saturday,
+      version: 10,
+      draftRows: sixRows,
+    },
+    { hasPendingWrites: false }
+  );
+  assert.equal(lateOldSnapshotAccepted, false);
+  assert.equal(controller.getDaySchedule('saturday').draftRows.length, 0);
+});
+
+test('Requirement 2: shouldAcceptIncomingSnapshot rejects busy, pending-write, and older-version snapshots', () => {
+  // (a) Reject when save or debounce is active for the same day
+  assert.equal(
+    shouldAcceptIncomingSnapshot({
+      isSavingOrPendingForDay: true,
+      hasPendingWrites: false,
+      remoteVersion: 5,
+      localVersion: 4,
+    }),
+    false
+  );
+
+  // (b) Reject when snap.metadata.hasPendingWrites is true
+  assert.equal(
+    shouldAcceptIncomingSnapshot({
+      isSavingOrPendingForDay: false,
+      hasPendingWrites: true,
+      remoteVersion: 5,
+      localVersion: 4,
+    }),
+    false
+  );
+
+  // (c) Reject when remote.version < localVersion
+  assert.equal(
+    shouldAcceptIncomingSnapshot({
+      isSavingOrPendingForDay: false,
+      hasPendingWrites: false,
+      remoteVersion: 3,
+      localVersion: 4,
+    }),
+    false
+  );
+
+  // Accept when idle, confirmed from server, and version >= localVersion
+  assert.equal(
+    shouldAcceptIncomingSnapshot({
+      isSavingOrPendingForDay: false,
+      hasPendingWrites: false,
+      remoteVersion: 4,
+      localVersion: 4,
+    }),
+    true
+  );
+});
+
+test('Requirement 3: executeWithRetry retries aborted/unavailable up to 3 times with backoff and formatFirestoreCommitError reports real causes', async () => {
+  let attempts = 0;
+  const result = await executeWithRetry(
+    async () => {
+      attempts += 1;
+      if (attempts < 3) {
+        const err = new Error('Transaction aborted due to contention') as Error & { code: string };
+        err.code = 'aborted';
+        throw err;
+      }
+      return 'committed-ok';
+    },
+    3,
+    5
+  );
+  assert.equal(result, 'committed-ok');
+  assert.equal(attempts, 3);
+
+  // Non-retryable permission-denied fails immediately on first attempt without retrying
+  let permAttempts = 0;
+  await assert.rejects(
+    async () => {
+      await executeWithRetry(
+        async () => {
+          permAttempts += 1;
+          const err = new Error('Missing or insufficient permissions.') as Error & { code: string };
+          err.code = 'permission-denied';
+          throw err;
+        },
+        3,
+        5
+      );
+    },
+    /Missing or insufficient permissions/
+  );
+  assert.equal(permAttempts, 1);
+  assert.equal(isRetryableFirestoreError({ code: 'aborted' }), true);
+  assert.equal(isRetryableFirestoreError({ code: 'unavailable' }), true);
+  assert.equal(isRetryableFirestoreError({ code: 'permission-denied' }), false);
+
+  const permFormatted = formatFirestoreCommitError(
+    { code: 'permission-denied', message: 'Missing or insufficient permissions.' },
+    'السبت'
+  );
+  assert.equal(permFormatted.code, 'permission-denied');
+  assert.ok(permFormatted.message.includes('permission-denied'));
+
+  const conflictFormatted = formatFirestoreCommitError(
+    new Error('CONCURRENT_CONFLICT:5'),
+    'السبت'
+  );
+  assert.equal(conflictFormatted.code, 'conflict');
+  assert.ok(conflictFormatted.message.includes('conflict'));
+});
+
+test('Requirement 5: Draft mutations never overwrite publishedRows until explicit publish', () => {
+  const initialDay: DailyScheduleData = {
+    ...INITIAL_SCHEDULES.saturday,
+    version: 3,
+    draftRows: sampleRows,
+    publishedRows: sampleRows,
+    hasUnpublishedChanges: false,
+  };
+  const editor = {
+    uid: 'ahmed0soliman6_at_gmail_dot_com',
+    email: PRIMARY_ADMIN_EMAIL,
+    displayName: 'مدير النظام',
+  };
+
+  // Clear day in draft -> draftRows becomes [], publishedRows remains 2 rows
+  const afterClearDraft = applyDraftMutationToDay(initialDay, () => [], editor);
+  assert.equal(afterClearDraft.draftRows.length, 0);
+  assert.equal(afterClearDraft.publishedRows.length, 2);
+  assert.equal(afterClearDraft.hasUnpublishedChanges, true);
+
+  // Add new row in draft -> draftRows has 1 row, publishedRows still has original 2 rows
+  const afterAddDraft = applyDraftMutationToDay(
+    afterClearDraft,
+    (prev) =>
+      addScheduleRow(
+        prev,
+        {
+          clinicName: 'الرمد',
+          doctorName: 'د/ سامح',
+          startTime: '5:00 م',
+          endTime: '7:00 م',
+          icon: 'eye',
+          iconColor: '#15803d',
+        },
+        'new-eye-row'
+      ),
+    editor
+  );
+  assert.equal(afterAddDraft.draftRows.length, 1);
+  assert.equal(afterAddDraft.publishedRows.length, 2);
+  assert.equal(afterAddDraft.hasUnpublishedChanges, true);
+
+  // Explicit publish copies draftRows to publishedRows and clears hasUnpublishedChanges
+  const afterPublish = applyPublishToDay(
+    afterAddDraft,
+    '2026-10-27T10:00:00.000Z',
+    4,
+    editor
+  );
+  assert.equal(afterPublish.draftRows.length, 1);
+  assert.equal(afterPublish.publishedRows.length, 1);
+  assert.equal(afterPublish.publishedRows[0].clinicName, 'الرمد');
+  assert.equal(afterPublish.hasUnpublishedChanges, false);
+  assert.equal(afterPublish.version, 4);
+});
+
+test('Requirement 6: firestore.rules enforces staff-only schedules read, 0..59 rows validation, 0..6 allowedDays validation, and version + 1 increment', () => {
+  const rulesPath = path.resolve(process.cwd(), 'firestore.rules');
+  const rulesContent = fs.readFileSync(rulesPath, 'utf8');
+
+  // (a) schedules/{dayId} get & list restricted to isStaff() only
+  assert.match(
+    rulesContent,
+    /match\s+\/schedules\/\{dayId\}\s*\{[\s\S]*?allow\s+get:\s+if\s+isValidId\(dayId\)\s+&&\s+isStaff\(\);/
+  );
+  assert.match(
+    rulesContent,
+    /match\s+\/schedules\/\{dayId\}\s*\{[\s\S]*?allow\s+list:\s+if\s+isStaff\(\);/
+  );
+
+  // (b) All 60 row positions (0..59) are validated via batch helpers
+  for (let i = 0; i < 60; i++) {
+    assert.ok(
+      rulesContent.includes(`isValidRowItem(rows[${i}])`),
+      `Expected firestore.rules to validate row index ${i}`
+    );
+  }
+
+  // (c) All 7 allowedDays positions (0..6) are validated
+  for (let i = 0; i < 7; i++) {
+    assert.ok(
+      rulesContent.includes(`isValidAllowedDay(days[${i}])`),
+      `Expected firestore.rules to validate allowedDays index ${i}`
+    );
+  }
+
+  // (d) Version increment check incoming().version == existing().version + 1 on schedules update
+  assert.ok(
+    rulesContent.includes('incoming().version == existing().version + 1'),
+    'Expected firestore.rules to enforce version + 1 on schedule updates'
+  );
+});
+
