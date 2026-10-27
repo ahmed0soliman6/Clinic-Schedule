@@ -4,10 +4,12 @@ import { getFirestore } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
 import type { ReminderSettings, UserProfile } from '../src/types/schedule.js';
 import {
+  computeTokenDocId,
   DEFAULT_REMINDER_SETTINGS,
   filterEligibleReminderTokens,
   formatReminderMessage,
   isWithinReminderWindow,
+  PUBLIC_SUBSCRIBER_EMAIL,
   resolveTargetDayId,
   StoredTokenEntry,
 } from '../src/utils/reminderLogic.js';
@@ -17,6 +19,7 @@ interface VercelRequestLike {
   method?: string;
   query?: Record<string, string | string[] | undefined>;
   headers: Record<string, string | string[] | undefined>;
+  body?: unknown;
 }
 
 interface VercelResponseLike {
@@ -49,6 +52,21 @@ function extractBearerToken(
   return trimmed.slice(7).trim() || null;
 }
 
+function parseRequestBody(body: unknown): Record<string, unknown> {
+  if (!body) return {};
+  if (typeof body === 'string') {
+    try {
+      return JSON.parse(body) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  }
+  if (typeof body === 'object') {
+    return body as Record<string, unknown>;
+  }
+  return {};
+}
+
 function isInvalidTokenError(err: unknown): boolean {
   const code = (err as { code?: string; errorInfo?: { code?: string } })?.code ||
     (err as { errorInfo?: { code?: string } })?.errorInfo?.code ||
@@ -73,6 +91,59 @@ export default async function handler(
     const db = getFirestore(adminApp);
     const messaging = getMessaging(adminApp);
     const adminAuth = getAuth(adminApp);
+
+    const rawAction = req.query?.action;
+    const action = Array.isArray(rawAction) ? rawAction[0] : rawAction;
+
+    // Public/External Device Subscription & Unsubscription via firebase-admin
+    if (req.method === 'POST' && action === 'subscribe') {
+      const payload = parseRequestBody(req.body);
+      const token = typeof payload.token === 'string' ? payload.token.trim() : '';
+      if (token.length < 10 || token.length > 4096) {
+        res.status(400).json({ error: 'رمز الإشعارات غير صالح.' });
+        return;
+      }
+      const docId = await computeTokenDocId(token);
+      const email =
+        typeof payload.email === 'string' && payload.email.trim()
+          ? payload.email.trim().toLowerCase().slice(0, 160)
+          : PUBLIC_SUBSCRIBER_EMAIL;
+      const uid =
+        typeof payload.uid === 'string' && payload.uid.trim()
+          ? payload.uid.trim().slice(0, 128)
+          : 'public';
+      const platform =
+        typeof payload.platform === 'string' && payload.platform.trim()
+          ? payload.platform.trim().slice(0, 120)
+          : 'web';
+
+      await db.collection('fcmTokens').doc(docId).set(
+        {
+          token,
+          email,
+          uid,
+          platform,
+          updatedAt: new Date(),
+          createdAt: new Date(),
+        },
+        { merge: true }
+      );
+      res.status(200).json({ ok: true, docId });
+      return;
+    }
+
+    if (req.method === 'POST' && action === 'unsubscribe') {
+      const payload = parseRequestBody(req.body);
+      const rawDocId = typeof payload.docId === 'string' ? payload.docId.trim() : '';
+      const rawToken = typeof payload.token === 'string' ? payload.token.trim() : '';
+      const docId =
+        rawDocId || (rawToken.length >= 10 ? await computeTokenDocId(rawToken) : '');
+      if (docId && /^[a-zA-Z0-9_-]{1,128}$/.test(docId)) {
+        await db.collection('fcmTokens').doc(docId).delete().catch(() => undefined);
+      }
+      res.status(200).json({ ok: true });
+      return;
+    }
 
     const isTestMode =
       req.query?.test === '1' ||
@@ -234,7 +305,10 @@ export default async function handler(
     });
 
     const recipients = isTestMode
-      ? allTokens.filter((t) => t.email === testAdminEmail)
+      ? allTokens.filter(
+          (t) =>
+            t.email === testAdminEmail || t.email === PUBLIC_SUBSCRIBER_EMAIL
+        )
       : filterEligibleReminderTokens(allTokens, registeredUsers, targetDay.dayId);
 
     if (recipients.length === 0) {
@@ -243,7 +317,7 @@ export default async function handler(
         sentCount: 0,
         targetDay: targetDay.dayId,
         message: isTestMode
-          ? 'لا يوجد جهاز مفعّل عليه الإشعارات لحسابك حالياً. فعّل الإشعارات من القائمة الجانبية أولاً.'
+          ? 'لا يوجد جهاز مفعّل عليه الإشعارات حالياً. فعّل الإشعارات من زر الجرس بالواجهة أولاً.'
           : 'لا توجد أجهزة مؤهلة لإرسال الإشعار حالياً.',
       });
       return;

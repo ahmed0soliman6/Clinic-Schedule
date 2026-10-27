@@ -41,6 +41,7 @@ import {
   googleProvider,
   handleFirestoreError,
   OperationType,
+  syncStoredFcmTokenWithUser,
 } from './firebase';
 import {
   AuditAction,
@@ -60,6 +61,7 @@ import { DEFAULT_REMINDER_SETTINGS } from './utils/reminderLogic';
 import {
   BLUEPRINT_LIMITS,
   DAYS_LIST,
+  DEFAULT_POST_TEMPLATE,
   PRIMARY_ADMIN_EMAIL,
   addScheduleRow,
   applyDraftMutationToDay,
@@ -90,6 +92,7 @@ import { CenterSettingsModal } from './components/CenterSettingsModal';
 import { UsersAndAuditModal } from './components/UsersAndAuditModal';
 import { ComplexBrandLogo } from './components/BrandLogos';
 import {
+  HeaderAccountAndNotificationsMenu,
   NotificationToggleButton,
   OfflineIndicator,
   PWAInstallButton,
@@ -113,6 +116,7 @@ const FALLBACK_SETTINGS: CenterSettings = {
   fromHeaderColor: '#f59e0b',
   toHeaderColor: '#0088cc',
   footerBgColor: '#1e295b',
+  postTemplate: DEFAULT_POST_TEMPLATE,
 };
 
 const STORAGE_KEY = 'meet_azzoun_medical_schedules_v9_live';
@@ -559,6 +563,7 @@ export default function App() {
       setFirebaseUser(user);
       setActiveRole(access.role);
       setAllowedDays(access.allowedDays);
+      syncStoredFcmTokenWithUser(cleanEmail, user.uid).catch(() => undefined);
 
       // If Admin, load full users list and audit logs from Firestore
       if (isPrimaryAdmin || access.role === 'ADMIN') {
@@ -1778,9 +1783,9 @@ export default function App() {
 
       <OfflineIndicator />
 
-      {/* Top Bar: Always Sticky & Visible while scrolling with Day Navigation + Undo + Login/Logout */}
+      {/* Top Bar: Always Sticky & Visible while scrolling with Day Navigation + Undo + Compact Notifications/Auth Dropdown */}
       <header className="sticky top-0 z-50 bg-gradient-to-r from-purple-950 via-indigo-950 to-purple-950 text-white border-b-2 border-purple-800 shadow-lg backdrop-blur-md">
-        <div className="mx-auto max-w-7xl px-2.5 sm:px-6 py-2 flex items-center justify-between gap-2 overflow-x-auto no-scrollbar">
+        <div className="mx-auto max-w-7xl px-2 sm:px-6 py-2 flex items-center justify-between gap-1.5 sm:gap-2">
           {/* Sidebar Menu Button — Shown when LOGGED IN as authorized staff */}
           {isStaffAuthenticated && !isStrictPublicUrl && (
             <button
@@ -1798,7 +1803,7 @@ export default function App() {
           {/* 7-Day Navigation Tabs */}
           <nav
             aria-label="اختيار يوم الجدول"
-            className="flex items-center gap-1.5 sm:gap-2 flex-1 justify-start sm:justify-center overflow-x-auto no-scrollbar py-0.5"
+            className="flex items-center gap-1.5 sm:gap-2 flex-1 min-w-0 justify-start sm:justify-center overflow-x-auto no-scrollbar py-0.5"
           >
             {DAYS_LIST.map((day) => {
               const isSelected = selectedDay === day.id;
@@ -1837,81 +1842,32 @@ export default function App() {
             })}
           </nav>
 
-          {/* Top Bar Controls: Save Status + Header Undo + Login/Logout */}
-          {!isStrictPublicUrl && (
-            <div className="flex items-center gap-1.5 shrink-0">
-              {userCanEditSelectedDay && (
-                <span
-                  data-testid="header-save-status"
-                  className={`inline-flex items-center gap-1 rounded-xl px-2.5 py-1 text-[11px] font-extrabold shrink-0 border ${
-                    saveStatus === 'saving'
-                      ? 'bg-amber-500/20 text-amber-200 border-amber-400/40'
-                      : saveStatus === 'error'
-                      ? 'bg-rose-500/25 text-rose-200 border-rose-400/40'
-                      : 'bg-emerald-500/20 text-emerald-200 border-emerald-400/40'
-                  }`}
-                >
-                  <span
-                    className={`h-2 w-2 rounded-full ${
-                      saveStatus === 'saving'
-                        ? 'bg-amber-400 animate-pulse'
-                        : saveStatus === 'error'
-                        ? 'bg-rose-400'
-                        : 'bg-emerald-400'
-                    }`}
-                  />
-                  <span>
-                    {saveStatus === 'saving'
-                      ? 'جارٍ الحفظ...'
-                      : saveStatus === 'error'
-                      ? 'تعذر الحفظ'
-                      : 'تم الحفظ'}
-                  </span>
+          {/* Top Bar Controls: Header Undo + Compact Dropdown (Notifications + Login/Logout) */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            {!isStrictPublicUrl && userCanEditSelectedDay && canUndo && (
+              <button
+                type="button"
+                onClick={handleUndo}
+                data-testid="header-undo-btn"
+                title={`تراجع عن آخر تعديل في جدول ${currentSchedule.dayLabel} (${undoCount} متاح)`}
+                aria-label="تراجع عن آخر تعديل"
+                className="inline-flex items-center justify-center gap-1 rounded-xl p-2 sm:px-3 sm:py-1.5 text-xs font-black transition cursor-pointer bg-amber-400 text-slate-950 hover:bg-amber-300 ring-2 ring-amber-300/50 shadow-sm active:scale-95 shrink-0"
+              >
+                <RotateCcw className="w-3.5 h-3.5 shrink-0 text-slate-950" />
+                <span className="font-black">
+                  {undoCount > 0 ? `تراجع (${undoCount})` : 'تراجع'}
                 </span>
-              )}
+              </button>
+            )}
 
-              {/* Persistent Header Undo Button — Shown ONLY when an edit/action has been performed */}
-              {userCanEditSelectedDay && canUndo && (
-                <button
-                  type="button"
-                  onClick={handleUndo}
-                  data-testid="header-undo-btn"
-                  title={`تراجع عن آخر تعديل في جدول ${currentSchedule.dayLabel} (${undoCount} متاح)`}
-                  aria-label="تراجع عن آخر تعديل"
-                  className="inline-flex items-center justify-center gap-1 rounded-xl p-2 sm:px-3 sm:py-1.5 text-xs font-black transition cursor-pointer bg-amber-400 text-slate-950 hover:bg-amber-300 ring-2 ring-amber-300/50 shadow-sm active:scale-95 shrink-0"
-                >
-                  <RotateCcw className="w-3.5 h-3.5 shrink-0 text-slate-950" />
-                  <span className="font-black">{undoCount > 0 ? `تراجع (${undoCount})` : 'تراجع'}</span>
-                </button>
-              )}
-
-              {firebaseUser ? (
-                <button
-                  type="button"
-                  onClick={() => signOut(auth)}
-                  data-testid="top-logout-btn"
-                  title="تسجيل الخروج"
-                  aria-label="تسجيل الخروج"
-                  className="inline-flex items-center justify-center gap-1 rounded-xl bg-rose-600/90 hover:bg-rose-600 border border-rose-400/40 p-2 sm:px-2.5 sm:py-1.5 text-xs font-extrabold text-white transition cursor-pointer shadow-xs shrink-0"
-                >
-                  <LogOut className="w-4 h-4" />
-                  <span className="hidden md:inline">خروج</span>
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={handleGoogleSignIn}
-                  data-testid="top-login-btn"
-                  title="تسجيل الدخول"
-                  aria-label="تسجيل الدخول"
-                  className="inline-flex items-center justify-center gap-1 rounded-xl bg-emerald-600 hover:bg-emerald-500 border border-emerald-400/40 p-2 sm:px-2.5 sm:py-1.5 text-xs font-extrabold text-white transition cursor-pointer shadow-xs shrink-0"
-                >
-                  <LogIn className="w-4 h-4" />
-                  <span className="hidden sm:inline">دخول</span>
-                </button>
-              )}
-            </div>
-          )}
+            <HeaderAccountAndNotificationsMenu
+              isLoggedIn={Boolean(firebaseUser)}
+              userEmail={firebaseUser?.email}
+              hideAuthAction={isStrictPublicUrl}
+              onLogin={handleGoogleSignIn}
+              onLogout={() => signOut(auth)}
+            />
+          </div>
         </div>
       </header>
 
@@ -2001,32 +1957,6 @@ export default function App() {
                     <span>العرض العام</span>
                   </button>
                 </div>
-
-                {userCanEditSelectedDay && (
-                  <div className="rounded-xl bg-emerald-50/70 border border-emerald-200 p-2.5">
-                    <div
-                      data-testid="save-status-indicator"
-                      className="flex items-center gap-1.5 text-xs font-extrabold text-emerald-800"
-                    >
-                      <span
-                        className={`h-2 w-2 rounded-full shrink-0 ${
-                          saveStatus === 'saving'
-                            ? 'bg-amber-500 animate-pulse'
-                            : saveStatus === 'error'
-                            ? 'bg-rose-500'
-                            : 'bg-emerald-500'
-                        }`}
-                      />
-                      <span>
-                        {saveStatus === 'saving'
-                          ? 'جارٍ الحفظ...'
-                          : saveStatus === 'error'
-                          ? 'تعذر الحفظ'
-                          : 'تم الحفظ'}
-                      </span>
-                    </div>
-                  </div>
-                )}
 
                 {userCanEditSelectedDay && (
                   <button

@@ -1,9 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Bell,
   BellOff,
   BellRing,
+  ChevronDown,
   Download,
+  LogIn,
+  LogOut,
   Smartphone,
   WifiOff,
   X,
@@ -11,6 +14,7 @@ import {
 import {
   disablePushNotifications,
   enablePushNotifications,
+  FCM_STATUS_CHANGED_EVENT,
   FCM_TOKEN_STORAGE_KEY,
 } from '../firebase';
 import { ComplexBrandLogo } from './BrandLogos';
@@ -198,7 +202,7 @@ export const PWAInstallButton: React.FC = () => {
 };
 
 interface NotificationToggleButtonProps {
-  isStaffAuthenticated?: boolean;
+  variant?: 'sidebar' | 'header';
   onSaveTokenToFirestore?: (token: string) => void;
 }
 
@@ -207,9 +211,6 @@ type NotificationState = 'enabled' | 'disabled' | 'blocked';
 function resolveInitialNotificationState(): NotificationState {
   if (typeof window === 'undefined' || !('Notification' in window)) {
     return 'disabled';
-  }
-  if (Notification.permission === 'denied') {
-    return 'blocked';
   }
   if (Notification.permission === 'granted') {
     try {
@@ -224,7 +225,7 @@ function resolveInitialNotificationState(): NotificationState {
 
 export const NotificationToggleButton: React.FC<
   NotificationToggleButtonProps
-> = ({ isStaffAuthenticated = true, onSaveTokenToFirestore }) => {
+> = ({ variant = 'sidebar', onSaveTokenToFirestore }) => {
   const { isInstalled, isIOS } = usePWAInstall();
   const [status, setStatus] = useState<NotificationState>(
     resolveInitialNotificationState
@@ -234,12 +235,17 @@ export const NotificationToggleButton: React.FC<
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    setStatus(resolveInitialNotificationState());
+    const syncState = () => {
+      setStatus(resolveInitialNotificationState());
+    };
+    syncState();
+    window.addEventListener(FCM_STATUS_CHANGED_EVENT, syncState);
+    window.addEventListener('storage', syncState);
+    return () => {
+      window.removeEventListener(FCM_STATUS_CHANGED_EVENT, syncState);
+      window.removeEventListener('storage', syncState);
+    };
   }, []);
-
-  if (!isStaffAuthenticated) {
-    return null;
-  }
 
   const handleToggle = async () => {
     setIosGuideMessage(null);
@@ -250,6 +256,7 @@ export const NotificationToggleButton: React.FC<
         'ثبّت التطبيق من قائمة المشاركة ثم أضف إلى الشاشة الرئيسية لتفعيل الإشعارات';
       setIosGuideMessage(msg);
       setToastMsg(msg);
+      setTimeout(() => setToastMsg(null), 5000);
       return;
     }
 
@@ -259,6 +266,7 @@ export const NotificationToggleButton: React.FC<
         setToastMsg(
           'الإشعارات محظورة من إعدادات المتصفح. افتح إعدادات الموقع في المتصفح واسمح بالإشعارات.'
         );
+        setTimeout(() => setToastMsg(null), 5000);
         return;
       }
     }
@@ -292,6 +300,67 @@ export const NotificationToggleButton: React.FC<
       }, 4500);
     }
   };
+
+  if (variant === 'header') {
+    return (
+      <>
+        <button
+          type="button"
+          onClick={handleToggle}
+          disabled={loading}
+          data-testid="header-notifications-toggle-btn"
+          title={
+            status === 'enabled'
+              ? 'الإشعارات اليومية مفعّلة (اضغط للإيقاف)'
+              : status === 'blocked'
+              ? 'الإشعارات محظورة من إعدادات المتصفح'
+              : 'تفعيل الإشعارات اليومية للجدول'
+          }
+          aria-label={
+            status === 'enabled'
+              ? 'الإشعارات مفعّلة'
+              : status === 'blocked'
+              ? 'الإشعارات محظورة'
+              : 'تفعيل الإشعارات'
+          }
+          className={`inline-flex items-center justify-center gap-1 rounded-xl border p-2 sm:px-2.5 sm:py-1.5 text-xs font-extrabold transition cursor-pointer shadow-xs shrink-0 ${
+            status === 'enabled'
+              ? 'bg-emerald-500/25 hover:bg-emerald-500/35 border-emerald-400/50 text-emerald-100'
+              : status === 'blocked'
+              ? 'bg-rose-500/25 hover:bg-rose-500/35 border-rose-400/50 text-rose-100'
+              : 'bg-amber-400/20 hover:bg-amber-400/30 border-amber-300/50 text-amber-100'
+          }`}
+        >
+          {status === 'enabled' ? (
+            <BellRing className="w-4 h-4 text-emerald-300 shrink-0" />
+          ) : status === 'blocked' ? (
+            <BellOff className="w-4 h-4 text-rose-300 shrink-0" />
+          ) : (
+            <Bell className="w-4 h-4 text-amber-300 shrink-0" />
+          )}
+          <span className="hidden sm:inline">
+            {loading
+              ? 'جارٍ...'
+              : status === 'enabled'
+              ? 'الإشعارات مفعّلة'
+              : status === 'blocked'
+              ? 'الإشعارات محظورة'
+              : 'تفعيل الإشعارات'}
+          </span>
+        </button>
+
+        {toastMsg && (
+          <div
+            role="status"
+            className="fixed bottom-4 right-4 z-50 max-w-xs rounded-xl bg-slate-900 px-4 py-2.5 text-xs font-extrabold text-white shadow-xl border border-purple-500/40 flex items-center gap-2"
+          >
+            <Smartphone className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>{toastMsg}</span>
+          </div>
+        )}
+      </>
+    );
+  }
 
   return (
     <div className="w-full space-y-1.5">
@@ -368,3 +437,244 @@ export const NotificationToggleButton: React.FC<
     </div>
   );
 };
+
+interface HeaderAccountAndNotificationsMenuProps {
+  isLoggedIn: boolean;
+  userEmail?: string | null;
+  hideAuthAction?: boolean;
+  onLogin: () => void;
+  onLogout: () => void;
+}
+
+export const HeaderAccountAndNotificationsMenu: React.FC<
+  HeaderAccountAndNotificationsMenuProps
+> = ({ isLoggedIn, userEmail, hideAuthAction = false, onLogin, onLogout }) => {
+  const { isInstalled, isIOS } = usePWAInstall();
+  const [isOpen, setIsOpen] = useState(false);
+  const [status, setStatus] = useState<NotificationState>(
+    resolveInitialNotificationState
+  );
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const syncState = () => {
+      setStatus(resolveInitialNotificationState());
+    };
+    syncState();
+    window.addEventListener(FCM_STATUS_CHANGED_EVENT, syncState);
+    window.addEventListener('storage', syncState);
+    return () => {
+      window.removeEventListener(FCM_STATUS_CHANGED_EVENT, syncState);
+      window.removeEventListener('storage', syncState);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleOutsideClick = (event: MouseEvent) => {
+      if (
+        containerRef.current &&
+        !containerRef.current.contains(event.target as Node)
+      ) {
+        setIsOpen(false);
+      }
+    };
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutsideClick);
+    document.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick);
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, [isOpen]);
+
+  const handleToggleNotifications = async () => {
+    if (isIOS && !isInstalled) {
+      const msg =
+        'ثبّت التطبيق من قائمة المشاركة ثم أضف إلى الشاشة الرئيسية لتفعيل الإشعارات';
+      setToastMsg(msg);
+      setTimeout(() => setToastMsg(null), 5000);
+      return;
+    }
+
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      if (Notification.permission === 'denied') {
+        setStatus('blocked');
+        setToastMsg(
+          'الإشعارات محظورة من إعدادات المتصفح. افتح إعدادات الموقع في المتصفح واسمح بالإشعارات.'
+        );
+        setTimeout(() => setToastMsg(null), 5000);
+        return;
+      }
+    }
+
+    setLoading(true);
+    try {
+      if (status === 'enabled') {
+        const res = await disablePushNotifications();
+        if (res.disabled) {
+          setStatus('disabled');
+        }
+        setToastMsg(res.message);
+      } else {
+        const res = await enablePushNotifications();
+        if (res.blocked) {
+          setStatus('blocked');
+        } else if (res.granted) {
+          setStatus('enabled');
+        } else {
+          setStatus('disabled');
+        }
+        setToastMsg(res.message);
+      }
+    } finally {
+      setLoading(false);
+      setTimeout(() => {
+        setToastMsg(null);
+      }, 4500);
+    }
+  };
+
+  return (
+    <div ref={containerRef} className="relative shrink-0">
+      <button
+        type="button"
+        onClick={() => setIsOpen((prev) => !prev)}
+        data-testid="header-quick-menu-btn"
+        aria-expanded={isOpen}
+        aria-haspopup="menu"
+        title="قائمة الإشعارات والدخول"
+        aria-label="قائمة الإشعارات والدخول"
+        className={`inline-flex items-center justify-center gap-1 rounded-xl border p-2 sm:px-2.5 sm:py-1.5 text-xs font-extrabold transition cursor-pointer shadow-xs shrink-0 ${
+          status === 'enabled'
+            ? 'bg-emerald-500/20 hover:bg-emerald-500/30 border-emerald-400/50 text-emerald-100'
+            : isLoggedIn
+            ? 'bg-white/15 hover:bg-white/25 border-white/30 text-white'
+            : 'bg-white/15 hover:bg-white/25 border-white/25 text-white'
+        }`}
+      >
+        {status === 'enabled' ? (
+          <BellRing className="w-4 h-4 text-emerald-300 shrink-0" />
+        ) : status === 'blocked' ? (
+          <BellOff className="w-4 h-4 text-rose-300 shrink-0" />
+        ) : (
+          <Bell className="w-4 h-4 text-amber-300 shrink-0" />
+        )}
+        <ChevronDown
+          className={`w-3.5 h-3.5 text-purple-200 transition-transform duration-150 ${
+            isOpen ? 'rotate-180' : ''
+          }`}
+        />
+      </button>
+
+      {isOpen && (
+        <div
+          role="menu"
+          data-testid="header-quick-dropdown"
+          aria-label="قائمة الإشعارات والحساب"
+          dir="rtl"
+          className="absolute left-0 top-full mt-2 w-56 rounded-2xl bg-white text-slate-900 shadow-2xl border border-purple-200 p-2 z-50 space-y-1.5"
+        >
+          {/* Notification Toggle Item */}
+          <button
+            type="button"
+            role="menuitem"
+            onClick={handleToggleNotifications}
+            disabled={loading}
+            data-testid="header-notifications-toggle-btn"
+            className={`w-full inline-flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-xs font-extrabold transition cursor-pointer ${
+              status === 'enabled'
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-900 hover:bg-emerald-100'
+                : status === 'blocked'
+                ? 'border-rose-200 bg-rose-50 text-rose-900 hover:bg-rose-100'
+                : 'border-amber-200 bg-amber-50 text-amber-900 hover:bg-amber-100'
+            }`}
+          >
+            <span className="inline-flex items-center gap-1.5">
+              {status === 'enabled' ? (
+                <BellRing className="w-4 h-4 text-emerald-600 shrink-0" />
+              ) : status === 'blocked' ? (
+                <BellOff className="w-4 h-4 text-rose-600 shrink-0" />
+              ) : (
+                <Bell className="w-4 h-4 text-amber-600 shrink-0" />
+              )}
+              <span>
+                {loading
+                  ? 'جارٍ التحديث...'
+                  : status === 'enabled'
+                  ? 'الإشعارات مفعّلة'
+                  : status === 'blocked'
+                  ? 'الإشعارات محظورة'
+                  : 'تفعيل الإشعارات'}
+              </span>
+            </span>
+            <span className="text-[11px] font-bold opacity-80">
+              {status === 'enabled' ? 'إيقاف' : 'تفعيل'}
+            </span>
+          </button>
+
+          {/* Login / Logout Item */}
+          {!hideAuthAction && (
+            <>
+              {isLoggedIn ? (
+                <div className="pt-1 border-t border-slate-100 space-y-1">
+                  {userEmail && (
+                    <div className="px-2 py-0.5 text-[10px] font-bold text-slate-500 truncate">
+                      {userEmail}
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setIsOpen(false);
+                      onLogout();
+                    }}
+                    data-testid="top-logout-btn"
+                    className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-extrabold text-rose-800 hover:bg-rose-100 transition cursor-pointer"
+                  >
+                    <LogOut className="w-4 h-4 shrink-0" />
+                    <span>تسجيل الخروج</span>
+                  </button>
+                </div>
+              ) : (
+                <div className="pt-1 border-t border-slate-100">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setIsOpen(false);
+                      onLogin();
+                    }}
+                    data-testid="top-login-btn"
+                    className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-extrabold text-emerald-900 hover:bg-emerald-100 transition cursor-pointer"
+                  >
+                    <LogIn className="w-4 h-4 shrink-0" />
+                    <span>تسجيل الدخول</span>
+                  </button>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {toastMsg && (
+        <div
+          role="status"
+          className="fixed bottom-4 right-4 z-50 max-w-xs rounded-xl bg-slate-900 px-4 py-2.5 text-xs font-extrabold text-white shadow-xl border border-purple-500/40 flex items-center gap-2"
+        >
+          <Smartphone className="w-4 h-4 text-amber-400 shrink-0" />
+          <span>{toastMsg}</span>
+        </div>
+      )}
+    </div>
+  );
+};
+

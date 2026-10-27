@@ -3,6 +3,7 @@ import {
   BellRing,
   Check,
   Database,
+  MessageSquareText,
   Palette,
   RotateCcw,
   Send,
@@ -10,7 +11,10 @@ import {
   X,
 } from 'lucide-react';
 import { CenterSettings, ReminderSettings } from '../types/schedule';
-import { validateCenterSettings } from '../utils/scheduleLogic';
+import {
+  DEFAULT_POST_TEMPLATE,
+  validateCenterSettings,
+} from '../utils/scheduleLogic';
 import {
   DEFAULT_REMINDER_SETTINGS,
   validateReminderSettings,
@@ -43,7 +47,14 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
   onSendTestReminder,
   onClose,
 }) => {
-  const [draft, setDraft] = useState<CenterSettings>({ ...settings });
+  const [draft, setDraft] = useState<CenterSettings>({
+    ...settings,
+    postTemplate:
+      typeof settings.postTemplate === 'string' &&
+      settings.postTemplate.trim().length > 0
+        ? settings.postTemplate
+        : DEFAULT_POST_TEMPLATE,
+  });
   const [reminderDraft, setReminderDraft] = useState<
     Omit<
       ReminderSettings,
@@ -370,6 +381,73 @@ export const CenterSettingsModal: React.FC<CenterSettingsModalProps> = ({
                 />
               </div>
             </div>
+          </div>
+
+          {/* Post Box Template Section (صندوق البوست المرفق مع الصور عند النشر) */}
+          <div className="pt-3 border-t border-slate-200 space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h4 className="text-xs font-extrabold text-slate-800 flex items-center gap-1.5">
+                <MessageSquareText className="w-4 h-4 text-purple-600" />
+                <span>صندوق البوست (النص المرفق مع الصور أثناء النشر)</span>
+              </h4>
+              <button
+                type="button"
+                onClick={() =>
+                  setDraft({ ...draft, postTemplate: DEFAULT_POST_TEMPLATE })
+                }
+                data-testid="reset-post-template-btn"
+                className="text-[11px] font-bold text-purple-700 hover:text-purple-900 underline cursor-pointer"
+              >
+                استعادة نص البوست الافتراضي
+              </button>
+            </div>
+
+            <p className="text-[11px] font-bold text-slate-600 leading-relaxed">
+              تحكم في الكتابة التي تظهر تلقائياً في «صندوق البوست» وعند الضغط على «مشاركة+بوست». يمكنك كتابة أي نص أو الضغط على المتغيرات لإدراجها:
+            </p>
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              {[
+                { token: '{اليوم}', label: 'اسم اليوم' },
+                { token: '{العيادات}', label: 'قائمة عيادات اليوم' },
+                { token: '{الواتساب}', label: 'رقم الواتساب' },
+                { token: '{الأرضي}', label: 'الرقم الأرضي' },
+                { token: '{الأسنان}', label: 'رقم الأسنان' },
+                { token: '{رابط_الواتساب}', label: 'رابط محادثة واتساب' },
+                { token: '{العنوان}', label: 'العنوان' },
+              ].map((item) => (
+                <button
+                  key={item.token}
+                  type="button"
+                  onClick={() =>
+                    setDraft({
+                      ...draft,
+                      postTemplate: `${draft.postTemplate || ''}${
+                        draft.postTemplate?.endsWith('\n') || !draft.postTemplate
+                          ? ''
+                          : ' '
+                      }${item.token}`,
+                    })
+                  }
+                  className="rounded-lg border border-purple-200 bg-purple-50 px-2 py-1 text-[11px] font-extrabold text-purple-900 hover:bg-purple-100 transition cursor-pointer"
+                >
+                  + {item.token} ({item.label})
+                </button>
+              ))}
+            </div>
+
+            <textarea
+              rows={6}
+              dir="rtl"
+              maxLength={2000}
+              data-testid="settings-post-template-input"
+              aria-label="قالب نص البوست المرفق مع الصور أثناء النشر"
+              value={draft.postTemplate ?? DEFAULT_POST_TEMPLATE}
+              onChange={(e) =>
+                setDraft({ ...draft, postTemplate: e.target.value })
+              }
+              className="w-full rounded-xl border border-slate-300 bg-slate-50/60 p-3 text-xs font-bold text-slate-900 leading-relaxed focus:bg-white focus:outline-none focus:border-purple-600 resize-y"
+            />
           </div>
 
           {/* Daily Reminder Section (appConfig/reminders) */}

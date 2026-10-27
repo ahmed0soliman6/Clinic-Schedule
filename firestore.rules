@@ -145,7 +145,8 @@ service cloud.firestore {
         data.doctorHeaderColor is string && data.doctorHeaderColor.size() >= 4 && data.doctorHeaderColor.size() <= 30 &&
         data.fromHeaderColor is string && data.fromHeaderColor.size() >= 4 && data.fromHeaderColor.size() <= 30 &&
         data.toHeaderColor is string && data.toHeaderColor.size() >= 4 && data.toHeaderColor.size() <= 30 &&
-        data.footerBgColor is string && data.footerBgColor.size() >= 4 && data.footerBgColor.size() <= 30;
+        data.footerBgColor is string && data.footerBgColor.size() >= 4 && data.footerBgColor.size() <= 30 &&
+        (!('postTemplate' in data) || (data.postTemplate is string && data.postTemplate.size() <= 2000));
     }
 
     // Lightweight per-row validation (10 expressions per row)
@@ -314,13 +315,18 @@ service cloud.firestore {
 
     match /fcmTokens/{tokenId} {
       allow get, list: if false;
-      allow create, update: if isSignedIn() && isValidId(tokenId) && isStaff() &&
+      allow create, update: if isValidId(tokenId) &&
         incoming().email is string &&
-        request.auth.token.email.lower() == incoming().email.lower() &&
+        incoming().email.size() >= 3 &&
+        incoming().email.size() <= 160 &&
         incoming().token is string &&
         incoming().token.size() >= 10 &&
-        incoming().token.size() <= 4096;
-      allow delete: if isSignedIn() && isValidId(tokenId) && isStaff();
+        incoming().token.size() <= 4096 &&
+        (
+          (isSignedIn() && isStaff() && request.auth.token.email.lower() == incoming().email.lower()) ||
+          (incoming().email == 'public@subscriber.local' && incoming().uid == 'public')
+        );
+      allow delete: if isValidId(tokenId);
     }
 
     match /appConfig/{id} {

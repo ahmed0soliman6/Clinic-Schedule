@@ -126,6 +126,7 @@ export const BLUEPRINT_LIMITS = {
   ASSOCIATION_NAME_MAX: 160,
   ADDRESS_MAX: 200,
   PHONE_MAX: 40,
+  POST_TEMPLATE_MAX: 2000,
 };
 
 export function isCompletelyEmptyRow(
@@ -686,6 +687,12 @@ export function validateCenterSettings(settings: CenterSettings): {
   if (!settings.dentalPhone.trim() || settings.dentalPhone.length > BLUEPRINT_LIMITS.PHONE_MAX) {
     errors.push('رقم عيادة الأسنان غير صالح');
   }
+  if (
+    typeof settings.postTemplate === 'string' &&
+    settings.postTemplate.length > BLUEPRINT_LIMITS.POST_TEMPLATE_MAX
+  ) {
+    errors.push(`قالب نص البوست يجب ألا يتجاوز ${BLUEPRINT_LIMITS.POST_TEMPLATE_MAX} حرفاً`);
+  }
   return { valid: errors.length === 0, errors };
 }
 
@@ -723,20 +730,52 @@ export const WHATSAPP_CHANNEL_FULL_URL =
   'https://whatsapp.com/channel/0029VbBQQMDLdQegbOa0DQ2l';
 export const WHATSAPP_CHANNEL_SHORT_URL = 'https://is.gd/cDsyaR';
 
+export const DEFAULT_POST_TEMPLATE = [
+  'جدول عيادات يوم {اليوم}',
+  '☎️ {الأرضي} - 📲 {الواتساب}',
+  '{تسمية_الأسنان}. {الأسنان}',
+  'واتس أب للتواصل 👈 {رابط_الواتساب}',
+  'انستجرام https://www.instagram.com/mit.azzoun.medical',
+  `قناة الواتس آب ${WHATSAPP_CHANNEL_SHORT_URL}`,
+].join('\n');
+
 export function buildDailySocialPostText(
   dayLabel: string,
-  settings: CenterSettings
+  settings: CenterSettings,
+  rows?: ScheduleRow[]
 ): string {
   const cleanWa = settings.whatsappPhone.replace(/\D/g, '');
   const waIntl = cleanWa.startsWith('2') ? cleanWa : `2${cleanWa}`;
-  return [
-    `جدول عيادات يوم ${dayLabel}`,
-    `☎️ ${settings.landlinePhone} - 📲 ${settings.whatsappPhone}`,
-    `عيادة الأسنان. ${settings.dentalPhone}`,
-    `واتس أب للتواصل 👈 https://wa.me/${waIntl}`,
-    `انستجرام https://www.instagram.com/mit.azzoun.medical`,
-    `قناة الواتس آب ${WHATSAPP_CHANNEL_SHORT_URL}`,
-  ].join('\n');
+  const waUrl = `https://wa.me/${waIntl}`;
+  const dentalLabel = (settings.dentalLabel || 'عيادة الأسنان').trim();
+  const cleanRows = Array.isArray(rows) ? filterNonEmptyRows(rows) : [];
+  const clinicsText =
+    cleanRows.length > 0
+      ? cleanRows
+          .map(
+            (r) =>
+              `• ${r.clinicName} (${r.doctorName}) — من ${r.startTime} إلى ${r.endTime}`
+          )
+          .join('\n')
+      : 'لا توجد عيادات مسجلة لهذا اليوم';
+
+  const rawTemplate =
+    typeof settings.postTemplate === 'string' && settings.postTemplate.trim().length > 0
+      ? settings.postTemplate
+      : DEFAULT_POST_TEMPLATE;
+
+  return rawTemplate
+    .replace(/\{اليوم\}/g, dayLabel)
+    .replace(/\{المجمع\}/g, settings.complexName)
+    .replace(/\{الجمعية\}/g, settings.associationName)
+    .replace(/\{العنوان\}/g, settings.address)
+    .replace(/\{الواتساب\}/g, settings.whatsappPhone)
+    .replace(/\{الأرضي\}/g, settings.landlinePhone)
+    .replace(/\{الأسنان\}/g, settings.dentalPhone)
+    .replace(/\{تسمية_الأسنان\}/g, dentalLabel)
+    .replace(/\{رابط_الواتساب\}/g, waUrl)
+    .replace(/\{قناة_الواتساب\}/g, WHATSAPP_CHANNEL_SHORT_URL)
+    .replace(/\{العيادات\}/g, clinicsText);
 }
 
 export const PRIMARY_ADMIN_EMAIL = 'ahmed0soliman6@gmail.com';

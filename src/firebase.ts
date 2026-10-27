@@ -17,13 +17,17 @@ import {
   onMessage,
 } from 'firebase/messaging';
 import firebaseAppletConfig from '../firebase-applet-config.json';
-import { computeTokenDocId } from './utils/reminderLogic';
+import {
+  computeTokenDocId,
+  PUBLIC_SUBSCRIBER_EMAIL,
+} from './utils/reminderLogic';
 
 export const VAPID_PUBLIC_KEY =
   import.meta.env.VITE_FIREBASE_VAPID_KEY ||
   'BAfoL-06-pPKxzS7IcRIKa4bxuSCcmo7o6PE7tWpf9Ov1AjCfBGQPMF0KiRPYQaVGBkhTIvfWvL7qqCayFIE0Y0';
 
 export const FCM_TOKEN_STORAGE_KEY = 'meet_azzoun_fcm_token_v1';
+export const FCM_STATUS_CHANGED_EVENT = 'meet_azzoun_fcm_status_changed';
 
 const resolvedConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || firebaseAppletConfig.apiKey,
@@ -109,7 +113,8 @@ function ensureForegroundMessageListenerOnce() {
 }
 
 /**
- * Request Web Push / FCM Notification permission, get token via navigator.serviceWorker.ready,
+ * Request Web Push / FCM Notification permission from anywhere (inside or outside sidebar,
+ * logged-in staff or external visitor), get token via navigator.serviceWorker.ready,
  * and persist in Firestore `fcmTokens/{sha256(token)}`.
  */
 export async function enablePushNotifications(): Promise<{
@@ -123,14 +128,6 @@ export async function enablePushNotifications(): Promise<{
     return {
       granted: false,
       message: 'هذا المتصفح لا يدعم إشعارات الويب المباشرة.',
-    };
-  }
-
-  const currentUser = auth.currentUser;
-  if (!currentUser || !currentUser.email) {
-    return {
-      granted: false,
-      message: 'يرجى تسجيل الدخول بحساب موظف معتمد لتفعيل الإشعارات.',
     };
   }
 
@@ -175,25 +172,53 @@ export async function enablePushNotifications(): Promise<{
 
     ensureForegroundMessageListenerOnce();
 
+    const currentUser = auth.currentUser;
     const docId = await computeTokenDocId(fcmToken);
-    const cleanEmail = currentUser.email.trim().toLowerCase();
+    const cleanEmail = currentUser?.email
+      ? currentUser.email.trim().toLowerCase()
+      : PUBLIC_SUBSCRIBER_EMAIL;
+    const cleanUid = currentUser?.uid || 'public';
     const platform =
       (navigator.userAgent || 'web').slice(0, 120) || 'web';
 
-    await setDoc(doc(db, 'fcmTokens', docId), {
-      token: fcmToken,
-      email: cleanEmail,
-      uid: currentUser.uid,
-      platform,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
+    let savedInFirestore = false;
+    try {
+      await setDoc(doc(db, 'fcmTokens', docId), {
+        token: fcmToken,
+        email: cleanEmail,
+        uid: cleanUid,
+        platform,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      savedInFirestore = true;
+    } catch {
+      // Fallback to server API below if unauthenticated client rule hasn't been deployed yet
+    }
+
+    if (!savedInFirestore) {
+      try {
+        await fetch('/api/send-reminders?action=subscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: fcmToken,
+            email: cleanEmail,
+            uid: cleanUid,
+            platform,
+          }),
+        });
+      } catch {
+        // Ignore network error in local preview
+      }
+    }
 
     try {
       localStorage.setItem(
         FCM_TOKEN_STORAGE_KEY,
         JSON.stringify({ token: fcmToken, docId, email: cleanEmail })
       );
+      window.dispatchEvent(new Event(FCM_STATUS_CHANGED_EVENT));
     } catch {
       // Ignore storage error
     }
@@ -202,7 +227,7 @@ export async function enablePushNotifications(): Promise<{
       granted: true,
       token: fcmToken,
       docId,
-      message: 'تم تفعيل الإشعارات اليومية وحفظ جهازك بنجاح!',
+      message: 'تم تفعيل الإشعارات اليومية على هذا الجهاز بنجاح!',
     };
   } catch (err) {
     console.warn('Enable push notifications error:', err);
@@ -211,6 +236,48 @@ export async function enablePushNotifications(): Promise<{
       message:
         'تعذر تفعيل الإشعارات حالياً. تأكد من فتح التطبيق عبر رابط HTTPS الرسمي أو تثبيته.',
     };
+  }
+}
+
+/**
+ * If a user enabled notifications from outside before logging in, upgrades their stored
+ * `fcmTokens/{docId}` entry with their authenticated email & uid upon sign-in.
+ */
+export async function syncStoredFcmTokenWithUser(
+  email: string,
+  uid: string
+): Promise<void> {
+  if (typeof window === 'undefined') return;
+  try {
+    const raw = localStorage.getItem(FCM_TOKEN_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as {
+      token?: string;
+      docId?: string;
+      email?: string;
+    };
+    if (!parsed.token) return;
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail || parsed.email === cleanEmail) return;
+
+    const docId = parsed.docId || (await computeTokenDocId(parsed.token));
+    const platform = (navigator.userAgent || 'web').slice(0, 120) || 'web';
+
+    await setDoc(doc(db, 'fcmTokens', docId), {
+      token: parsed.token,
+      email: cleanEmail,
+      uid,
+      platform,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    localStorage.setItem(
+      FCM_TOKEN_STORAGE_KEY,
+      JSON.stringify({ token: parsed.token, docId, email: cleanEmail })
+    );
+  } catch {
+    // Non-blocking sync
   }
 }
 
@@ -258,12 +325,23 @@ export async function disablePushNotifications(): Promise<{
       }
     }
 
-    if (savedDocId && auth.currentUser) {
-      await deleteDoc(doc(db, 'fcmTokens', savedDocId)).catch(() => undefined);
+    if (savedDocId) {
+      await deleteDoc(doc(db, 'fcmTokens', savedDocId)).catch(async () => {
+        try {
+          await fetch('/api/send-reminders?action=unsubscribe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ docId: savedDocId }),
+          });
+        } catch {
+          // Ignore
+        }
+      });
     }
 
     try {
       localStorage.removeItem(FCM_TOKEN_STORAGE_KEY);
+      window.dispatchEvent(new Event(FCM_STATUS_CHANGED_EVENT));
     } catch {
       // Ignore
     }

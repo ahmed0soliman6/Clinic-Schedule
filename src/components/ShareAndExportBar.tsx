@@ -60,16 +60,16 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
     dayLabel: string;
   } | null>(null);
   const [postText, setPostText] = useState<string>(() =>
-    buildDailySocialPostText(dayLabel, settings)
+    buildDailySocialPostText(dayLabel, settings, rows)
   );
   const [showPostBox, setShowPostBox] = useState<boolean>(false);
   const [copiedPost, setCopiedPost] = useState<boolean>(false);
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
 
-  // Update daily post text whenever the selected day or center settings change
+  // Update daily post text whenever the selected day, rows, or center settings change
   useEffect(() => {
-    setPostText(buildDailySocialPostText(dayLabel, settings));
-  }, [dayLabel, settings]);
+    setPostText(buildDailySocialPostText(dayLabel, settings, rows));
+  }, [dayLabel, settings, rows]);
 
   // Pre-render the 1440x1800 (4:5) high-res PNG in the background so clicking any share button
   // works synchronously with zero async delay

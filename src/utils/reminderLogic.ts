@@ -5,6 +5,8 @@ import {
   isFictionalOrBlockedEmail,
 } from './scheduleLogic.js';
 
+export const PUBLIC_SUBSCRIBER_EMAIL = 'public@subscriber.local';
+
 export const DEFAULT_REMINDER_SETTINGS: Omit<
   ReminderSettings,
   'lastSentDate' | 'updatedBy' | 'updatedByEmail' | 'updatedAt'
@@ -289,25 +291,28 @@ export function filterEligibleReminderTokens(
       continue;
     }
 
+    const isPublicSubscriber = cleanEmail === PUBLIC_SUBSCRIBER_EMAIL;
     const isPrimaryAdmin = cleanEmail === PRIMARY_ADMIN_EMAIL;
     const userDoc = userByEmail.get(cleanEmail);
 
-    if (!isPrimaryAdmin && !userDoc) {
-      // User is no longer in users/{emailDocId} -> exclude
+    if (!isPublicSubscriber && !isPrimaryAdmin && !userDoc) {
+      // Staff user is no longer in users/{emailDocId} -> exclude
       continue;
     }
 
-    const role = isPrimaryAdmin ? 'ADMIN' : userDoc!.role;
-    if (role !== 'ADMIN' && role !== 'EDITOR') {
-      continue;
-    }
-
-    if (role === 'EDITOR') {
-      const allowed = Array.isArray(userDoc?.allowedDays)
-        ? userDoc!.allowedDays
-        : [];
-      if (!allowed.includes(targetDayId)) {
+    if (!isPublicSubscriber) {
+      const role = isPrimaryAdmin ? 'ADMIN' : userDoc!.role;
+      if (role !== 'ADMIN' && role !== 'EDITOR') {
         continue;
+      }
+
+      if (role === 'EDITOR') {
+        const allowed = Array.isArray(userDoc?.allowedDays)
+          ? userDoc!.allowedDays
+          : [];
+        if (!allowed.includes(targetDayId)) {
+          continue;
+        }
       }
     }
 

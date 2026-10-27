@@ -91,6 +91,7 @@ export interface CenterSettings {
   fromHeaderColor: string;
   toHeaderColor: string;
   footerBgColor: string;
+  postTemplate?: string;
   updatedBy?: string;
   updatedByEmail?: string;
   updatedAt?: unknown;

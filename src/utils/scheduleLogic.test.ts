@@ -296,6 +296,20 @@ test('RBAC permissions, empty new row creation, 4:5 export aspect ratio, and dai
   assert.ok(postText.includes('https://wa.me/201202027567'));
   assert.ok(postText.includes('https://www.instagram.com/mit.azzoun.medical'));
   assert.ok(postText.includes('https://is.gd/cDsyaR'));
+
+  // Verify custom postTemplate controlled from Settings with {اليوم}, {العيادات}, {الواتساب}, {العنوان}
+  const customPostText = buildDailySocialPostText(
+    'السبت',
+    {
+      ...sampleSettings,
+      postTemplate:
+        'مواعيد {المجمع} ليوم {اليوم}:\n{العيادات}\nللحجز واتساب: {الواتساب} | العنوان: {العنوان}',
+    },
+    sampleRows
+  );
+  assert.ok(customPostText.includes('مواعيد مجمع ميت عزون الطبي ليوم السبت:'));
+  assert.ok(customPostText.includes('• الجراحة العامة (أ.د/ هاني عبدالمؤمن)'));
+  assert.ok(customPostText.includes('للحجز واتساب: 01202027567 | العنوان: ميت عزون - بجوار المسجد الكبير'));
 });
 
 test('Email-based RBAC: add email, switch role between Editor and Admin, and delete email safely', () => {
@@ -1147,7 +1161,27 @@ test('Daily Reminder Pure Logic: 10-minute Cairo window, lastSentDate duplicate 
   });
   assert.equal(validated.valid, true);
   assert.equal('lastSentDate' in validated.sanitized, false);
+
+  // 6) External subscribers from outside (public@subscriber.local) receive reminders without requiring login
+  const withExternalSubscriber = filterEligibleReminderTokens(
+    [
+      ...candidateTokens,
+      {
+        docId: 'doc-public-1',
+        token: 'valid-token-public-subscriber-0005',
+        email: 'public@subscriber.local',
+        uid: 'public',
+      },
+    ],
+    registeredUsers,
+    'thursday'
+  );
+  assert.deepEqual(
+    withExternalSubscriber.map((r) => r.email),
+    [PRIMARY_ADMIN_EMAIL, 'thursday.editor@gmail.com', 'public@subscriber.local']
+  );
 });
+
 
 
 
