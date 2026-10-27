@@ -1,9 +1,9 @@
-import { DayId, ReminderSettings, UserProfile } from '../types/schedule';
+import type { DayId, ReminderSettings, UserProfile } from '../types/schedule.js';
 import {
   DAYS_LIST,
   PRIMARY_ADMIN_EMAIL,
   isFictionalOrBlockedEmail,
-} from './scheduleLogic';
+} from './scheduleLogic.js';
 
 export const DEFAULT_REMINDER_SETTINGS: Omit<
   ReminderSettings,

@@ -2,7 +2,7 @@ import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
-import { ReminderSettings, UserProfile } from '../src/types/schedule';
+import type { ReminderSettings, UserProfile } from '../src/types/schedule.js';
 import {
   DEFAULT_REMINDER_SETTINGS,
   filterEligibleReminderTokens,
@@ -10,8 +10,8 @@ import {
   isWithinReminderWindow,
   resolveTargetDayId,
   StoredTokenEntry,
-} from '../src/utils/reminderLogic';
-import { emailToDocId, PRIMARY_ADMIN_EMAIL } from '../src/utils/scheduleLogic';
+} from '../src/utils/reminderLogic.js';
+import { emailToDocId, PRIMARY_ADMIN_EMAIL } from '../src/utils/scheduleLogic.js';
 
 interface VercelRequestLike {
   method?: string;

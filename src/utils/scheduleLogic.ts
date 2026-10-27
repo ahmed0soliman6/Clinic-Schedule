@@ -1,4 +1,4 @@
-import {
+import type {
   CenterSettings,
   ClinicIconId,
   DailyScheduleData,
@@ -6,7 +6,7 @@ import {
   ScheduleRow,
   UserProfile,
   UserRole,
-} from '../types/schedule';
+} from '../types/schedule.js';
 
 export const DAYS_LIST: { id: DayId; label: string; order: number }[] = [
   { id: 'saturday', label: 'السبت', order: 0 },
