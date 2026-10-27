@@ -59,6 +59,21 @@ type ActiveCellPopup =
   | { rowId: string; field: 'clinic' | 'doctor' | 'startTime' | 'endTime' | 'actions' }
   | null;
 
+const formatTimeWithSmallSuffix = (timeStr: string) => {
+  if (!timeStr) return null;
+  const match = timeStr.trim().match(/^(.*?)\s*([صم])$/);
+  if (match) {
+    const [, timeDigits, suffix] = match;
+    return (
+      <span className="inline-flex items-baseline justify-center gap-0.5">
+        <span>{timeDigits}</span>
+        <span className="text-[0.72em] font-bold opacity-90 mr-0.5">{suffix}</span>
+      </span>
+    );
+  }
+  return <span>{timeStr}</span>;
+};
+
 export const SchedulePoster: React.FC<SchedulePosterProps> = ({
   dayId = 'saturday',
   dayLabel,
@@ -114,27 +129,33 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
 
   const unifiedFontConfig = getUnifiedFontConfig(rowCount);
 
-  // Exact same enlarged unified font size for ALL clinic boxes in the exported image
+  // Exact same enlarged unified font size for ALL clinic boxes in the exported image, with smart scaling for long names
   const getExportClinicFontSize = (text: string): string => {
     const base = unifiedFontConfig.main;
     const len = (text || '').trim().length;
-    if (len >= 19) return `${Math.max(12, base - 4)}px`;
-    if (len >= 15) return `${Math.max(12, base - 2)}px`;
+    if (len >= 20) return `${Math.max(11, Math.round(base * 0.58))}px`;
+    if (len >= 15) return `${Math.max(12, Math.round(base * 0.68))}px`;
+    if (len >= 11) return `${Math.max(13, Math.round(base * 0.80))}px`;
     return `${base}px`;
   };
 
-  // Exact same enlarged unified font size for ALL doctor boxes in the exported image
+  // Exact same enlarged unified font size for ALL doctor boxes in the exported image, with smart scaling
   const getExportDoctorFontSize = (text: string): string => {
     const base = unifiedFontConfig.main;
     const len = (text || '').trim().length;
-    if (len >= 24) return `${Math.max(12, base - 4)}px`;
-    if (len >= 20) return `${Math.max(12, base - 2)}px`;
+    if (len >= 28) return `${Math.max(11, Math.round(base * 0.60))}px`;
+    if (len >= 22) return `${Math.max(12, Math.round(base * 0.70))}px`;
+    if (len >= 16) return `${Math.max(13, Math.round(base * 0.82))}px`;
     return `${base}px`;
   };
 
   // Exact same enlarged unified font size for ALL time boxes (من / إلى) in the exported image
-  const getExportTimeFontSize = (_text: string): string => {
-    return `${unifiedFontConfig.time}px`;
+  const getExportTimeFontSize = (text: string): string => {
+    const base = unifiedFontConfig.time;
+    const len = (text || '').trim().length;
+    if (len >= 9) return `${Math.max(11, Math.round(base * 0.80))}px`;
+    if (len >= 8) return `${Math.max(12, Math.round(base * 0.88))}px`;
+    return `${base}px`;
   };
 
   const exportIconSize = unifiedFontConfig.icon;
@@ -632,12 +653,12 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                         }
                         className={`min-w-0 flex-1 text-center text-slate-950 flex items-center justify-center ${
                           isExporting
-                            ? 'font-black leading-none tracking-tight whitespace-nowrap overflow-hidden'
-                            : 'font-bold text-[11px] sm:text-sm md:text-base leading-tight'
+                            ? 'font-black leading-normal tracking-tight whitespace-nowrap overflow-hidden py-1'
+                            : 'font-bold text-[11px] sm:text-sm md:text-base leading-snug'
                         }`}
                       >
                         {row.clinicName ? (
-                          <span className={isExporting ? 'whitespace-nowrap' : 'leading-tight text-center'}>
+                          <span className={isExporting ? 'whitespace-nowrap leading-normal py-0.5' : 'leading-snug text-center'}>
                             {row.clinicName}
                           </span>
                         ) : showControls ? (
@@ -668,8 +689,8 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                       }
                       className={`min-w-0 overflow-hidden bg-[#f1f5f2] flex items-center justify-center text-center text-slate-950 relative ${
                         isExporting
-                          ? 'px-2 py-0.5 h-full font-black leading-none tracking-tight whitespace-nowrap'
-                          : 'px-1 sm:px-2 py-1.5 sm:py-2 font-bold text-[11px] sm:text-sm md:text-base leading-tight'
+                          ? 'px-2 py-0.5 h-full font-black leading-normal tracking-tight whitespace-nowrap'
+                          : 'px-1 sm:px-2 py-1.5 sm:py-2 font-bold text-[11px] sm:text-sm md:text-base leading-snug'
                       } ${
                         showControls
                           ? 'cursor-pointer hover:bg-emerald-50/90 hover:ring-2 hover:ring-inset hover:ring-emerald-500 transition'
@@ -722,7 +743,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                           </div>
                         </div>
                       ) : row.doctorName ? (
-                        <span className={isExporting ? 'whitespace-nowrap' : 'leading-tight text-center'}>
+                        <span className={isExporting ? 'whitespace-nowrap leading-normal' : 'leading-snug text-center'}>
                           {row.doctorName}
                         </span>
                       ) : showControls ? (
@@ -750,8 +771,8 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                       }
                       className={`min-w-0 overflow-hidden bg-[#fdf9f2] flex items-center justify-center px-0.5 sm:px-1 text-center text-slate-950 tracking-tight whitespace-nowrap relative ${
                         isExporting
-                          ? 'py-0.5 h-full font-black leading-none'
-                          : 'py-1.5 sm:py-2 font-semibold text-[10px] sm:text-xs md:text-sm leading-tight'
+                          ? 'py-0.5 h-full font-black leading-normal'
+                          : 'py-1.5 sm:py-2 font-semibold text-[10px] sm:text-xs md:text-sm leading-snug'
                       } ${
                         showControls
                           ? 'cursor-pointer hover:bg-amber-50/90 hover:ring-2 hover:ring-inset hover:ring-amber-400 transition'
@@ -761,7 +782,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                       }`}
                     >
                       {row.startTime ? (
-                        <span className="whitespace-nowrap">{row.startTime}</span>
+                        formatTimeWithSmallSuffix(row.startTime)
                       ) : showControls ? (
                         <span className="text-slate-300 text-xs font-bold">
                           &nbsp;
@@ -787,8 +808,8 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                       }
                       className={`min-w-0 overflow-hidden bg-[#eef6fc] flex items-center justify-center px-0.5 sm:px-1 text-center text-slate-950 tracking-tight whitespace-nowrap relative ${
                         isExporting
-                          ? 'py-0.5 h-full font-black leading-none'
-                          : 'py-1.5 sm:py-2 font-semibold text-[10px] sm:text-xs md:text-sm leading-tight'
+                          ? 'py-0.5 h-full font-black leading-normal'
+                          : 'py-1.5 sm:py-2 font-semibold text-[10px] sm:text-xs md:text-sm leading-snug'
                       } ${
                         showControls
                           ? 'cursor-pointer hover:bg-sky-50/90 hover:ring-2 hover:ring-inset hover:ring-sky-400 transition'
@@ -798,7 +819,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                       }`}
                     >
                       {row.endTime ? (
-                        <span className="whitespace-nowrap">{row.endTime}</span>
+                        formatTimeWithSmallSuffix(row.endTime)
                       ) : showControls ? (
                         <span className="text-slate-300 text-xs font-bold">
                           &nbsp;

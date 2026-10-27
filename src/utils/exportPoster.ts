@@ -383,9 +383,33 @@ export async function renderHighResPosterDataUrl(
     );
 
     ctx.fillStyle = '#0f172a';
-    ctx.font = `900 ${fontSize}px 'Cairo', sans-serif`;
+
+    const clinicLen = (row.clinicName || '').trim().length;
+    const clinicFontSize =
+      clinicLen >= 20
+        ? Math.round(fontSize * 0.58)
+        : clinicLen >= 15
+        ? Math.round(fontSize * 0.68)
+        : clinicLen >= 11
+        ? Math.round(fontSize * 0.80)
+        : fontSize;
+
+    const doctorLen = (row.doctorName || '').trim().length;
+    const doctorFontSize =
+      doctorLen >= 28
+        ? Math.round(fontSize * 0.60)
+        : doctorLen >= 22
+        ? Math.round(fontSize * 0.70)
+        : doctorLen >= 16
+        ? Math.round(fontSize * 0.82)
+        : fontSize;
+
+    ctx.font = `900 ${clinicFontSize}px 'Cairo', sans-serif`;
     ctx.fillText(row.clinicName, xClinic + (colClinicW - (canvasIconSize + 16)) / 2, ry + rh / 2);
+
+    ctx.font = `900 ${doctorFontSize}px 'Cairo', sans-serif`;
     ctx.fillText(row.doctorName, xDoctor + colDoctorW / 2, ry + rh / 2);
+
     ctx.font = `900 ${Math.min(fontSize, 36)}px 'Cairo', sans-serif`;
     ctx.fillText(row.startTime, xFrom + colFromW / 2, ry + rh / 2);
     ctx.fillText(row.endTime, xTo + colToW / 2, ry + rh / 2);
