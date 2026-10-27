@@ -362,6 +362,20 @@ export default function App() {
                   : [],
             };
           }
+        } else if (isPrimaryAdmin) {
+          const adminDoc: UserProfile = {
+            uid: emailDocId,
+            email: PRIMARY_ADMIN_EMAIL,
+            displayName: (user.displayName || 'مدير مجمع ميت عزون الطبي').slice(0, 120),
+            role: 'ADMIN',
+            allowedDays: DAYS_LIST.map((d) => d.id),
+          };
+          remoteUserDoc = adminDoc;
+          await setDoc(doc(db, 'users', emailDocId), {
+            ...adminDoc,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
         }
       } catch {
         // Unregistered or permission denied
@@ -1141,6 +1155,24 @@ export default function App() {
     );
   };
 
+  const handleClearDay = () => {
+    if (!userCanEditSelectedDay) return;
+    const currentDay = schedules[selectedDay];
+    if (!currentDay || currentDay.draftRows.length === 0) return;
+    if (
+      window.confirm(
+        `هل تريد مسح جميع عيادات يوم ${currentDay.dayLabel} (${currentDay.draftRows.length} عيادات) من السحابة وقاعدة البيانات؟ يمكنك التراجع عن هذا الإجراء في أي وقت باستخدام زر «تراجع».`
+      )
+    ) {
+      commitDayScheduleChange(
+        selectedDay,
+        [],
+        'DELETE_ROW',
+        `مسح جميع عيادات يوم ${currentDay.dayLabel} (${currentDay.draftRows.length} عيادات) للبدء بجدول نظيف`
+      );
+    }
+  };
+
   const handleSaveSettings = async (newSettings: CenterSettings) => {
     if (activeRole !== 'ADMIN') return;
     setSettings(newSettings);
@@ -1323,7 +1355,7 @@ export default function App() {
 
   return (
     <div
-      className="relative min-h-screen bg-gradient-to-b from-[#f3effb] via-slate-50 to-[#e8dff5] text-slate-900 flex flex-col overflow-x-hidden"
+      className="relative min-h-screen bg-gradient-to-b from-[#f3effb] via-slate-50 to-[#e8dff5] text-slate-900 flex flex-col overflow-x-clip"
       dir="rtl"
     >
       {/* App Watermark */}
@@ -1339,8 +1371,8 @@ export default function App() {
 
       <OfflineIndicator />
 
-      {/* Top Bar: Navigation + Login/Logout */}
-      <header className="sticky top-0 z-40 bg-gradient-to-r from-purple-950 via-indigo-950 to-purple-950 text-white border-b border-purple-800/60 shadow-md">
+      {/* Top Bar: Always Sticky & Visible while scrolling with Day Navigation + Undo + Login/Logout */}
+      <header className="sticky top-0 z-50 bg-gradient-to-r from-purple-950 via-indigo-950 to-purple-950 text-white border-b-2 border-purple-800 shadow-lg backdrop-blur-md">
         <div className="mx-auto max-w-7xl px-2.5 sm:px-6 py-2 flex items-center justify-between gap-2 overflow-x-auto no-scrollbar">
           {/* Sidebar Menu Button — Shown ONLY when LOGGED IN as ADMIN */}
           {Boolean(firebaseUser) && activeRole === 'ADMIN' && !isStrictPublicUrl && (
@@ -1410,9 +1442,24 @@ export default function App() {
             })}
           </nav>
 
-          {/* Direct Login / Logout Button in Top Bar */}
+          {/* Top Bar Controls: Header Undo + Login/Logout */}
           {!isStrictPublicUrl && (
             <div className="flex items-center gap-1.5 shrink-0">
+              {/* Persistent Header Undo Button — Shown ONLY when an edit/action has been performed */}
+              {userCanEditSelectedDay && canUndo && (
+                <button
+                  type="button"
+                  onClick={handleUndo}
+                  data-testid="header-undo-btn"
+                  title={`تراجع عن آخر تعديل في جدول ${currentSchedule.dayLabel} (${undoCount} متاح)`}
+                  aria-label="تراجع عن آخر تعديل"
+                  className="inline-flex items-center justify-center gap-1 rounded-xl p-2 sm:px-3 sm:py-1.5 text-xs font-black transition cursor-pointer bg-amber-400 text-slate-950 hover:bg-amber-300 ring-2 ring-amber-300/50 shadow-sm active:scale-95 shrink-0"
+                >
+                  <RotateCcw className="w-3.5 h-3.5 shrink-0 text-slate-950" />
+                  <span className="font-black">{undoCount > 0 ? `تراجع (${undoCount})` : 'تراجع'}</span>
+                </button>
+              )}
+
               {firebaseUser ? (
                 <button
                   type="button"
@@ -1831,9 +1878,6 @@ export default function App() {
           rows={displayedRows}
           settings={settings}
           posterRef={exportPosterRef}
-          canUndo={canUndo}
-          undoCount={undoCount}
-          onUndo={handleUndo}
         />
 
         {/* Main Workspace: Interactive Poster Table */}
@@ -1892,6 +1936,7 @@ export default function App() {
               onDeleteRow={handleDeleteRow}
               onMoveRow={handleMoveRow}
               onCopyRowToDay={handleCopyRowToDay}
+              onClearDay={handleClearDay}
             />
           </div>
         </div>

@@ -48,6 +48,7 @@ interface SchedulePosterProps {
   onDeleteRow?: (rowId: string) => void;
   onMoveRow?: (rowId: string, direction: 'up' | 'down') => void;
   onCopyRowToDay?: (row: ScheduleRow, targetDayId: DayId) => void;
+  onClearDay?: () => void;
 }
 
 type ActiveCellPopup =
@@ -67,6 +68,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
   onDeleteRow,
   onMoveRow,
   onCopyRowToDay,
+  onClearDay,
 }) => {
   const orderedRows = normalizeSortOrders(rows);
   const [activePopup, setActivePopup] = useState<ActiveCellPopup>(null);
@@ -83,37 +85,39 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
   const isCompactExport = isExporting && rowCount >= 8;
 
   // Dynamic font and icon sizing ONLY when exporting to 4:5 PNG (780x975 -> 1440x1800)
-  // Guarantees every text fills its box clearly while staying 100% locked inside fixed column bounds
+  // Guarantees every text fills its box boldly and completely while staying locked inside column bounds
   const getExportClinicFontSize = (text: string): string => {
     const len = (text || '').trim().length;
     const base =
-      rowCount <= 4 ? 32 : rowCount <= 6 ? 28 : rowCount <= 8 ? 25 : rowCount <= 10 ? 22 : 19;
-    if (len >= 22) return `${Math.min(base, 19)}px`;
-    if (len >= 16) return `${Math.min(base, 22)}px`;
-    if (len >= 12) return `${Math.min(base, 25)}px`;
+      rowCount <= 4 ? 42 : rowCount <= 6 ? 38 : rowCount <= 8 ? 34 : rowCount <= 10 ? 31 : 27;
+    if (len >= 22) return `${Math.min(base, 23)}px`;
+    if (len >= 17) return `${Math.min(base, 26)}px`;
+    if (len >= 13) return `${Math.min(base, 29)}px`;
+    if (len >= 10) return `${Math.min(base, 31)}px`;
     return `${base}px`;
   };
 
   const getExportDoctorFontSize = (text: string): string => {
     const len = (text || '').trim().length;
     const base =
-      rowCount <= 4 ? 34 : rowCount <= 6 ? 30 : rowCount <= 8 ? 27 : rowCount <= 10 ? 24 : 21;
-    if (len >= 22) return `${Math.min(base, 22)}px`;
-    if (len >= 18) return `${Math.min(base, 25)}px`;
-    if (len >= 14) return `${Math.min(base, 28)}px`;
+      rowCount <= 4 ? 44 : rowCount <= 6 ? 40 : rowCount <= 8 ? 36 : rowCount <= 10 ? 33 : 29;
+    if (len >= 24) return `${Math.min(base, 25)}px`;
+    if (len >= 20) return `${Math.min(base, 28)}px`;
+    if (len >= 17) return `${Math.min(base, 30)}px`;
+    if (len >= 14) return `${Math.min(base, 32)}px`;
     return `${base}px`;
   };
 
   const getExportTimeFontSize = (text: string): string => {
     const len = (text || '').trim().length;
     const base =
-      rowCount <= 4 ? 25 : rowCount <= 6 ? 23 : rowCount <= 8 ? 21 : rowCount <= 10 ? 19 : 17;
-    if (len >= 8) return `${Math.min(base, 19)}px`;
+      rowCount <= 4 ? 30 : rowCount <= 6 ? 28 : rowCount <= 8 ? 26 : rowCount <= 10 ? 25 : 22;
+    if (len >= 8) return `${Math.min(base, 24)}px`;
     return `${base}px`;
   };
 
   const exportIconSize =
-    rowCount <= 4 ? 42 : rowCount <= 7 ? 38 : rowCount === 8 ? 34 : 30;
+    rowCount <= 4 ? 46 : rowCount <= 7 ? 42 : rowCount <= 9 ? 38 : 34;
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -381,7 +385,9 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
           className={`relative z-20 rounded-[26px] bg-white shadow-md border border-purple-100 ${
             isExporting
               ? 'p-2 flex-1 flex flex-col min-h-0'
-              : 'p-1.5 sm:p-3'
+              : showControls
+                ? 'p-1.5 pl-5 sm:p-3 sm:pl-6'
+                : 'p-1.5 sm:p-3'
           }`}
         >
           {/* Table Column Headers (RTL order: العيادة 31% | الطبيب 39% | من 15% | إلى 15%) — Dynamically styled via settings */}
@@ -517,12 +523,12 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                         }
                         className={`min-w-0 flex-1 text-center text-slate-950 flex items-center justify-center ${
                           isExporting
-                            ? 'font-black leading-tight whitespace-nowrap overflow-hidden'
+                            ? 'font-black leading-none tracking-tight whitespace-nowrap overflow-hidden'
                             : 'font-extrabold text-xs sm:text-lg lg:text-xl leading-snug'
                         }`}
                       >
                         {row.clinicName ? (
-                          <span className={isExporting ? 'whitespace-nowrap truncate' : ''}>
+                          <span className={isExporting ? 'whitespace-nowrap' : ''}>
                             {row.clinicName}
                           </span>
                         ) : showControls ? (
@@ -553,7 +559,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                       }
                       className={`min-w-0 overflow-hidden bg-[#f1f5f2] flex items-center justify-center text-center text-slate-950 relative ${
                         isExporting
-                          ? 'px-1.5 py-0.5 h-full font-black leading-tight whitespace-nowrap'
+                          ? 'px-1 py-0.5 h-full font-black leading-none tracking-tight whitespace-nowrap'
                           : 'px-1.5 sm:px-3 py-2 sm:py-2.5 font-extrabold text-xs sm:text-lg lg:text-xl leading-snug'
                       } ${
                         showControls
@@ -612,7 +618,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                           </div>
                         </div>
                       ) : row.doctorName ? (
-                        <span className={isExporting ? 'whitespace-nowrap truncate' : ''}>
+                        <span className={isExporting ? 'whitespace-nowrap' : ''}>
                           {row.doctorName}
                         </span>
                       ) : showControls ? (
@@ -659,7 +665,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                       ) : null}
                     </div>
 
-                    {/* CELL 4: END TIME (إلى) */}
+                    {/* CELL 4: END TIME (إلى) — Clean full-width box without inside buttons */}
                     <div
                       data-testid={isExporting ? undefined : `cell-end-${idx}`}
                       onClick={() => openCellEditor(row, 'endTime')}
@@ -695,6 +701,32 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                         </span>
                       ) : null}
                     </div>
+
+                    {/* Row Actions Trigger Button (×) Positioned Outside the Left Edge of the Row Box */}
+                    {showControls && (
+                      <button
+                        type="button"
+                        data-export-ignore="true"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (activePopup?.rowId === row.id && activePopup?.field === 'actions') {
+                            setActivePopup(null);
+                          } else {
+                            openCellEditor(row, 'actions');
+                          }
+                        }}
+                        data-testid={`row-actions-btn-${idx}`}
+                        title="إجراءات الصف"
+                        aria-label={`خيارات صف ${row.clinicName || idx + 1}`}
+                        className={`absolute -left-4 sm:-left-5 top-1/2 -translate-y-1/2 z-20 w-4 h-4 sm:w-5 sm:h-5 rounded-full flex items-center justify-center text-[11px] sm:text-xs font-black leading-none transition cursor-pointer shadow-xs border ${
+                          activePopup?.rowId === row.id && activePopup?.field === 'actions'
+                            ? 'bg-slate-900 text-white border-slate-900'
+                            : 'bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-600 hover:text-white'
+                        }`}
+                      >
+                        ×
+                      </button>
+                    )}
 
                     {/* POPOVER 1: 18 SPECIALTY CLINICS SELECTOR */}
                     {isClinicOpen && showControls && (
@@ -873,17 +905,17 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                       </div>
                     )}
 
-                    {/* POPOVER 3: ROW ACTIONS */}
+                    {/* POPOVER 3: ROW ACTIONS (Compact Icons: 🔼 🔽, حذف + icon, ×) */}
                     {activePopup?.rowId === row.id &&
                       activePopup?.field === 'actions' &&
                       showControls && (
                         <div
                           data-export-ignore="true"
                           onClick={(e) => e.stopPropagation()}
-                          className="col-span-4 z-30 mt-1 rounded-xl bg-slate-900 p-2.5 text-white flex flex-wrap items-center justify-between gap-2 shadow-lg"
+                          className="col-span-4 z-30 mt-1 rounded-xl bg-slate-900 px-2.5 py-2 text-white flex flex-wrap items-center justify-between gap-1.5 shadow-lg"
                         >
-                          <span className="text-xs font-bold">
-                            إجراءات صف «{row.clinicName} - {row.doctorName}»:
+                          <span className="text-[11px] font-bold truncate max-w-[140px] sm:max-w-none">
+                            إجراءات الصف:
                           </span>
                           <div className="flex flex-wrap items-center gap-1.5">
                             <button
@@ -893,10 +925,11 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                                 onMoveRow && onMoveRow(row.id, 'up');
                                 setActivePopup(null);
                               }}
-                              className="inline-flex items-center gap-1 rounded-lg bg-white/15 px-2.5 py-1 text-xs font-bold hover:bg-white/25 disabled:opacity-30"
+                              title="تحريك لأعلى"
+                              aria-label="تحريك لأعلى"
+                              className="inline-flex items-center justify-center rounded-lg bg-white/15 px-2 py-1 text-xs font-bold hover:bg-white/25 disabled:opacity-30 cursor-pointer"
                             >
-                              <ArrowUp className="w-3.5 h-3.5" />
-                              <span>لأعلى</span>
+                              🔼
                             </button>
                             <button
                               type="button"
@@ -905,10 +938,11 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                                 onMoveRow && onMoveRow(row.id, 'down');
                                 setActivePopup(null);
                               }}
-                              className="inline-flex items-center gap-1 rounded-lg bg-white/15 px-2.5 py-1 text-xs font-bold hover:bg-white/25 disabled:opacity-30"
+                              title="تحريك لأسفل"
+                              aria-label="تحريك لأسفل"
+                              className="inline-flex items-center justify-center rounded-lg bg-white/15 px-2 py-1 text-xs font-bold hover:bg-white/25 disabled:opacity-30 cursor-pointer"
                             >
-                              <ArrowDown className="w-3.5 h-3.5" />
-                              <span>لأسفل</span>
+                              🔽
                             </button>
 
                             {onCopyRowToDay && (
@@ -918,7 +952,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                                   onChange={(e) =>
                                     setCopyTargetDay(e.target.value as DayId)
                                   }
-                                  className="bg-transparent text-xs font-bold text-white focus:outline-none"
+                                  className="bg-transparent text-xs font-bold text-white focus:outline-none cursor-pointer"
                                 >
                                   {DAYS_LIST.filter((d) => d.id !== dayId).map(
                                     (d) => (
@@ -938,7 +972,7 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                                     onCopyRowToDay(row, copyTargetDay);
                                     setActivePopup(null);
                                   }}
-                                  className="inline-flex items-center gap-1 rounded bg-indigo-600 px-2 py-0.5 text-[11px] font-bold"
+                                  className="inline-flex items-center gap-1 rounded bg-indigo-600 px-2 py-0.5 text-[11px] font-bold cursor-pointer"
                                 >
                                   <Copy className="w-3 h-3" />
                                   <span>نسخ</span>
@@ -952,18 +986,20 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                                 onDeleteRow && onDeleteRow(row.id);
                                 setActivePopup(null);
                               }}
-                              className="inline-flex items-center gap-1 rounded-lg bg-rose-600 px-2.5 py-1 text-xs font-bold hover:bg-rose-700"
+                              className="inline-flex items-center gap-1 rounded-lg bg-rose-600 px-2.5 py-1 text-xs font-bold hover:bg-rose-700 cursor-pointer"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
-                              <span>حذف الصف</span>
+                              <span>حذف</span>
                             </button>
 
                             <button
                               type="button"
                               onClick={() => setActivePopup(null)}
-                              className="rounded-lg bg-white/10 px-2 py-1 text-xs"
+                              title="إغلاق"
+                              aria-label="إغلاق"
+                              className="inline-flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 px-2 py-1 text-sm font-black leading-none cursor-pointer"
                             >
-                              إغلاق
+                              ×
                             </button>
                           </div>
                         </div>
@@ -974,18 +1010,31 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
             )}
           </div>
 
-          {/* Quick Add Row Button at Bottom of Table (Hidden on Export) */}
+          {/* Quick Controls at Bottom of Table (Hidden on Export) */}
           {showControls && (
-            <div data-export-ignore="true" className="mt-2 pt-1 text-center">
+            <div data-export-ignore="true" className="mt-2 pt-1 flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={handleQuickAddRow}
                 data-testid="quick-add-row-btn"
-                className="w-full rounded-xl border-2 border-dashed border-purple-300 bg-purple-50/50 py-2 text-xs font-extrabold text-purple-800 hover:bg-purple-100/70 hover:border-purple-400 transition flex items-center justify-center gap-1.5 cursor-pointer"
+                className="flex-1 min-w-[200px] rounded-xl border-2 border-dashed border-purple-300 bg-purple-50/50 py-2.5 text-xs font-extrabold text-purple-800 hover:bg-purple-100/70 hover:border-purple-400 transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
               >
                 <Plus className="w-4 h-4" />
                 <span>إضافة عيادة جديدة إلى جدول يوم {dayLabel}</span>
               </button>
+
+              {orderedRows.length > 0 && onClearDay && (
+                <button
+                  type="button"
+                  onClick={onClearDay}
+                  data-testid="quick-clear-day-btn"
+                  title={`مسح جميع عيادات يوم ${dayLabel} من السحابة وقاعدة البيانات`}
+                  className="rounded-xl border border-rose-300 bg-rose-50 hover:bg-rose-100 px-3 py-2.5 text-xs font-extrabold text-rose-700 transition flex items-center justify-center gap-1.5 cursor-pointer shrink-0 shadow-xs"
+                >
+                  <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+                  <span>مسح عيادات اليوم ({orderedRows.length})</span>
+                </button>
+              )}
             </div>
           )}
         </div>

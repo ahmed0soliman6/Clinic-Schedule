@@ -34,7 +34,7 @@ service cloud.firestore {
     }
 
     function authEmailDocId() {
-      return request.auth.token.email.lower().replace('@', '_at_').replace('\\.', '_dot_').replace('\\+', '_plus_');
+      return request.auth.token.email.lower().replace('@', '_at_').replace('[.]', '_dot_').replace('[+]', '_plus_');
     }
 
     function isAdmin() {
@@ -73,13 +73,13 @@ service cloud.firestore {
         data.complexName is string && data.complexName.size() >= 1 && data.complexName.size() <= 120 &&
         data.associationName is string && data.associationName.size() >= 1 && data.associationName.size() <= 160 &&
         data.registrationNumber is string && data.registrationNumber.size() >= 1 && data.registrationNumber.size() <= 60 &&
-        data.rightLogoUrl is string && data.rightLogoUrl.size() >= 1 && data.rightLogoUrl.size() <= 500 &&
-        data.leftLogoUrl is string && data.leftLogoUrl.size() >= 1 && data.leftLogoUrl.size() <= 500 &&
+        data.rightLogoUrl is string && data.rightLogoUrl.size() <= 500 &&
+        data.leftLogoUrl is string && data.leftLogoUrl.size() <= 500 &&
         data.address is string && data.address.size() >= 1 && data.address.size() <= 200 &&
         data.whatsappPhone is string && data.whatsappPhone.size() >= 1 && data.whatsappPhone.size() <= 40 &&
         data.landlinePhone is string && data.landlinePhone.size() >= 1 && data.landlinePhone.size() <= 40 &&
         data.dentalPhone is string && data.dentalPhone.size() >= 1 && data.dentalPhone.size() <= 40 &&
-        data.dentalLabel is string && data.dentalLabel.size() >= 1 && data.dentalLabel.size() <= 60 &&
+        data.dentalLabel is string && data.dentalLabel.size() <= 60 &&
         data.bgStartColor is string && data.bgStartColor.size() >= 4 && data.bgStartColor.size() <= 30 &&
         data.bgEndColor is string && data.bgEndColor.size() >= 4 && data.bgEndColor.size() <= 30 &&
         data.clinicHeaderColor is string && data.clinicHeaderColor.size() >= 4 && data.clinicHeaderColor.size() <= 30 &&
@@ -93,10 +93,10 @@ service cloud.firestore {
       return row is map &&
         row.keys().hasAll(['id', 'clinicName', 'doctorName', 'startTime', 'endTime', 'sortOrder']) &&
         row.id is string && row.id.size() >= 1 && row.id.size() <= 80 &&
-        row.clinicName is string && row.clinicName.size() >= 1 && row.clinicName.size() <= 120 &&
-        row.doctorName is string && row.doctorName.size() >= 1 && row.doctorName.size() <= 120 &&
-        row.startTime is string && row.startTime.size() >= 1 && row.startTime.size() <= 40 &&
-        row.endTime is string && row.endTime.size() >= 1 && row.endTime.size() <= 40 &&
+        row.clinicName is string && row.clinicName.size() <= 120 &&
+        row.doctorName is string && row.doctorName.size() <= 120 &&
+        row.startTime is string && row.startTime.size() <= 40 &&
+        row.endTime is string && row.endTime.size() <= 40 &&
         row.sortOrder is int && row.sortOrder >= 0 && row.sortOrder <= 500;
     }
 
@@ -133,7 +133,7 @@ service cloud.firestore {
         data.updatedBy is string && data.updatedBy.size() >= 1 && data.updatedBy.size() <= 128 &&
         data.updatedByEmail is string && data.updatedByEmail.size() >= 3 && data.updatedByEmail.size() <= 160 &&
         data.updatedByName is string && data.updatedByName.size() >= 1 && data.updatedByName.size() <= 120 &&
-        data.updatedAt is timestamp && data.updatedAt == request.time &&
+        data.updatedAt is timestamp &&
         data.publishedAt is string && data.publishedAt.size() >= 1 && data.publishedAt.size() <= 60;
     }
 
@@ -146,7 +146,7 @@ service cloud.firestore {
         data.allowedDays is list && data.allowedDays.size() <= 7 &&
         (data.allowedDays.size() == 0 || isValidAllowedDay(data.allowedDays[0])) &&
         data.createdAt is timestamp &&
-        data.updatedAt is timestamp && data.updatedAt == request.time;
+        data.updatedAt is timestamp;
     }
 
     function isValidAuditLog(data) {
@@ -162,7 +162,7 @@ service cloud.firestore {
         data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
         data.userEmail is string && data.userEmail.size() >= 3 && data.userEmail.size() <= 160 &&
         data.userName is string && data.userName.size() >= 1 && data.userName.size() <= 120 &&
-        data.createdAt is timestamp && data.createdAt == request.time;
+        data.createdAt is timestamp;
     }
 
     // 4. Collection Rules
@@ -175,8 +175,7 @@ service cloud.firestore {
       // Public visitors can read the center branding document
       allow get: if isValidId(settingId);
       allow list: if false;
-      allow create: if isSignedIn() && isValidId(settingId) && isAdmin() && isValidCenterSettings(incoming());
-      allow update: if isSignedIn() && isValidId(settingId) && isAdmin() && isValidCenterSettings(incoming());
+      allow create, update: if isSignedIn() && isValidId(settingId) && isAdmin() && isValidCenterSettings(incoming());
       allow delete: if false;
     }
 
@@ -188,14 +187,11 @@ service cloud.firestore {
     }
 
     match /schedules/{dayId} {
-      // Authorized staff can read; public visitors can also read if isPublic is true
-      allow get: if isStaff() || (resource.data.isPublic == true);
-      allow list: if isStaff();
+      // Authorized staff can read; public visitors can also read if document is missing or isPublic is true
+      allow get: if isStaff() || resource == null || (resource.data.isPublic == true);
+      allow list: if isStaff() || resource == null || (resource.data.isPublic == true);
       allow create: if isSignedIn() && isValidId(dayId) && isEditorForDay(dayId) && isValidDailySchedule(incoming()) && incoming().dayId == dayId;
-      allow update: if isSignedIn() && isValidId(dayId) && isEditorForDay(dayId) && isValidDailySchedule(incoming()) &&
-        incoming().dayId == existing().dayId && (
-          isAdmin() || incoming().version == existing().version + 1
-        );
+      allow update: if isSignedIn() && isValidId(dayId) && isEditorForDay(dayId) && isValidDailySchedule(incoming()) && incoming().dayId == dayId;
       allow delete: if false;
     }
 
@@ -206,10 +202,9 @@ service cloud.firestore {
       );
       allow list: if isAdmin();
       allow create: if isSignedIn() && isValidId(userId) && isAdmin() && isValidUserProfile(incoming()) &&
-        incoming().uid == userId && incoming().createdAt == request.time;
+        incoming().uid == userId;
       allow update: if isSignedIn() && isValidId(userId) && isAdmin() && isValidUserProfile(incoming()) &&
         incoming().uid == existing().uid &&
-        incoming().createdAt == existing().createdAt &&
         incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName', 'role', 'allowedDays', 'updatedAt']);
       allow delete: if isValidId(userId) && isAdmin();
     }

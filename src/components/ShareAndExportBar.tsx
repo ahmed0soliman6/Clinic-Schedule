@@ -4,7 +4,7 @@ import {
   Copy,
   Download,
   MessageSquareText,
-  RotateCcw,
+  Share2,
   Smartphone,
 } from 'lucide-react';
 import { CenterSettings, DayId, ScheduleRow } from '../types/schedule';
@@ -25,9 +25,6 @@ interface ShareAndExportBarProps {
   rows: ScheduleRow[];
   settings: CenterSettings;
   posterRef: React.RefObject<HTMLDivElement | null>;
-  canUndo?: boolean;
-  undoCount?: number;
-  onUndo?: () => void;
 }
 
 function copyTextToClipboardSync(text: string): void {
@@ -55,9 +52,6 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
   rows,
   settings,
   posterRef,
-  canUndo = false,
-  undoCount = 0,
-  onUndo,
 }) => {
   const [isExporting, setIsExporting] = useState(false);
   const [cachedPoster, setCachedPoster] = useState<{
@@ -78,7 +72,7 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
   }, [dayLabel, settings]);
 
   // Pre-render the 1440x1800 (4:5) high-res PNG in the background so clicking any share button
-  // works synchronously with zero async delay (avoiding browser popup/share blockers!)
+  // works synchronously with zero async delay
   useEffect(() => {
     let cancelled = false;
     const timer = setTimeout(async () => {
@@ -111,14 +105,10 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
   };
 
   const handleDownload4x5Png = async () => {
-    copyTextToClipboardSync(postText);
-    setCopiedPost(true);
-    setTimeout(() => setCopiedPost(false), 2500);
-
     if (cachedPoster && cachedPoster.dayLabel === dayLabel) {
       triggerInstantPngDownload(cachedPoster.dataUrl, dayLabel);
       setStatusBanner(
-        `✅ تم تحميل صورة جدول يوم ${dayLabel} بأبعاد (4:5) الثابتة ونسخ نص البوست تلقائيًا.`
+        `✅ تم حفظ صورة جدول يوم ${dayLabel} بأبعاد (4:5) الثابتة.`
       );
       return;
     }
@@ -133,15 +123,49 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
       );
       setCachedPoster({ ...assets, dayLabel });
       setStatusBanner(
-        `✅ تم تحميل صورة جدول يوم ${dayLabel} بأبعاد (4:5) الثابتة ونسخ نص البوست تلقائيًا.`
+        `✅ تم حفظ صورة جدول يوم ${dayLabel} بأبعاد (4:5) الثابتة.`
       );
     } finally {
       setIsExporting(false);
     }
   };
 
-  // Synchronous Web Share API handler for mobile phones (shares the actual 4:5 PNG File + Post Text)
-  const handleNativeMobileShare = async () => {
+  // Share ONLY the 4:5 PNG Image File WITHOUT post text
+  const handleNativeShareImageOnly = async () => {
+    const nav = navigator as Navigator & {
+      canShare?: (data?: ShareData) => boolean;
+    };
+
+    if (cachedPoster && cachedPoster.dayLabel === dayLabel) {
+      if (
+        typeof nav.share === 'function' &&
+        typeof nav.canShare === 'function' &&
+        nav.canShare({ files: [cachedPoster.file] })
+      ) {
+        try {
+          await nav.share({
+            files: [cachedPoster.file],
+          });
+          setStatusBanner(
+            `✅ تمت مشاركة صورة جدول يوم ${dayLabel} (4:5) فقط بدون بوست!`
+          );
+          return;
+        } catch {
+          // Fallback to download if dismissed or blocked by iframe
+        }
+      }
+      triggerInstantPngDownload(cachedPoster.dataUrl, dayLabel);
+      setStatusBanner(
+        `✅ تم حفظ صورة الجدول (4:5) — يمكنك إرفاقها مباشرة.`
+      );
+      return;
+    }
+
+    await handleDownload4x5Png();
+  };
+
+  // Share the 4:5 PNG Image File + Post Text together
+  const handleNativeMobileShareWithPost = async () => {
     copyTextToClipboardSync(postText);
     setCopiedPost(true);
     setTimeout(() => setCopiedPost(false), 3000);
@@ -183,74 +207,64 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
   return (
     <div
       dir="rtl"
-      className="mx-auto w-full max-w-[780px] rounded-2xl bg-white p-3 sm:p-4 shadow-sm border border-purple-100 space-y-3"
+      className="mx-auto w-full max-w-[780px] rounded-2xl bg-white p-2.5 sm:p-3.5 shadow-sm border border-purple-100 space-y-2.5"
     >
-      {/* 4 Main Action Buttons: Save, Share Mobile, Post, and Undo */}
+      {/* 4 Compact Action Buttons in ONE Single Row: حفظ | مشاركة | مشاركة+بوست | بوست */}
       <div
         data-testid="share-buttons-grid"
-        className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-2.5"
+        className="grid grid-cols-4 gap-1.5 sm:gap-2.5"
       >
-        {/* Button 1: Save 4:5 PNG Image */}
+        {/* Button 1: حفظ */}
         <button
           type="button"
           onClick={handleDownload4x5Png}
           disabled={isExporting}
           data-testid="export-png-btn"
           title="حفظ صورة الجدول PNG بأبعاد 4:5 ثابتة"
-          className="w-full inline-flex items-center justify-center gap-1 sm:gap-2 rounded-xl bg-purple-700 px-2 sm:px-3 py-2.5 sm:py-3 text-xs sm:text-sm font-black text-white whitespace-nowrap shadow-xs hover:bg-purple-800 disabled:opacity-60 transition cursor-pointer"
+          className="w-full inline-flex items-center justify-center gap-1 rounded-xl bg-purple-700 px-1.5 sm:px-3 py-2.5 text-[11px] sm:text-sm font-black text-white whitespace-nowrap shadow-xs hover:bg-purple-800 disabled:opacity-60 transition cursor-pointer"
         >
-          <Download className="w-4 h-4 shrink-0" />
-          <span>{isExporting ? 'جارٍ الحفظ...' : 'حفظ الصورة 4:5'}</span>
+          <Download className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
+          <span>{isExporting ? '...' : 'حفظ'}</span>
         </button>
 
-        {/* Button 2: Quick Native Phone Share */}
+        {/* Button 2: مشاركة (صورة فقط بدون بوست) */}
         <button
           type="button"
-          onClick={handleNativeMobileShare}
-          data-testid="share-native-btn"
-          title="مشاركة ملف الصورة مع البوست مباشرة عبر تطبيقات الهاتف"
-          className="w-full inline-flex items-center justify-center gap-1 sm:gap-2 rounded-xl bg-indigo-600 px-2 sm:px-3 py-2.5 sm:py-3 text-xs sm:text-sm font-black text-white whitespace-nowrap shadow-xs hover:bg-indigo-700 transition cursor-pointer"
+          onClick={handleNativeShareImageOnly}
+          data-testid="share-image-only-btn"
+          title="مشاركة صورة الجدول فقط بدون نص البوست"
+          className="w-full inline-flex items-center justify-center gap-1 rounded-xl bg-sky-600 px-1.5 sm:px-3 py-2.5 text-[11px] sm:text-sm font-black text-white whitespace-nowrap shadow-xs hover:bg-sky-700 transition cursor-pointer"
         >
-          <Smartphone className="w-4 h-4 shrink-0" />
-          <span>مشاركة للهاتف</span>
+          <Share2 className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
+          <span>مشاركة</span>
         </button>
 
-        {/* Button 3: Toggle Daily Post Text Box */}
+        {/* Button 3: مشاركة+بوست */}
+        <button
+          type="button"
+          onClick={handleNativeMobileShareWithPost}
+          data-testid="share-native-btn"
+          title="مشاركة ملف الصورة مع البوست مباشرة عبر تطبيقات الهاتف"
+          className="w-full inline-flex items-center justify-center gap-1 rounded-xl bg-indigo-600 px-1 sm:px-3 py-2.5 text-[10px] xs:text-[11px] sm:text-sm font-black text-white whitespace-nowrap shadow-xs hover:bg-indigo-700 transition cursor-pointer"
+        >
+          <Smartphone className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
+          <span>مشاركة+بوست</span>
+        </button>
+
+        {/* Button 4: بوست */}
         <button
           type="button"
           onClick={() => setShowPostBox((prev) => !prev)}
           data-testid="toggle-post-caption-btn"
           title={`عرض ونسخ النص الترويجي لبوست يوم ${dayLabel}`}
-          className={`w-full inline-flex items-center justify-center gap-1 sm:gap-2 rounded-xl border-2 px-2 sm:px-3 py-2.5 sm:py-3 text-xs sm:text-sm font-black whitespace-nowrap shadow-xs transition cursor-pointer ${
+          className={`w-full inline-flex items-center justify-center gap-1 rounded-xl border-2 px-1.5 sm:px-3 py-2.5 text-[11px] sm:text-sm font-black whitespace-nowrap shadow-xs transition cursor-pointer ${
             showPostBox
               ? 'border-purple-600 bg-purple-100 text-purple-950'
               : 'border-purple-300 bg-purple-50 text-purple-950 hover:bg-purple-100'
           }`}
         >
-          <MessageSquareText className="w-4 h-4 text-purple-700 shrink-0" />
-          <span>{showPostBox ? 'إخفاء البوست' : `بوست ${dayLabel}`}</span>
-        </button>
-
-        {/* Button 4: Undo Button directly next to Post button */}
-        <button
-          type="button"
-          onClick={onUndo}
-          disabled={!canUndo}
-          data-testid="main-undo-btn"
-          title={
-            canUndo
-              ? `تراجع عن آخر تعديل في جدول يوم ${dayLabel} (${undoCount} متاح)`
-              : 'لا توجد تعديلات سابقة للتراجع عنها'
-          }
-          aria-label={`تراجع عن آخر تعديل في جدول يوم ${dayLabel}`}
-          className={`w-full inline-flex items-center justify-center gap-1 sm:gap-2 rounded-xl border-2 px-2 sm:px-3 py-2.5 sm:py-3 text-xs sm:text-sm font-black whitespace-nowrap shadow-xs transition ${
-            canUndo
-              ? 'border-amber-400 bg-amber-400 hover:bg-amber-500 text-slate-950 cursor-pointer'
-              : 'border-slate-200 bg-slate-100 text-slate-400 opacity-60 cursor-not-allowed'
-          }`}
-        >
-          <RotateCcw className={`w-4 h-4 shrink-0 ${canUndo ? 'text-slate-950' : 'text-slate-400'}`} />
-          <span>{canUndo && undoCount > 0 ? `تراجع (${undoCount})` : 'تراجع'}</span>
+          <MessageSquareText className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-purple-700 shrink-0" />
+          <span>بوست</span>
         </button>
       </div>
 

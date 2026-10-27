@@ -326,7 +326,7 @@ export async function renderHighResPosterDataUrl(
   ctx.fillText('من', xFrom + colFromW / 2, innerY + tableHeaderHeight / 2);
   ctx.fillText('إلى', xTo + colToW / 2, innerY + tableHeaderHeight / 2);
 
-  const fontSize = rowCount <= 4 ? 36 : rowCount <= 7 ? 31 : 28;
+  const fontSize = rowCount <= 4 ? 50 : rowCount <= 7 ? 45 : 40;
   orderedRows.forEach((row, idx) => {
     const ry = innerY + tableHeaderHeight + 3 + idx * rowHeight;
     const rh = rowHeight - 3;
@@ -349,13 +349,14 @@ export async function renderHighResPosterDataUrl(
       row.iconColor,
       xClinic + colClinicW - 42,
       ry + rh / 2,
-      40
+      44
     );
 
     ctx.fillStyle = '#0f172a';
-    ctx.font = `800 ${fontSize}px 'Cairo', sans-serif`;
+    ctx.font = `900 ${fontSize}px 'Cairo', sans-serif`;
     ctx.fillText(row.clinicName, xClinic + (colClinicW - 64) / 2, ry + rh / 2);
     ctx.fillText(row.doctorName, xDoctor + colDoctorW / 2, ry + rh / 2);
+    ctx.font = `900 ${Math.min(fontSize, 38)}px 'Cairo', sans-serif`;
     ctx.fillText(row.startTime, xFrom + colFromW / 2, ry + rh / 2);
     ctx.fillText(row.endTime, xTo + colToW / 2, ry + rh / 2);
   });
