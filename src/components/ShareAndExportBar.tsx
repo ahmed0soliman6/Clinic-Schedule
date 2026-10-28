@@ -191,8 +191,8 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
     if (!assets) {
       setIsExporting(true);
       try {
-        const exported = await exportPosterAsPng(dayLabel, rows, settings, posterRef.current);
-        assets = { ...exported, dayLabel };
+        const prepared = await preparePosterExportAssets(dayLabel, rows, settings, posterRef.current);
+        assets = { ...prepared, dayLabel };
         setCachedPoster(assets);
       } catch {
         setStatusBanner('حدث خطأ أثناء تجهيز صورة الجدول للمشاركة.');
@@ -245,8 +245,8 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
     if (!assets) {
       setIsExporting(true);
       try {
-        const exported = await exportPosterAsPng(dayLabel, rows, settings, posterRef.current);
-        assets = { ...exported, dayLabel };
+        const prepared = await preparePosterExportAssets(dayLabel, rows, settings, posterRef.current);
+        assets = { ...prepared, dayLabel };
         setCachedPoster(assets);
       } catch {
         setStatusBanner('حدث خطأ أثناء تجهيز صورة الجدول للمشاركة.');
@@ -314,10 +314,10 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
       dir="rtl"
       className="mx-auto w-full max-w-[780px] rounded-2xl bg-white p-2.5 sm:p-3.5 shadow-sm border border-purple-100 space-y-2.5"
     >
-      {/* 4 Action Buttons in ONE Single Row: مشاركة | مشاركة+بوست | بوست | أيقونة التنزيل */}
+      {/* 4 Action Buttons in ONE Single Row: مشاركة | مشاركة+بوست (مكبّر) | بوست | أيقونة التنزيل (مصغّر) */}
       <div
         data-testid="share-buttons-grid"
-        className="grid grid-cols-4 gap-1.5 sm:gap-2.5 items-center"
+        className="grid grid-cols-[1fr_1.35fr_1fr_auto] gap-1.5 sm:gap-2.5 items-center"
       >
         {/* Button 1: مشاركة (صورة فقط بدون بوست) */}
         <button
@@ -331,15 +331,15 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
           <span>مشاركة</span>
         </button>
 
-        {/* Button 2: مشاركة+بوست */}
+        {/* Button 2: مشاركة+بوست (مكبّر ومتسق) */}
         <button
           type="button"
           onClick={handleNativeMobileShareWithPost}
           data-testid="share-native-btn"
           title="مشاركة ملف الصورة مع البوست مباشرة عبر تطبيقات الهاتف"
-          className="w-full inline-flex items-center justify-center gap-1 sm:gap-1.5 rounded-xl bg-indigo-600 px-1 sm:px-2.5 py-2.5 text-[11px] sm:text-xs md:text-sm font-black text-white whitespace-nowrap shadow-xs hover:bg-indigo-700 transition cursor-pointer"
+          className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-2 sm:px-3.5 py-2.5 text-xs sm:text-sm md:text-base font-black text-white whitespace-nowrap shadow-md hover:bg-indigo-700 transition cursor-pointer"
         >
-          <Smartphone className="w-4 h-4 sm:w-4.5 sm:h-4.5 shrink-0" />
+          <Smartphone className="w-4.5 h-4.5 sm:w-5 sm:h-5 shrink-0" />
           <span>مشاركة+بوست</span>
         </button>
 
@@ -359,16 +359,16 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
           <span>بوست</span>
         </button>
 
-        {/* Button 4: تنزيل (أيقونة تنزيل فقط بعد بوست، بدون كلمة حفظ) */}
+        {/* Button 4: تنزيل صورة الجدول (أيقونة تنزيل مصغّرة بدون كلمة حفظ) */}
         <button
           type="button"
           onClick={handleDownload4x5Png}
           disabled={isExporting}
           data-testid="export-png-btn"
           title="تنزيل صورة الجدول PNG بأبعاد 4:5 ثابتة"
-          className="w-full inline-flex items-center justify-center rounded-xl bg-purple-700 px-2 sm:px-3 py-2.5 text-white shadow-xs hover:bg-purple-800 disabled:opacity-60 transition cursor-pointer"
+          className="inline-flex items-center justify-center rounded-xl bg-purple-700 px-2.5 sm:px-3.5 py-2.5 text-white shadow-xs hover:bg-purple-800 disabled:opacity-60 transition cursor-pointer"
         >
-          <Download className="w-5 h-5 sm:w-5.5 sm:h-5.5 shrink-0" />
+          <Download className="w-4.5 h-4.5 sm:w-5 sm:h-5 shrink-0" />
         </button>
       </div>
 
