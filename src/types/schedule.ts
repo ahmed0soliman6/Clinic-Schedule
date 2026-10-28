@@ -184,6 +184,7 @@ export interface ReminderSettings {
   fbTargetDay?: ReminderTargetDay;
   fbFallbackMode?: FacebookFallbackMode;
   fbSkipEmptyDay?: boolean;
+  showFacebookCard?: boolean;
   lastSentDate?: string;
   lastFbPostDate?: string;
   lastFbPostTargetDate?: string;

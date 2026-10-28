@@ -1446,9 +1446,34 @@ export default async function handler(
       testAdminEmail = email;
     } else {
       const cronSecret = normalizeEnvSecret(process.env.CRON_SECRET);
-      if (!cronSecret || bearer !== cronSecret) {
-        res.status(401).json({ error: 'CRON_SECRET غير صالح.' });
-        return;
+      const isValidCronSecret = Boolean(cronSecret && bearer === cronSecret);
+
+      if (!isValidCronSecret) {
+        // Also allow authenticated Admin/Staff client heartbeat to trigger due reminders/auto-post
+        let isAuthorizedStaffToken = false;
+        try {
+          const decoded = await adminAuth.verifyIdToken(bearer);
+          const email = (decoded.email || '').trim().toLowerCase();
+          if (email === PRIMARY_ADMIN_EMAIL) {
+            isAuthorizedStaffToken = true;
+          } else if (email) {
+            const userSnap = await db
+              .collection('users')
+              .doc(emailToDocId(email))
+              .get();
+            const role = userSnap.data()?.role;
+            if (userSnap.exists && (role === 'ADMIN' || role === 'EDITOR')) {
+              isAuthorizedStaffToken = true;
+            }
+          }
+        } catch {
+          isAuthorizedStaffToken = false;
+        }
+
+        if (!isAuthorizedStaffToken) {
+          res.status(401).json({ error: 'CRON_SECRET أو رمز المصادقة غير صالح.' });
+          return;
+        }
       }
     }
 

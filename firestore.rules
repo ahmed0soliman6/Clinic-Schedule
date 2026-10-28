@@ -237,7 +237,8 @@ service cloud.firestore {
         (!('fbPostMode' in data) || data.fbPostMode in ['photo_with_caption', 'photo_only', 'text_only']) &&
         (!('fbTargetDay' in data) || data.fbTargetDay in ['today', 'tomorrow']) &&
         (!('fbFallbackMode' in data) || data.fbFallbackMode in ['text', 'skip']) &&
-        (!('fbSkipEmptyDay' in data) || data.fbSkipEmptyDay is bool);
+        (!('fbSkipEmptyDay' in data) || data.fbSkipEmptyDay is bool) &&
+        (!('showFacebookCard' in data) || data.showFacebookCard is bool);
     }
 
     // 4. Collection Rules

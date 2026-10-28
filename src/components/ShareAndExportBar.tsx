@@ -41,6 +41,9 @@ interface ShareAndExportBarProps {
   onChangeFbTargetDay?: (
     targetDay: 'today' | 'tomorrow'
   ) => Promise<{ ok: boolean; error?: string } | void> | void;
+  onChangeFbAutoPostTime?: (
+    time: string
+  ) => Promise<{ ok: boolean; error?: string } | void> | void;
   onPublishFacebookNow?: (params: {
     dayId?: DayId;
     dayLabel: string;
@@ -86,6 +89,7 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
   fbTargetDay = 'tomorrow',
   onToggleFbAutoPost,
   onChangeFbTargetDay,
+  onChangeFbAutoPostTime,
   onPublishFacebookNow,
 }) => {
   const [isExporting, setIsExporting] = useState(false);
@@ -344,6 +348,18 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
     }
   };
 
+  const handleAutoPostTimeChange = async (nextTime: string) => {
+    if (!onChangeFbAutoPostTime || !nextTime) return;
+    setFbStatusBanner(null);
+    const res = await onChangeFbAutoPostTime(nextTime);
+    if (res && !res.ok && res.error) {
+      setFbStatusBanner({
+        ok: false,
+        message: res.error,
+      });
+    }
+  };
+
   const liveAutoPostLine = buildLiveAutoPostPreviewLine({
     fbTargetDay,
     fbAutoPostTime,
@@ -422,7 +438,7 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
             <button
               type="button"
               onClick={onCloseFacebookCard}
-              title="إخفاء بطاقة النشر على فيسبوك"
+              title="إخفاء بطاقة النشر على فيسبوك للجميع"
               aria-label="إخفاء بطاقة النشر على فيسبوك"
               className="absolute top-2 left-2 text-slate-400 hover:text-slate-700 p-1 rounded-lg hover:bg-blue-100 transition cursor-pointer"
             >
@@ -431,7 +447,7 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
           )}
 
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-            <div className="flex flex-wrap items-center justify-between sm:justify-start gap-3 pl-7 sm:pl-0">
+            <div className="flex flex-wrap items-center justify-between sm:justify-start gap-2.5 pl-7 sm:pl-0">
               <div className="flex items-center gap-2">
                 <Globe className="w-4 h-4 text-blue-700 shrink-0" />
                 <div>
@@ -447,7 +463,7 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
                 </div>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-1.5">
                 {onChangeFbTargetDay && (
                   <select
                     aria-label="جدول (اليوم/غداً) سيُنشر على فيسبوك"
@@ -463,6 +479,17 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
                     <option value="tomorrow">جدول غداً سيُنشر على فيسبوك</option>
                     <option value="today">جدول اليوم سيُنشر على فيسبوك</option>
                   </select>
+                )}
+
+                {onChangeFbAutoPostTime && (
+                  <input
+                    type="time"
+                    aria-label="وقت النشر التلقائي اليومي"
+                    data-testid="sharebar-fb-autopost-time-input"
+                    value={fbAutoPostTime || '20:00'}
+                    onChange={(e) => handleAutoPostTimeChange(e.target.value)}
+                    className="rounded-lg border border-blue-300 bg-white px-2 py-1 text-[11px] font-extrabold text-slate-900 focus:outline-none focus:border-blue-600"
+                  />
                 )}
 
                 <button

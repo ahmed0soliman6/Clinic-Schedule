@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   BellRing,
@@ -120,6 +120,51 @@ function formatArabicStatusLabel(status?: ReminderSettings['lastFbPostStatus']):
   }
 }
 
+function buildEditableDraftFromProps(
+  reminderSettings?: ReminderSettings
+): ClientEditableReminderSettings {
+  return {
+    enabled: reminderSettings?.enabled ?? DEFAULT_REMINDER_SETTINGS.enabled,
+    time: reminderSettings?.time || DEFAULT_REMINDER_SETTINGS.time,
+    timezone: 'Africa/Cairo',
+    targetDay:
+      reminderSettings?.targetDay === 'today' ||
+      reminderSettings?.targetDay === 'tomorrow'
+        ? reminderSettings.targetDay
+        : DEFAULT_REMINDER_SETTINGS.targetDay,
+    title: reminderSettings?.title || DEFAULT_REMINDER_SETTINGS.title,
+    body: reminderSettings?.body || DEFAULT_REMINDER_SETTINGS.body,
+    fbAutoPostEnabled:
+      reminderSettings?.fbAutoPostEnabled ??
+      DEFAULT_REMINDER_SETTINGS.fbAutoPostEnabled,
+    fbAutoPostTime:
+      reminderSettings?.fbAutoPostTime ||
+      DEFAULT_REMINDER_SETTINGS.fbAutoPostTime ||
+      '20:00',
+    fbPostMode:
+      reminderSettings?.fbPostMode ||
+      DEFAULT_REMINDER_SETTINGS.fbPostMode ||
+      'photo_with_caption',
+    fbTargetDay:
+      reminderSettings?.fbTargetDay === 'today' ||
+      reminderSettings?.fbTargetDay === 'tomorrow'
+        ? reminderSettings.fbTargetDay
+        : DEFAULT_REMINDER_SETTINGS.fbTargetDay || 'tomorrow',
+    fbFallbackMode:
+      reminderSettings?.fbFallbackMode === 'skip'
+        ? 'skip'
+        : DEFAULT_REMINDER_SETTINGS.fbFallbackMode || 'text',
+    fbSkipEmptyDay:
+      typeof reminderSettings?.fbSkipEmptyDay === 'boolean'
+        ? reminderSettings.fbSkipEmptyDay
+        : DEFAULT_REMINDER_SETTINGS.fbSkipEmptyDay ?? true,
+    showFacebookCard:
+      typeof reminderSettings?.showFacebookCard === 'boolean'
+        ? reminderSettings.showFacebookCard
+        : DEFAULT_REMINDER_SETTINGS.showFacebookCard ?? false,
+  };
+}
+
 export const RemindersAndAutoPostModal: React.FC<
   RemindersAndAutoPostModalProps
 > = ({
@@ -135,45 +180,18 @@ export const RemindersAndAutoPostModal: React.FC<
   onClose,
 }) => {
   const [reminderDraft, setReminderDraft] =
-    useState<ClientEditableReminderSettings>({
-      enabled: reminderSettings?.enabled ?? DEFAULT_REMINDER_SETTINGS.enabled,
-      time: reminderSettings?.time || DEFAULT_REMINDER_SETTINGS.time,
-      timezone: 'Africa/Cairo',
-      targetDay:
-        reminderSettings?.targetDay === 'today' ||
-        reminderSettings?.targetDay === 'tomorrow'
-          ? reminderSettings.targetDay
-          : DEFAULT_REMINDER_SETTINGS.targetDay,
-      title: reminderSettings?.title || DEFAULT_REMINDER_SETTINGS.title,
-      body: reminderSettings?.body || DEFAULT_REMINDER_SETTINGS.body,
-      fbAutoPostEnabled:
-        reminderSettings?.fbAutoPostEnabled ??
-        DEFAULT_REMINDER_SETTINGS.fbAutoPostEnabled,
-      fbAutoPostTime:
-        reminderSettings?.fbAutoPostTime ||
-        DEFAULT_REMINDER_SETTINGS.fbAutoPostTime ||
-        '20:00',
-      fbPostMode:
-        reminderSettings?.fbPostMode ||
-        DEFAULT_REMINDER_SETTINGS.fbPostMode ||
-        'photo_with_caption',
-      fbTargetDay:
-        reminderSettings?.fbTargetDay === 'today' ||
-        reminderSettings?.fbTargetDay === 'tomorrow'
-          ? reminderSettings.fbTargetDay
-          : DEFAULT_REMINDER_SETTINGS.fbTargetDay || 'tomorrow',
-      fbFallbackMode:
-        reminderSettings?.fbFallbackMode === 'skip'
-          ? 'skip'
-          : DEFAULT_REMINDER_SETTINGS.fbFallbackMode || 'text',
-      fbSkipEmptyDay:
-        typeof reminderSettings?.fbSkipEmptyDay === 'boolean'
-          ? reminderSettings.fbSkipEmptyDay
-          : DEFAULT_REMINDER_SETTINGS.fbSkipEmptyDay ?? true,
-    });
+    useState<ClientEditableReminderSettings>(() =>
+      buildEditableDraftFromProps(reminderSettings)
+    );
+  const reminderDraftRef = useRef<ClientEditableReminderSettings>(reminderDraft);
+  const hasUnsavedLocalEditRef = useRef(false);
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [errors, setErrors] = useState<string[]>([]);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [autoSaveStatus, setAutoSaveStatus] = useState<
+    'idle' | 'saving' | 'saved'
+  >('idle');
   const [testSending, setTestSending] = useState(false);
   const [testStatusMsg, setTestStatusMsg] = useState<{
     ok: boolean;
@@ -207,26 +225,101 @@ export const RemindersAndAutoPostModal: React.FC<
     unknown
   > | null>(null);
 
+  // Sync draft when remote Firestore reminderSettings arrive (as long as user isn't mid-edit)
+  useEffect(() => {
+    if (!reminderSettings || hasUnsavedLocalEditRef.current) return;
+    const nextDraft = buildEditableDraftFromProps(reminderSettings);
+    reminderDraftRef.current = nextDraft;
+    setReminderDraft(nextDraft);
+  }, [
+    reminderSettings?.enabled,
+    reminderSettings?.time,
+    reminderSettings?.targetDay,
+    reminderSettings?.title,
+    reminderSettings?.body,
+    reminderSettings?.fbAutoPostEnabled,
+    reminderSettings?.fbAutoPostTime,
+    reminderSettings?.fbPostMode,
+    reminderSettings?.fbTargetDay,
+    reminderSettings?.fbFallbackMode,
+    reminderSettings?.fbSkipEmptyDay,
+    reminderSettings?.showFacebookCard,
+  ]);
+
+  useEffect(() => {
+    return () => {
+      if (autoSaveTimerRef.current) {
+        clearTimeout(autoSaveTimerRef.current);
+      }
+    };
+  }, []);
+
+  const flushPendingDraftSave = async (
+    draftToSave = reminderDraftRef.current
+  ): Promise<boolean> => {
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+    const validation = validateReminderSettings(draftToSave);
+    if (!validation.valid) {
+      setErrors(validation.errors);
+      return false;
+    }
+    setErrors([]);
+    setAutoSaveStatus('saving');
+    try {
+      const res = await onSave(validation.sanitized);
+      if (res && res.ok === false) {
+        setErrors([
+          res.error ||
+            'تعذر حفظ الإعدادات في قاعدة البيانات. تم التراجع عن التغيير.',
+        ]);
+        setAutoSaveStatus('idle');
+        return false;
+      }
+      hasUnsavedLocalEditRef.current = false;
+      setAutoSaveStatus('saved');
+      return true;
+    } catch {
+      setAutoSaveStatus('idle');
+      return false;
+    }
+  };
+
+  const updateDraft = (patch: Partial<ClientEditableReminderSettings>) => {
+    hasUnsavedLocalEditRef.current = true;
+    const next: ClientEditableReminderSettings = {
+      ...reminderDraftRef.current,
+      ...patch,
+    };
+    reminderDraftRef.current = next;
+    setReminderDraft(next);
+
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+    }
+    autoSaveTimerRef.current = setTimeout(() => {
+      autoSaveTimerRef.current = null;
+      flushPendingDraftSave(next).catch(() => undefined);
+    }, 350);
+  };
+
+  const handleModalClose = async () => {
+    if (hasUnsavedLocalEditRef.current) {
+      await flushPendingDraftSave(reminderDraftRef.current);
+    }
+    onClose();
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrors([]);
-    const reminderValidation = validateReminderSettings(reminderDraft);
-    if (!reminderValidation.valid) {
-      setErrors(reminderValidation.errors);
-      return;
-    }
     setSavingSettings(true);
     try {
-      const res = await onSave(reminderValidation.sanitized);
-      if (res && res.ok === false) {
-        setErrors([
-          res.error || 'تعذر حفظ الإعدادات في قاعدة البيانات. تم التراجع عن التغيير.',
-        ]);
-        return;
-      }
+      const ok = await flushPendingDraftSave(reminderDraftRef.current);
+      if (!ok) return;
       onClose();
-    } catch {
-      setErrors(['تعذر حفظ الإعدادات في قاعدة البيانات.']);
     } finally {
       setSavingSettings(false);
     }
@@ -237,6 +330,9 @@ export const RemindersAndAutoPostModal: React.FC<
     setTestSending(true);
     setTestStatusMsg(null);
     try {
+      if (hasUnsavedLocalEditRef.current) {
+        await flushPendingDraftSave(reminderDraftRef.current);
+      }
       const result = await onSendTestReminder();
       setTestStatusMsg(result);
     } catch {
@@ -254,6 +350,9 @@ export const RemindersAndAutoPostModal: React.FC<
     setFbPublishing(true);
     setFbStatusMsg(null);
     try {
+      if (hasUnsavedLocalEditRef.current) {
+        await flushPendingDraftSave(reminderDraftRef.current);
+      }
       const result = await onPublishFacebookNow();
       setFbStatusMsg(result);
     } catch {
@@ -283,6 +382,9 @@ export const RemindersAndAutoPostModal: React.FC<
     setDryRunLoading(true);
     setDryRunResult(null);
     try {
+      if (hasUnsavedLocalEditRef.current) {
+        await flushPendingDraftSave(reminderDraftRef.current);
+      }
       const res = await onDryRunAutoPost();
       setDryRunResult(res);
     } catch {
@@ -300,6 +402,9 @@ export const RemindersAndAutoPostModal: React.FC<
     setRunNowLoading(true);
     setRunNowResult(null);
     try {
+      if (hasUnsavedLocalEditRef.current) {
+        await flushPendingDraftSave(reminderDraftRef.current);
+      }
       const res = await onRunAutoPostNow(force);
       if (res && res.needsForceConfirm) {
         setRunNowConfirmStep('confirm_force');
@@ -351,13 +456,25 @@ export const RemindersAndAutoPostModal: React.FC<
     >
       <div className="w-full max-w-2xl rounded-2xl bg-white p-6 shadow-2xl border border-slate-200 my-8 max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between border-b border-slate-200 pb-3 mb-4">
-          <h3 className="text-lg font-extrabold text-slate-900 flex items-center gap-2">
-            <BellRing className="w-5 h-5 text-purple-700" />
-            <span>الإشعارات والنشر التلقائي</span>
-          </h3>
+          <div className="flex items-center gap-2 flex-wrap">
+            <h3 className="text-lg font-extrabold text-slate-900 flex items-center gap-2">
+              <BellRing className="w-5 h-5 text-purple-700" />
+              <span>الإشعارات والنشر التلقائي</span>
+            </h3>
+            {autoSaveStatus === 'saving' && (
+              <span className="rounded-lg bg-purple-50 border border-purple-200 px-2 py-0.5 text-[11px] font-extrabold text-purple-800">
+                جارٍ الحفظ التلقائي...
+              </span>
+            )}
+            {autoSaveStatus === 'saved' && (
+              <span className="rounded-lg bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-[11px] font-extrabold text-emerald-800">
+                تم الحفظ تلقائياً ✓
+              </span>
+            )}
+          </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleModalClose}
             aria-label="إغلاق النافذة"
             className="text-slate-500 hover:text-slate-800"
           >
@@ -390,8 +507,7 @@ export const RemindersAndAutoPostModal: React.FC<
                   type="checkbox"
                   checked={reminderDraft.enabled}
                   onChange={(e) =>
-                    setReminderDraft({
-                      ...reminderDraft,
+                    updateDraft({
                       enabled: e.target.checked,
                     })
                   }
@@ -411,8 +527,7 @@ export const RemindersAndAutoPostModal: React.FC<
                   type="time"
                   value={reminderDraft.time}
                   onChange={(e) =>
-                    setReminderDraft({
-                      ...reminderDraft,
+                    updateDraft({
                       time: e.target.value || '19:00',
                     })
                   }
@@ -431,8 +546,7 @@ export const RemindersAndAutoPostModal: React.FC<
                 <select
                   value={reminderDraft.targetDay}
                   onChange={(e) =>
-                    setReminderDraft({
-                      ...reminderDraft,
+                    updateDraft({
                       targetDay:
                         e.target.value === 'today' ? 'today' : 'tomorrow',
                     })
@@ -457,8 +571,7 @@ export const RemindersAndAutoPostModal: React.FC<
                   maxLength={160}
                   value={reminderDraft.title}
                   onChange={(e) =>
-                    setReminderDraft({
-                      ...reminderDraft,
+                    updateDraft({
                       title: e.target.value,
                     })
                   }
@@ -476,8 +589,7 @@ export const RemindersAndAutoPostModal: React.FC<
                   maxLength={500}
                   value={reminderDraft.body}
                   onChange={(e) =>
-                    setReminderDraft({
-                      ...reminderDraft,
+                    updateDraft({
                       body: e.target.value,
                     })
                   }
@@ -542,8 +654,7 @@ export const RemindersAndAutoPostModal: React.FC<
                   aria-label="تفعيل أو تعطيل النشر التلقائي اليومي على فيسبوك"
                   data-testid="modal-fb-auto-post-toggle"
                   onClick={() =>
-                    setReminderDraft({
-                      ...reminderDraft,
+                    updateDraft({
                       fbAutoPostEnabled: !reminderDraft.fbAutoPostEnabled,
                     })
                   }
@@ -586,8 +697,7 @@ export const RemindersAndAutoPostModal: React.FC<
                   type="time"
                   value={reminderDraft.fbAutoPostTime}
                   onChange={(e) =>
-                    setReminderDraft({
-                      ...reminderDraft,
+                    updateDraft({
                       fbAutoPostTime: e.target.value || '20:00',
                     })
                   }
@@ -606,8 +716,7 @@ export const RemindersAndAutoPostModal: React.FC<
                 <select
                   value={reminderDraft.fbTargetDay || 'tomorrow'}
                   onChange={(e) =>
-                    setReminderDraft({
-                      ...reminderDraft,
+                    updateDraft({
                       fbTargetDay: (e.target.value === 'today'
                         ? 'today'
                         : 'tomorrow') as ReminderTargetDay,
@@ -631,8 +740,7 @@ export const RemindersAndAutoPostModal: React.FC<
                 <select
                   value={reminderDraft.fbPostMode || 'photo_with_caption'}
                   onChange={(e) =>
-                    setReminderDraft({
-                      ...reminderDraft,
+                    updateDraft({
                       fbPostMode: e.target.value as
                         | 'photo_with_caption'
                         | 'photo_only'
@@ -661,8 +769,7 @@ export const RemindersAndAutoPostModal: React.FC<
                 <select
                   value={reminderDraft.fbFallbackMode || 'text'}
                   onChange={(e) =>
-                    setReminderDraft({
-                      ...reminderDraft,
+                    updateDraft({
                       fbFallbackMode: (e.target.value === 'skip'
                         ? 'skip'
                         : 'text') as FacebookFallbackMode,
@@ -686,8 +793,7 @@ export const RemindersAndAutoPostModal: React.FC<
                     type="checkbox"
                     checked={Boolean(reminderDraft.fbSkipEmptyDay)}
                     onChange={(e) =>
-                      setReminderDraft({
-                        ...reminderDraft,
+                      updateDraft({
                         fbSkipEmptyDay: e.target.checked,
                       })
                     }

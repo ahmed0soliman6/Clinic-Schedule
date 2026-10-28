@@ -62,7 +62,11 @@ import {
   UserProfile,
   UserRole,
 } from './types/schedule';
-import { DEFAULT_REMINDER_SETTINGS } from './utils/reminderLogic';
+import {
+  DEFAULT_REMINDER_SETTINGS,
+  evaluateFbAutoPostGate,
+  isWithinReminderWindow,
+} from './utils/reminderLogic';
 import {
   BLUEPRINT_LIMITS,
   DAYS_LIST,
@@ -130,6 +134,7 @@ const FALLBACK_SETTINGS: CenterSettings = {
 };
 
 const STORAGE_KEY = 'meet_azzoun_medical_schedules_v9_live';
+const REMINDER_SETTINGS_STORAGE_KEY = 'mitazoun_reminder_settings_v1';
 
 const DEFAULT_USERS_LIST: UserProfile[] = [
   {
@@ -197,7 +202,7 @@ export default function App() {
   );
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
-  // Controls visibility of Facebook auto-post card (Hidden by default, toggleable via sidebar)
+  // Controls visibility of Facebook auto-post card (Hidden by default, synced with localStorage and Firestore)
   const [showFacebookCard, setShowFacebookCard] = useState<boolean>(() => {
     try {
       return localStorage.getItem('mitazoun_show_facebook_card') === 'true';
@@ -205,18 +210,6 @@ export default function App() {
       return false;
     }
   });
-
-  const handleToggleShowFacebookCard = () => {
-    setShowFacebookCard((prev) => {
-      const next = !prev;
-      try {
-        localStorage.setItem('mitazoun_show_facebook_card', String(next));
-      } catch {
-        // Ignore storage errors
-      }
-      return next;
-    });
-  };
 
   // Copy full day confirmation modal state
   const [showCopyDayModal, setShowCopyDayModal] = useState(false);
@@ -250,14 +243,37 @@ export default function App() {
   const [settings, setSettings] = useState<CenterSettings>(FALLBACK_SETTINGS);
   const [defaultSettings, setDefaultSettings] =
     useState<CenterSettings>(FALLBACK_SETTINGS);
-  const [reminderSettings, setReminderSettings] = useState<ReminderSettings>({
-    ...DEFAULT_REMINDER_SETTINGS,
-  });
-  const reminderSettingsRef = useRef<ReminderSettings>({
-    ...DEFAULT_REMINDER_SETTINGS,
-  });
+  const [reminderSettings, setReminderSettings] = useState<ReminderSettings>(
+    () => {
+      try {
+        const cached = localStorage.getItem(REMINDER_SETTINGS_STORAGE_KEY);
+        if (cached) {
+          const parsed = JSON.parse(cached) as Partial<ReminderSettings>;
+          return {
+            ...DEFAULT_REMINDER_SETTINGS,
+            ...parsed,
+            timezone: 'Africa/Cairo',
+          };
+        }
+      } catch {
+        // Ignore storage read error
+      }
+      return {
+        ...DEFAULT_REMINDER_SETTINGS,
+      };
+    }
+  );
+  const reminderSettingsRef = useRef<ReminderSettings>(reminderSettings);
   useEffect(() => {
     reminderSettingsRef.current = reminderSettings;
+    try {
+      localStorage.setItem(
+        REMINDER_SETTINGS_STORAGE_KEY,
+        JSON.stringify(reminderSettings)
+      );
+    } catch {
+      // Ignore storage quota errors
+    }
   }, [reminderSettings]);
 
   const [posterMetaByDay, setPosterMetaByDay] = useState<
@@ -850,6 +866,17 @@ export default function App() {
         (snap) => {
           if (snap.exists()) {
             const remoteReminders = snap.data() as ReminderSettings;
+            if (typeof remoteReminders.showFacebookCard === 'boolean') {
+              setShowFacebookCard(remoteReminders.showFacebookCard);
+              try {
+                localStorage.setItem(
+                  'mitazoun_show_facebook_card',
+                  String(remoteReminders.showFacebookCard)
+                );
+              } catch {
+                // Ignore storage errors
+              }
+            }
             setReminderSettings((prev) => ({
               ...prev,
               ...remoteReminders,
@@ -1799,11 +1826,14 @@ export default function App() {
   };
 
   const buildReminderFirestorePayload = (
-    base: ClientEditableReminderSettings,
+    base: Partial<ReminderSettings>,
     uid: string,
     email: string
   ) => ({
-    enabled: Boolean(base.enabled),
+    enabled:
+      typeof base.enabled === 'boolean'
+        ? base.enabled
+        : DEFAULT_REMINDER_SETTINGS.enabled,
     time: base.time || DEFAULT_REMINDER_SETTINGS.time,
     timezone: 'Africa/Cairo' as const,
     targetDay:
@@ -1819,10 +1849,86 @@ export default function App() {
       base.fbFallbackMode === 'skip' ? ('skip' as const) : ('text' as const),
     fbSkipEmptyDay:
       typeof base.fbSkipEmptyDay === 'boolean' ? base.fbSkipEmptyDay : true,
+    showFacebookCard:
+      typeof base.showFacebookCard === 'boolean'
+        ? base.showFacebookCard
+        : showFacebookCard,
     updatedBy: uid,
     updatedByEmail: email,
     updatedAt: serverTimestamp(),
   });
+
+  const persistPartialReminderConfig = async (
+    patch: Partial<ClientEditableReminderSettings>,
+    rollbackErrorMsg: string
+  ): Promise<{ ok: boolean; error?: string }> => {
+    const previousState = reminderSettingsRef.current;
+    const optimisticNext: ReminderSettings = {
+      ...previousState,
+      ...patch,
+      timezone: 'Africa/Cairo',
+    };
+    reminderSettingsRef.current = optimisticNext;
+    setReminderSettings(optimisticNext);
+
+    if (!firebaseUser || activeRole !== 'ADMIN') {
+      return { ok: true };
+    }
+
+    try {
+      const reminderRef = doc(db, 'appConfig', 'reminders');
+      const existingSnap = await getDoc(reminderRef);
+      const remoteExisting = existingSnap.exists()
+        ? (existingSnap.data() as Partial<ReminderSettings>)
+        : {};
+      const mergedSource: Partial<ReminderSettings> = {
+        ...DEFAULT_REMINDER_SETTINGS,
+        ...remoteExisting,
+        ...previousState,
+        ...patch,
+      };
+      const reminderPayload = buildReminderFirestorePayload(
+        mergedSource,
+        firebaseUser.uid,
+        firebaseUser.email || PRIMARY_ADMIN_EMAIL
+      );
+      if (existingSnap.exists()) {
+        await updateDoc(reminderRef, reminderPayload);
+      } else {
+        await setDoc(reminderRef, reminderPayload);
+      }
+      return { ok: true };
+    } catch (err) {
+      reminderSettingsRef.current = previousState;
+      setReminderSettings(previousState);
+      setAuthErrorBanner(rollbackErrorMsg);
+      try {
+        handleFirestoreError(err, OperationType.WRITE, 'appConfig/reminders');
+      } catch {
+        // Handled
+      }
+      return { ok: false, error: rollbackErrorMsg };
+    }
+  };
+
+  const handleSetShowFacebookCard = (nextVisible: boolean) => {
+    setShowFacebookCard(nextVisible);
+    try {
+      localStorage.setItem('mitazoun_show_facebook_card', String(nextVisible));
+    } catch {
+      // Ignore storage errors
+    }
+    if (firebaseUser && activeRole === 'ADMIN') {
+      persistPartialReminderConfig(
+        { showFacebookCard: nextVisible },
+        'تعذر حفظ حالة إخفاء/إظهار بطاقة فيسبوك في قاعدة البيانات.'
+      ).catch(() => undefined);
+    }
+  };
+
+  const handleToggleShowFacebookCard = () => {
+    handleSetShowFacebookCard(!showFacebookCard);
+  };
 
   const handleSaveReminders = async (
     updatedReminders: ClientEditableReminderSettings
@@ -1831,47 +1937,27 @@ export default function App() {
       return { ok: false, error: 'غير مصرح بحفظ إعدادات الإشعارات.' };
     }
 
-    const previousState = reminderSettingsRef.current;
-    setReminderSettings((prev) => ({
-      ...prev,
-      ...updatedReminders,
-    }));
+    const res = await persistPartialReminderConfig(
+      {
+        ...updatedReminders,
+        showFacebookCard:
+          typeof updatedReminders.showFacebookCard === 'boolean'
+            ? updatedReminders.showFacebookCard
+            : showFacebookCard,
+      },
+      'تعذر حفظ إعدادات الإشعارات والنشر التلقائي في قاعدة البيانات. تم التراجع عن التغيير.'
+    );
 
-    if (firebaseUser) {
-      try {
-        const reminderRef = doc(db, 'appConfig', 'reminders');
-        const existingSnap = await getDoc(reminderRef);
-        const reminderPayload = buildReminderFirestorePayload(
-          updatedReminders,
-          firebaseUser.uid,
-          firebaseUser.email || PRIMARY_ADMIN_EMAIL
-        );
-        if (existingSnap.exists()) {
-          await updateDoc(reminderRef, reminderPayload);
-        } else {
-          await setDoc(reminderRef, reminderPayload);
-        }
-      } catch (err) {
-        // Revert optimistic state on failure and show clear Arabic error message
-        setReminderSettings(previousState);
-        const errMsg =
-          'تعذر حفظ إعدادات الإشعارات والنشر التلقائي في قاعدة البيانات. تم التراجع عن التغيير.';
-        setAuthErrorBanner(errMsg);
-        try {
-          handleFirestoreError(err, OperationType.WRITE, 'appConfig/reminders');
-        } catch {
-          // Handled
-        }
-        return { ok: false, error: errMsg };
-      }
+    if (!res.ok) {
+      return res;
     }
 
-    await appendAuditLog(
+    appendAuditLog(
       'UPDATE_SETTINGS',
       'reminders',
       'الإشعارات والنشر التلقائي',
       'تحديث إعدادات الإشعار اليومي وتوقيت النشر التلقائي على فيسبوك'
-    );
+    ).catch(() => undefined);
 
     return { ok: true };
   };
@@ -1879,91 +1965,102 @@ export default function App() {
   const handleToggleFbAutoPost = async (
     nextEnabled: boolean
   ): Promise<{ ok: boolean; error?: string }> => {
-    const previousState = reminderSettingsRef.current;
-    setReminderSettings((prev) => ({
-      ...prev,
-      fbAutoPostEnabled: nextEnabled,
-    }));
-
-    if (!firebaseUser || activeRole !== 'ADMIN') {
-      return { ok: true };
-    }
-
-    try {
-      const reminderRef = doc(db, 'appConfig', 'reminders');
-      const existingSnap = await getDoc(reminderRef);
-      const reminderPayload = buildReminderFirestorePayload(
-        {
-          ...previousState,
-          fbAutoPostEnabled: nextEnabled,
-        },
-        firebaseUser.uid,
-        firebaseUser.email || PRIMARY_ADMIN_EMAIL
-      );
-      if (existingSnap.exists()) {
-        await updateDoc(reminderRef, reminderPayload);
-      } else {
-        await setDoc(reminderRef, reminderPayload);
-      }
-      return { ok: true };
-    } catch (err) {
-      // Revert toggle to previous state on failure and display clear Arabic error
-      setReminderSettings(previousState);
-      const errMsg =
-        'تعذر تحديث حالة زر النشر التلقائي في قاعدة البيانات. تم إرجاع الزر لحالته السابقة.';
-      setAuthErrorBanner(errMsg);
-      try {
-        handleFirestoreError(err, OperationType.WRITE, 'appConfig/reminders');
-      } catch {
-        // Handled
-      }
-      return { ok: false, error: errMsg };
-    }
+    return persistPartialReminderConfig(
+      { fbAutoPostEnabled: nextEnabled },
+      'تعذر تحديث حالة زر النشر التلقائي في قاعدة البيانات. تم إرجاع الزر لحالته السابقة.'
+    );
   };
 
   const handleChangeFbTargetDay = async (
     nextTargetDay: ReminderTargetDay
   ): Promise<{ ok: boolean; error?: string }> => {
-    const previousState = reminderSettingsRef.current;
-    setReminderSettings((prev) => ({
-      ...prev,
-      fbTargetDay: nextTargetDay,
-    }));
-
-    if (!firebaseUser || activeRole !== 'ADMIN') {
-      return { ok: true };
-    }
-
-    try {
-      const reminderRef = doc(db, 'appConfig', 'reminders');
-      const existingSnap = await getDoc(reminderRef);
-      const reminderPayload = buildReminderFirestorePayload(
-        {
-          ...previousState,
-          fbTargetDay: nextTargetDay,
-        },
-        firebaseUser.uid,
-        firebaseUser.email || PRIMARY_ADMIN_EMAIL
-      );
-      if (existingSnap.exists()) {
-        await updateDoc(reminderRef, reminderPayload);
-      } else {
-        await setDoc(reminderRef, reminderPayload);
-      }
-      return { ok: true };
-    } catch (err) {
-      setReminderSettings(previousState);
-      const errMsg =
-        'تعذر تحديث يوم النشر التلقائي في قاعدة البيانات. تم إرجاع الاختيار لحالته السابقة.';
-      setAuthErrorBanner(errMsg);
-      try {
-        handleFirestoreError(err, OperationType.WRITE, 'appConfig/reminders');
-      } catch {
-        // Handled
-      }
-      return { ok: false, error: errMsg };
-    }
+    return persistPartialReminderConfig(
+      { fbTargetDay: nextTargetDay },
+      'تعذر تحديث يوم النشر التلقائي في قاعدة البيانات. تم إرجاع الاختيار لحالته السابقة.'
+    );
   };
+
+  const handleChangeFbAutoPostTime = async (
+    nextTime: string
+  ): Promise<{ ok: boolean; error?: string }> => {
+    return persistPartialReminderConfig(
+      { fbAutoPostTime: nextTime },
+      'تعذر تحديث وقت النشر التلقائي في قاعدة البيانات.'
+    );
+  };
+
+  // Automatic In-App Scheduler Heartbeat:
+  // When an authorized Admin/Staff member has the app open and the current Cairo time enters
+  // the daily notification window OR the Facebook auto-post window, automatically invoke
+  // `/api/send-reminders` so scheduled notifications and auto-posts fire right on time
+  // without waiting for external GitHub Actions cron delays.
+  const lastClientSchedulerTickRef = useRef<number>(0);
+  useEffect(() => {
+    if (!isStaffAuthenticated || !firebaseUser) return;
+
+    const checkAndTriggerDueSchedule = async () => {
+      const now = new Date();
+      // Cooldown of 40 seconds between automatic client-triggered checks
+      if (now.getTime() - lastClientSchedulerTickRef.current < 40_000) {
+        return;
+      }
+
+      const cfg = reminderSettingsRef.current;
+      const reminderDue =
+        Boolean(cfg.enabled) &&
+        isWithinReminderWindow({
+          now,
+          scheduledTime: cfg.time || '19:00',
+          lastSentDate: cfg.lastSentDate,
+          timeZone: 'Africa/Cairo',
+        }).shouldSend;
+
+      const fbAutoDue =
+        Boolean(cfg.fbAutoPostEnabled) &&
+        evaluateFbAutoPostGate({
+          now,
+          fbAutoPostEnabled: cfg.fbAutoPostEnabled,
+          fbAutoPostTime: cfg.fbAutoPostTime || '20:00',
+          fbTargetDay: cfg.fbTargetDay === 'today' ? 'today' : 'tomorrow',
+          lastFbPostTargetDate: cfg.lastFbPostTargetDate,
+          fbPostLockUntil: cfg.fbPostLockUntil,
+          fbPostAttempts: cfg.fbPostAttempts,
+          timeZone: 'Africa/Cairo',
+        }).shouldExecute;
+
+      if (!reminderDue && !fbAutoDue) {
+        return;
+      }
+
+      lastClientSchedulerTickRef.current = now.getTime();
+      try {
+        const idToken = await firebaseUser.getIdToken();
+        await fetch('/api/send-reminders', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${idToken}`,
+            'Content-Type': 'application/json',
+          },
+        });
+      } catch {
+        // Non-blocking background scheduler tick
+      }
+    };
+
+    checkAndTriggerDueSchedule();
+    const intervalId = setInterval(checkAndTriggerDueSchedule, 15_000);
+    return () => clearInterval(intervalId);
+  }, [
+    isStaffAuthenticated,
+    firebaseUser,
+    reminderSettings.enabled,
+    reminderSettings.time,
+    reminderSettings.lastSentDate,
+    reminderSettings.fbAutoPostEnabled,
+    reminderSettings.fbAutoPostTime,
+    reminderSettings.fbTargetDay,
+    reminderSettings.lastFbPostTargetDate,
+  ]);
 
   const handlePrepareAllWeekPosters = async (
     onProgress: (progress: WeekPostersProgress) => void
@@ -2623,31 +2720,33 @@ export default function App() {
                   </button>
                 )}
 
-                {/* زر إظهار وإخفاء بطاقة النشر على فيسبوك */}
-                <button
-                  type="button"
-                  onClick={handleToggleShowFacebookCard}
-                  data-testid="sidebar-toggle-facebook-card-btn"
-                  className={`w-full inline-flex items-center justify-between rounded-xl border px-3 py-2.5 text-xs font-extrabold transition cursor-pointer ${
-                    showFacebookCard
-                      ? 'border-blue-300 bg-blue-50 text-blue-950 hover:bg-blue-100'
-                      : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
-                  }`}
-                >
-                  <span className="inline-flex items-center gap-2">
-                    <Globe className="w-4 h-4 text-blue-600 shrink-0" />
-                    <span>بطاقة النشر على فيسبوك</span>
-                  </span>
-                  <span
-                    className={`px-2 py-0.5 rounded-md text-[10px] font-black transition ${
+                {/* زر إظهار وإخفاء بطاقة النشر على فيسبوك (للمدير فقط) */}
+                {activeRole === 'ADMIN' && (
+                  <button
+                    type="button"
+                    onClick={handleToggleShowFacebookCard}
+                    data-testid="sidebar-toggle-facebook-card-btn"
+                    className={`w-full inline-flex items-center justify-between rounded-xl border px-3 py-2.5 text-xs font-extrabold transition cursor-pointer ${
                       showFacebookCard
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-slate-100 text-slate-600'
+                        ? 'border-blue-300 bg-blue-50 text-blue-950 hover:bg-blue-100'
+                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
                     }`}
                   >
-                    {showFacebookCard ? 'إخفاء البطاقة' : 'إظهار البطاقة'}
-                  </span>
-                </button>
+                    <span className="inline-flex items-center gap-2">
+                      <Globe className="w-4 h-4 text-blue-600 shrink-0" />
+                      <span>بطاقة النشر على فيسبوك</span>
+                    </span>
+                    <span
+                      className={`px-2 py-0.5 rounded-md text-[10px] font-black transition ${
+                        showFacebookCard
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-slate-100 text-slate-600'
+                      }`}
+                    >
+                      {showFacebookCard ? 'إخفاء البطاقة' : 'إظهار البطاقة'}
+                    </span>
+                  </button>
+                )}
               </div>
 
               {/* 3) قسم "الإدارة" (للمدير ADMIN فقط) */}
@@ -2837,9 +2936,18 @@ export default function App() {
           rows={displayedRows}
           settings={settings}
           posterRef={exportPosterRef}
-          canManageFacebook={isStaffAuthenticated && !isStrictPublicUrl}
-          showFacebookCard={showFacebookCard}
-          onCloseFacebookCard={() => setShowFacebookCard(false)}
+          canManageFacebook={
+            activeRole === 'ADMIN' &&
+            viewMode === 'manage' &&
+            !isStrictPublicUrl
+          }
+          showFacebookCard={
+            activeRole === 'ADMIN' &&
+            viewMode === 'manage' &&
+            !isStrictPublicUrl &&
+            showFacebookCard
+          }
+          onCloseFacebookCard={() => handleSetShowFacebookCard(false)}
           fbAutoPostEnabled={Boolean(reminderSettings.fbAutoPostEnabled)}
           fbAutoPostTime={reminderSettings.fbAutoPostTime || '20:00'}
           fbTargetDay={
@@ -2848,6 +2956,9 @@ export default function App() {
           onToggleFbAutoPost={handleToggleFbAutoPost}
           onChangeFbTargetDay={
             activeRole === 'ADMIN' ? handleChangeFbTargetDay : undefined
+          }
+          onChangeFbAutoPostTime={
+            activeRole === 'ADMIN' ? handleChangeFbAutoPostTime : undefined
           }
           onPublishFacebookNow={handlePublishFacebookNow}
         />

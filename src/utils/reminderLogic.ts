@@ -29,6 +29,7 @@ export const DEFAULT_REMINDER_SETTINGS: ClientEditableReminderSettings = {
   fbTargetDay: 'tomorrow',
   fbFallbackMode: 'text',
   fbSkipEmptyDay: true,
+  showFacebookCard: false,
 };
 
 const WEEKDAY_ORDER: DayId[] = [
@@ -629,6 +630,10 @@ export function validateReminderSettings(input: Partial<ReminderSettings>): {
       : 'text';
   const fbSkipEmptyDay =
     typeof input.fbSkipEmptyDay === 'boolean' ? input.fbSkipEmptyDay : true;
+  const showFacebookCard =
+    typeof input.showFacebookCard === 'boolean'
+      ? input.showFacebookCard
+      : false;
   const time = (input.time ?? DEFAULT_REMINDER_SETTINGS.time).trim();
   const targetDay =
     input.targetDay === 'today' || input.targetDay === 'tomorrow'
@@ -666,6 +671,7 @@ export function validateReminderSettings(input: Partial<ReminderSettings>): {
       fbTargetDay,
       fbFallbackMode,
       fbSkipEmptyDay,
+      showFacebookCard,
     },
   };
 }
