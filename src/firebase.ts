@@ -450,11 +450,18 @@ export function handleFirestoreError(
 }
 
 async function testConnection() {
+  if (typeof window !== 'undefined' && typeof navigator !== 'undefined' && !navigator.onLine) {
+    return;
+  }
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
   } catch {
-    // Ignore test connection error in preview environments or offline state
+    // Quietly ignore connection checks when offline or in restricted dev preview
   }
 }
 
-testConnection();
+if (typeof window !== 'undefined') {
+  setTimeout(() => {
+    testConnection();
+  }, 1000);
+}

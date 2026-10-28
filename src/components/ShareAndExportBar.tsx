@@ -163,38 +163,72 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
     }
   };
 
+  // Try copying image blob to clipboard if navigator.clipboard.write is supported
+  const tryCopyImageToClipboard = async (file: File): Promise<boolean> => {
+    try {
+      if (
+        navigator.clipboard &&
+        typeof navigator.clipboard.write === 'function' &&
+        window.ClipboardItem
+      ) {
+        const item = new ClipboardItem({ [file.type]: file });
+        await navigator.clipboard.write([item]);
+        return true;
+      }
+    } catch {
+      // Ignore clipboard write failure
+    }
+    return false;
+  };
+
   // Share ONLY the 4:5 PNG Image File WITHOUT post text
   const handleNativeShareImageOnly = async () => {
     const nav = navigator as Navigator & {
       canShare?: (data?: ShareData) => boolean;
     };
 
-    if (cachedPoster && cachedPoster.dayLabel === dayLabel) {
-      if (
-        typeof nav.share === 'function' &&
-        typeof nav.canShare === 'function' &&
-        nav.canShare({ files: [cachedPoster.file] })
-      ) {
-        try {
-          await nav.share({
-            files: [cachedPoster.file],
-          });
-          setStatusBanner(
-            `✅ تمت مشاركة صورة جدول يوم ${dayLabel} (4:5) فقط بدون بوست!`
-          );
-          return;
-        } catch {
-          // Fallback to download if dismissed or blocked by iframe
-        }
+    let assets = cachedPoster && cachedPoster.dayLabel === dayLabel ? cachedPoster : null;
+    if (!assets) {
+      setIsExporting(true);
+      try {
+        const exported = await exportPosterAsPng(dayLabel, rows, settings, posterRef.current);
+        assets = { ...exported, dayLabel };
+        setCachedPoster(assets);
+      } catch {
+        setStatusBanner('حدث خطأ أثناء تجهيز صورة الجدول للمشاركة.');
+        setIsExporting(false);
+        return;
+      } finally {
+        setIsExporting(false);
       }
-      triggerInstantPngDownload(cachedPoster.dataUrl, dayLabel);
-      setStatusBanner(
-        `✅ تم حفظ صورة الجدول (4:5) — يمكنك إرفاقها مباشرة.`
-      );
-      return;
     }
 
-    await handleDownload4x5Png();
+    if (!assets) return;
+
+    if (
+      typeof nav.share === 'function' &&
+      typeof nav.canShare === 'function' &&
+      nav.canShare({ files: [assets.file] })
+    ) {
+      try {
+        await nav.share({
+          files: [assets.file],
+        });
+        setStatusBanner(`✅ تمت مشاركة صورة جدول يوم ${dayLabel} (4:5)!`);
+        return;
+      } catch (err: any) {
+        if (err?.name === 'AbortError') {
+          return;
+        }
+      }
+    }
+
+    const copied = await tryCopyImageToClipboard(assets.file);
+    if (copied) {
+      setStatusBanner(`📋 تم نسخ صورة جدول يوم ${dayLabel} للحافظة! يمكنك لصقها (Ctrl+V) مباشرة.`);
+    } else {
+      setStatusBanner(`ℹ️ المشاركة المباشرة غير مدعومة في هذا المتصفح. يمكنك تنزيل الصورة عبر أيقونة التنزيل 📥.`);
+    }
   };
 
   // Share the 4:5 PNG Image File + Post Text together
@@ -207,34 +241,50 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
       canShare?: (data?: ShareData) => boolean;
     };
 
-    if (cachedPoster && cachedPoster.dayLabel === dayLabel) {
-      if (
-        typeof nav.share === 'function' &&
-        typeof nav.canShare === 'function' &&
-        nav.canShare({ files: [cachedPoster.file] })
-      ) {
-        try {
-          await nav.share({
-            files: [cachedPoster.file],
-            title: `جدول عيادات يوم ${dayLabel}`,
-            text: postText,
-          });
-          setStatusBanner(
-            `✅ تمت مشاركة صورة جدول يوم ${dayLabel} (4:5) مع البوست مباشرة!`
-          );
-          return;
-        } catch {
-          // Fallback to download if dismissed or blocked by iframe
-        }
+    let assets = cachedPoster && cachedPoster.dayLabel === dayLabel ? cachedPoster : null;
+    if (!assets) {
+      setIsExporting(true);
+      try {
+        const exported = await exportPosterAsPng(dayLabel, rows, settings, posterRef.current);
+        assets = { ...exported, dayLabel };
+        setCachedPoster(assets);
+      } catch {
+        setStatusBanner('حدث خطأ أثناء تجهيز صورة الجدول للمشاركة.');
+        setIsExporting(false);
+        return;
+      } finally {
+        setIsExporting(false);
       }
-      triggerInstantPngDownload(cachedPoster.dataUrl, dayLabel);
-      setStatusBanner(
-        `✅ تم حفظ صورة الجدول (4:5) ونسخ البوست تلقائيًا — يمكنك الآن إرفاقها في أي تطبيق.`
-      );
-      return;
     }
 
-    await handleDownload4x5Png();
+    if (!assets) return;
+
+    if (
+      typeof nav.share === 'function' &&
+      typeof nav.canShare === 'function' &&
+      nav.canShare({ files: [assets.file] })
+    ) {
+      try {
+        await nav.share({
+          files: [assets.file],
+          title: `جدول عيادات يوم ${dayLabel}`,
+          text: postText,
+        });
+        setStatusBanner(`✅ تمت مشاركة صورة جدول يوم ${dayLabel} مع النص مباشرة!`);
+        return;
+      } catch (err: any) {
+        if (err?.name === 'AbortError') {
+          return;
+        }
+      }
+    }
+
+    const copied = await tryCopyImageToClipboard(assets.file);
+    if (copied) {
+      setStatusBanner(`📋 تم نسخ نص البوست وصورة جدول يوم ${dayLabel} للحافظة بنجاح!`);
+    } else {
+      setStatusBanner(`📋 تم نسخ نص البوست! لتنزيل الصورة استخدم أيقونة التنزيل 📥.`);
+    }
   };
 
   const handlePublishToFacebookClick = async () => {
@@ -264,62 +314,61 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
       dir="rtl"
       className="mx-auto w-full max-w-[780px] rounded-2xl bg-white p-2.5 sm:p-3.5 shadow-sm border border-purple-100 space-y-2.5"
     >
-      {/* 4 Compact Action Buttons in ONE Single Row: حفظ | مشاركة | مشاركة+بوست | بوست */}
+      {/* 4 Action Buttons in ONE Single Row: مشاركة | مشاركة+بوست | بوست | أيقونة التنزيل */}
       <div
         data-testid="share-buttons-grid"
-        className="grid grid-cols-4 gap-1.5 sm:gap-2.5"
+        className="grid grid-cols-4 gap-1.5 sm:gap-2.5 items-center"
       >
-        {/* Button 1: حفظ */}
-        <button
-          type="button"
-          onClick={handleDownload4x5Png}
-          disabled={isExporting}
-          data-testid="export-png-btn"
-          title="حفظ صورة الجدول PNG بأبعاد 4:5 ثابتة"
-          className="w-full inline-flex items-center justify-center gap-1 rounded-xl bg-purple-700 px-1.5 sm:px-3 py-2.5 text-[11px] sm:text-sm font-black text-white whitespace-nowrap shadow-xs hover:bg-purple-800 disabled:opacity-60 transition cursor-pointer"
-        >
-          <Download className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
-          <span>{isExporting ? '...' : 'حفظ'}</span>
-        </button>
-
-        {/* Button 2: مشاركة (صورة فقط بدون بوست) */}
+        {/* Button 1: مشاركة (صورة فقط بدون بوست) */}
         <button
           type="button"
           onClick={handleNativeShareImageOnly}
           data-testid="share-image-only-btn"
           title="مشاركة صورة الجدول فقط بدون نص البوست"
-          className="w-full inline-flex items-center justify-center gap-1 rounded-xl bg-sky-600 px-1.5 sm:px-3 py-2.5 text-[11px] sm:text-sm font-black text-white whitespace-nowrap shadow-xs hover:bg-sky-700 transition cursor-pointer"
+          className="w-full inline-flex items-center justify-center gap-1 sm:gap-1.5 rounded-xl bg-sky-600 px-1 sm:px-3 py-2.5 text-[11px] sm:text-xs md:text-sm font-black text-white whitespace-nowrap shadow-xs hover:bg-sky-700 transition cursor-pointer"
         >
-          <Share2 className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
+          <Share2 className="w-4 h-4 sm:w-4.5 sm:h-4.5 shrink-0" />
           <span>مشاركة</span>
         </button>
 
-        {/* Button 3: مشاركة+بوست */}
+        {/* Button 2: مشاركة+بوست */}
         <button
           type="button"
           onClick={handleNativeMobileShareWithPost}
           data-testid="share-native-btn"
           title="مشاركة ملف الصورة مع البوست مباشرة عبر تطبيقات الهاتف"
-          className="w-full inline-flex items-center justify-center gap-1 rounded-xl bg-indigo-600 px-1 sm:px-3 py-2.5 text-[10px] xs:text-[11px] sm:text-sm font-black text-white whitespace-nowrap shadow-xs hover:bg-indigo-700 transition cursor-pointer"
+          className="w-full inline-flex items-center justify-center gap-1 sm:gap-1.5 rounded-xl bg-indigo-600 px-1 sm:px-2.5 py-2.5 text-[11px] sm:text-xs md:text-sm font-black text-white whitespace-nowrap shadow-xs hover:bg-indigo-700 transition cursor-pointer"
         >
-          <Smartphone className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
+          <Smartphone className="w-4 h-4 sm:w-4.5 sm:h-4.5 shrink-0" />
           <span>مشاركة+بوست</span>
         </button>
 
-        {/* Button 4: بوست */}
+        {/* Button 3: بوست */}
         <button
           type="button"
           onClick={() => setShowPostBox((prev) => !prev)}
           data-testid="toggle-post-caption-btn"
           title={`عرض ونسخ النص الترويجي لبوست يوم ${dayLabel}`}
-          className={`w-full inline-flex items-center justify-center gap-1 rounded-xl border-2 px-1.5 sm:px-3 py-2.5 text-[11px] sm:text-sm font-black whitespace-nowrap shadow-xs transition cursor-pointer ${
+          className={`w-full inline-flex items-center justify-center gap-1 sm:gap-1.5 rounded-xl border-2 px-1 sm:px-3 py-2.5 text-[11px] sm:text-xs md:text-sm font-black whitespace-nowrap shadow-xs transition cursor-pointer ${
             showPostBox
               ? 'border-purple-600 bg-purple-100 text-purple-950'
               : 'border-purple-300 bg-purple-50 text-purple-950 hover:bg-purple-100'
           }`}
         >
-          <MessageSquareText className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-purple-700 shrink-0" />
+          <MessageSquareText className="w-4 h-4 sm:w-4.5 sm:h-4.5 text-purple-700 shrink-0" />
           <span>بوست</span>
+        </button>
+
+        {/* Button 4: تنزيل (أيقونة تنزيل فقط بعد بوست، بدون كلمة حفظ) */}
+        <button
+          type="button"
+          onClick={handleDownload4x5Png}
+          disabled={isExporting}
+          data-testid="export-png-btn"
+          title="تنزيل صورة الجدول PNG بأبعاد 4:5 ثابتة"
+          className="w-full inline-flex items-center justify-center rounded-xl bg-purple-700 px-2 sm:px-3 py-2.5 text-white shadow-xs hover:bg-purple-800 disabled:opacity-60 transition cursor-pointer"
+        >
+          <Download className="w-5 h-5 sm:w-5.5 sm:h-5.5 shrink-0" />
         </button>
       </div>
 
