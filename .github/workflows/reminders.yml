@@ -2,13 +2,19 @@ name: Daily Clinic Schedule Reminders
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 jobs:
   send-reminders:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Vercel Daily Reminder Endpoint
+      - name: Trigger Vercel Daily Reminder & Auto-Post Endpoint
         run: |
-          curl -fsS -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" "${{ secrets.SITE_URL }}/api/send-reminders"
+          response=$(curl -sS -w "\nHTTP %{http_code}\n" -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" "${{ secrets.SITE_URL }}/api/send-reminders")
+          echo "$response"
+          http_code=$(echo "$response" | tail -n 1 | awk '{print $2}')
+          if [ -z "$http_code" ] || [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+            echo "Error: Endpoint returned non-2xx HTTP status ($http_code)"
+            exit 1
+          fi

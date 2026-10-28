@@ -5,6 +5,7 @@ import {
   MAX_PHOTO_BYTES,
   buildShortFacebookCaption,
   decideFacebookPublishPlan,
+  inspectStoredPosterImageStatus,
   validateJpegBuffer,
 } from './facebookPostLogic.js';
 
@@ -227,4 +228,87 @@ describe('Facebook Post Pure Logic Tests', () => {
       assert.ok(plan.errorMessage.includes('صورة الجدول غير محدّثة'));
     }
   });
+
+  test('decideFacebookPublishPlan returns skip_retry on automatic cron when fallbackMode is skip and image is outdated or missing', () => {
+    const dummyJpeg = createDummyJpegBuffer(200);
+    const planOutdatedSkip = decideFacebookPublishPlan({
+      mode: 'photo_with_caption',
+      fallbackMode: 'skip',
+      scheduleVersion: 8,
+      storedPosterImage: {
+        dayId: 'sunday',
+        version: 7,
+        imageBase64: dummyJpeg.toString('base64'),
+        mime: 'image/jpeg',
+      },
+      dayLabel: 'الأحد',
+      settings: MOCK_SETTINGS,
+      isManualTrigger: false,
+    });
+    assert.equal(planOutdatedSkip.action, 'skip_retry');
+    if (planOutdatedSkip.action === 'skip_retry') {
+      assert.ok(planOutdatedSkip.reason.includes('إصدار الصورة'));
+      assert.ok(planOutdatedSkip.errorMessage.includes('لحين تحديث الصورة'));
+    }
+
+    const planMissingSkip = decideFacebookPublishPlan({
+      mode: 'photo_only',
+      fallbackMode: 'skip',
+      scheduleVersion: 3,
+      storedPosterImage: null,
+      dayLabel: 'الإثنين',
+      settings: MOCK_SETTINGS,
+      isManualTrigger: false,
+    });
+    assert.equal(planMissingSkip.action, 'skip_retry');
+  });
+
+  test('inspectStoredPosterImageStatus accurately classifies up_to_date, outdated, missing, and invalid images', () => {
+    const dummyJpeg = createDummyJpegBuffer(256);
+
+    assert.deepEqual(inspectStoredPosterImageStatus(4, null), {
+      status: 'missing',
+      posterVersion: null,
+    });
+
+    assert.deepEqual(
+      inspectStoredPosterImageStatus(4, {
+        dayId: 'saturday',
+        version: 4,
+        imageBase64: dummyJpeg.toString('base64'),
+        mime: 'image/jpeg',
+      }),
+      {
+        status: 'up_to_date',
+        posterVersion: 4,
+      }
+    );
+
+    assert.deepEqual(
+      inspectStoredPosterImageStatus(5, {
+        dayId: 'saturday',
+        version: 4,
+        imageBase64: dummyJpeg.toString('base64'),
+        mime: 'image/jpeg',
+      }),
+      {
+        status: 'outdated',
+        posterVersion: 4,
+      }
+    );
+
+    assert.deepEqual(
+      inspectStoredPosterImageStatus(4, {
+        dayId: 'saturday',
+        version: 4,
+        imageBase64: Buffer.from([1, 2, 3]).toString('base64'),
+        mime: 'image/jpeg',
+      }),
+      {
+        status: 'invalid',
+        posterVersion: 4,
+      }
+    );
+  });
 });
+

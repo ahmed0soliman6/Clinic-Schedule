@@ -234,7 +234,10 @@ service cloud.firestore {
         data.body is string && data.body.size() <= 500 &&
         (!('fbAutoPostEnabled' in data) || data.fbAutoPostEnabled is bool) &&
         (!('fbAutoPostTime' in data) || (data.fbAutoPostTime is string && data.fbAutoPostTime.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$'))) &&
-        (!('fbPostMode' in data) || data.fbPostMode in ['photo_with_caption', 'photo_only', 'text_only']);
+        (!('fbPostMode' in data) || data.fbPostMode in ['photo_with_caption', 'photo_only', 'text_only']) &&
+        (!('fbTargetDay' in data) || data.fbTargetDay in ['today', 'tomorrow']) &&
+        (!('fbFallbackMode' in data) || data.fbFallbackMode in ['text', 'skip']) &&
+        (!('fbSkipEmptyDay' in data) || data.fbSkipEmptyDay is bool);
     }
 
     // 4. Collection Rules
@@ -309,11 +312,37 @@ service cloud.firestore {
       allow create: if isSignedIn() && isValidId(id) && isAdmin() &&
         isValidReminderConfig(incoming()) &&
         !('lastSentDate' in incoming()) &&
-        !('lastFbPostDate' in incoming());
+        !('lastFbPostDate' in incoming()) &&
+        !incoming().keys().hasAny([
+          'lastSentDate',
+          'lastFbPostDate',
+          'lastFbPostTargetDate',
+          'lastFbPostWarning',
+          'lastFbPostStatus',
+          'lastFbPostAt',
+          'lastFbPostId',
+          'lastFbPostError',
+          'fbPostAttempts',
+          'fbPostLockUntil',
+          'lastCronRunAt'
+        ]);
       allow update: if isSignedIn() && isValidId(id) && isAdmin() &&
         isValidReminderConfig(incoming()) &&
         !('lastSentDate' in incoming().diff(existing()).affectedKeys()) &&
-        !('lastFbPostDate' in incoming().diff(existing()).affectedKeys());
+        !('lastFbPostDate' in incoming().diff(existing()).affectedKeys()) &&
+        !incoming().diff(existing()).affectedKeys().hasAny([
+          'lastSentDate',
+          'lastFbPostDate',
+          'lastFbPostTargetDate',
+          'lastFbPostWarning',
+          'lastFbPostStatus',
+          'lastFbPostAt',
+          'lastFbPostId',
+          'lastFbPostError',
+          'fbPostAttempts',
+          'fbPostLockUntil',
+          'lastCronRunAt'
+        ]);
       allow delete: if false;
     }
 
@@ -326,5 +355,16 @@ service cloud.firestore {
         incoming().mime == 'image/jpeg';
       allow delete: if false;
     }
+
+    match /posterMeta/{dayId} {
+      allow get, list: if isStaff();
+      allow create, update: if isSignedIn() && isValidId(dayId) && isEditorForDay(dayId) &&
+        incoming().dayId == dayId &&
+        incoming().version is int && incoming().version >= 1 &&
+        incoming().bytes is int && incoming().bytes >= 1 && incoming().bytes < 900000 &&
+        incoming().updatedAt is string && incoming().updatedAt.size() <= 64;
+      allow delete: if false;
+    }
   }
 }
+

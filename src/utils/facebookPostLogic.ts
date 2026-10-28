@@ -112,12 +112,18 @@ export type PostDecision =
       warning?: string;
     }
   | {
+      action: 'skip_retry';
+      reason: string;
+      errorMessage: string;
+    }
+  | {
       action: 'reject_error';
       errorMessage: string;
     };
 
 export interface PostDecisionInput {
   mode: FacebookPostMode;
+  fallbackMode?: 'text' | 'skip';
   scheduleVersion: number;
   storedPosterImage: {
     dayId: string;
@@ -130,13 +136,47 @@ export interface PostDecisionInput {
   isManualTrigger: boolean;
 }
 
+export type PosterImageFreshnessStatus =
+  | 'up_to_date'
+  | 'outdated'
+  | 'missing'
+  | 'invalid';
+
+export function inspectStoredPosterImageStatus(
+  scheduleVersion: number,
+  storedPosterImage: {
+    dayId: string;
+    version: number;
+    imageBase64: string;
+    mime: string;
+  } | null
+): { status: PosterImageFreshnessStatus; posterVersion: number | null } {
+  if (!storedPosterImage || !storedPosterImage.imageBase64) {
+    return { status: 'missing', posterVersion: null };
+  }
+  if (storedPosterImage.version !== scheduleVersion) {
+    return { status: 'outdated', posterVersion: storedPosterImage.version };
+  }
+  try {
+    const buf = Buffer.from(storedPosterImage.imageBase64.trim(), 'base64');
+    const valid = validateJpegBuffer(buf);
+    if (!valid.valid) {
+      return { status: 'invalid', posterVersion: storedPosterImage.version };
+    }
+    return { status: 'up_to_date', posterVersion: storedPosterImage.version };
+  } catch {
+    return { status: 'invalid', posterVersion: storedPosterImage.version };
+  }
+}
+
 /**
- * Determines whether to publish a photo or fallback to text,
+ * Determines whether to publish a photo, fallback to text, or skip and retry,
  * strictly validating version matching and rejecting stale images on manual clicks.
  */
 export function decideFacebookPublishPlan(input: PostDecisionInput): PostDecision {
   const {
     mode,
+    fallbackMode = 'text',
     scheduleVersion,
     storedPosterImage,
     dayLabel,
@@ -170,6 +210,14 @@ export function decideFacebookPublishPlan(input: PostDecisionInput): PostDecisio
       };
     }
 
+    if (fallbackMode === 'skip') {
+      return {
+        action: 'skip_retry',
+        reason: errorReason,
+        errorMessage: `تم تأجيل النشر التلقائي لحين تحديث الصورة: ${errorReason}.`,
+      };
+    }
+
     return {
       action: 'post_text_only',
       reason: errorReason,
@@ -188,6 +236,14 @@ export function decideFacebookPublishPlan(input: PostDecisionInput): PostDecisio
         errorMessage: 'فشل فك ترميز بيانات الصورة المحفوظة في السحابة.',
       };
     }
+    if (fallbackMode === 'skip') {
+      return {
+        action: 'skip_retry',
+        reason: 'فشل فك ترميز Base64 للصورة',
+        errorMessage:
+          'تم تأجيل النشر التلقائي: بيانات الصورة المحفوظة غير صالحة.',
+      };
+    }
     return {
       action: 'post_text_only',
       reason: 'فشل فك ترميز Base64 للصورة',
@@ -202,6 +258,15 @@ export function decideFacebookPublishPlan(input: PostDecisionInput): PostDecisio
         action: 'reject_error',
         errorMessage:
           validation.error || 'صورة الجدول المخزنة تالفة أو غير صالحة.',
+      };
+    }
+    if (fallbackMode === 'skip') {
+      return {
+        action: 'skip_retry',
+        reason: validation.error || 'فحص ملف JPEG فشل',
+        errorMessage: `تم تأجيل النشر التلقائي: ${
+          validation.error || 'فحص ملف JPEG فشل'
+        }`,
       };
     }
     return {
@@ -222,3 +287,4 @@ export function decideFacebookPublishPlan(input: PostDecisionInput): PostDecisio
     caption,
   };
 }
+

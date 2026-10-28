@@ -42,11 +42,15 @@ import {
   createPerDayScheduleSyncController,
 } from './scheduleLogic';
 import {
+  addDaysToDateStr,
+  buildLiveAutoPostPreviewLine,
   computeTokenDocId,
+  evaluateFbAutoPostGate,
   filterEligibleReminderTokens,
   formatReminderMessage,
   isWithinReminderWindow,
   resolveTargetDayId,
+  sanitizeFbAutoPostError,
   validateReminderSettings,
 } from './reminderLogic';
 import { DailyScheduleData, DayId, ScheduleRow, UserProfile } from '../types/schedule';
@@ -1168,6 +1172,251 @@ test('Daily Reminder Pure Logic: 10-minute Cairo window, lastSentDate duplicate 
     [PRIMARY_ADMIN_EMAIL, 'thursday.editor@gmail.com', 'public@subscriber.local']
   );
 });
+
+test('Catch-up timing window, lock, targetDate deduplication, max 4 attempts, and fbTargetDay independence', () => {
+  // 1) Catch-up window (default 180 minutes, never crossing midnight 23:59):
+  // Scheduled at 09:41 Cairo time (2026-01-17 is Winter UTC+2 -> 07:41 UTC)
+  // a) Before scheduled time (09:40 Cairo = 07:40 UTC)
+  const beforeTime = new Date('2026-01-17T07:40:00Z');
+  const gateBefore = evaluateFbAutoPostGate({
+    now: beforeTime,
+    fbAutoPostEnabled: true,
+    fbAutoPostTime: '09:41',
+    fbTargetDay: 'tomorrow',
+    timeZone: 'Africa/Cairo',
+  });
+  assert.equal(gateBefore.shouldExecute, false);
+  assert.equal(gateBefore.reason, 'outside_window');
+  assert.equal(gateBefore.targetDayId, 'sunday');
+  assert.equal(gateBefore.targetDateStr, '2026-01-18');
+
+  // b) 1 minute after scheduled time (09:42 Cairo = 07:42 UTC)
+  const oneMinAfter = new Date('2026-01-17T07:42:00Z');
+  const gateOneMin = evaluateFbAutoPostGate({
+    now: oneMinAfter,
+    fbAutoPostEnabled: true,
+    fbAutoPostTime: '09:41',
+    fbTargetDay: 'tomorrow',
+    timeZone: 'Africa/Cairo',
+  });
+  assert.equal(gateOneMin.shouldExecute, true);
+  assert.equal(gateOneMin.reason, 'eligible');
+  assert.equal(gateOneMin.cairoTimeHHmm, '09:42');
+  assert.equal(gateOneMin.targetDateStr, '2026-01-18');
+
+  // c) 2 hours (120 minutes) after scheduled time (11:41 Cairo = 09:41 UTC) — still inside 180m catch-up window!
+  const twoHoursAfter = new Date('2026-01-17T09:41:00Z');
+  const gateTwoHours = evaluateFbAutoPostGate({
+    now: twoHoursAfter,
+    fbAutoPostEnabled: true,
+    fbAutoPostTime: '09:41',
+    fbTargetDay: 'tomorrow',
+    timeZone: 'Africa/Cairo',
+  });
+  assert.equal(gateTwoHours.shouldExecute, true);
+  assert.equal(gateTwoHours.reason, 'eligible');
+
+  // d) 3 hours + 1 minute (181 minutes) after scheduled time (12:42 Cairo = 10:42 UTC) — outside 180m window
+  const afterWindow = new Date('2026-01-17T10:42:00Z');
+  const gateAfterWindow = evaluateFbAutoPostGate({
+    now: afterWindow,
+    fbAutoPostEnabled: true,
+    fbAutoPostTime: '09:41',
+    fbTargetDay: 'tomorrow',
+    timeZone: 'Africa/Cairo',
+  });
+  assert.equal(gateAfterWindow.shouldExecute, false);
+  assert.equal(gateAfterWindow.reason, 'outside_window');
+
+  // e) Minutes before midnight: scheduled at 23:30 Cairo (21:30 UTC), checked at 23:55 Cairo (21:55 UTC)
+  const beforeMidnight = new Date('2026-01-17T21:55:00Z');
+  const windowBeforeMidnight = isWithinReminderWindow({
+    now: beforeMidnight,
+    scheduledTime: '23:30',
+    timeZone: 'Africa/Cairo',
+  });
+  assert.equal(windowBeforeMidnight.shouldSend, true);
+  assert.equal(windowBeforeMidnight.upperLimitMinutes, 1439); // Capped at 23:59 (1439)
+
+  const gateBeforeMidnight = evaluateFbAutoPostGate({
+    now: beforeMidnight,
+    fbAutoPostEnabled: true,
+    fbAutoPostTime: '23:30',
+    fbTargetDay: 'tomorrow',
+    timeZone: 'Africa/Cairo',
+  });
+  assert.equal(gateBeforeMidnight.shouldExecute, true);
+  assert.equal(gateBeforeMidnight.reason, 'eligible');
+
+  // f) New day after midnight (00:05 Cairo on 2026-01-18 = 22:05 UTC on 2026-01-17):
+  // Never spills over midnight into the next day!
+  const afterMidnightNewDay = new Date('2026-01-17T22:05:00Z');
+  const gateAfterMidnight = evaluateFbAutoPostGate({
+    now: afterMidnightNewDay,
+    fbAutoPostEnabled: true,
+    fbAutoPostTime: '23:30',
+    fbTargetDay: 'tomorrow',
+    timeZone: 'Africa/Cairo',
+  });
+  assert.equal(gateAfterMidnight.shouldExecute, false);
+  assert.equal(gateAfterMidnight.reason, 'outside_window');
+  assert.equal(gateAfterMidnight.cairoDateStr, '2026-01-18');
+  assert.equal(gateAfterMidnight.targetDateStr, '2026-01-19');
+
+  // g) DST Summer transition in Cairo (UTC+3: 2026-07-18 06:45 UTC = 09:45 Cairo)
+  const summerTime = new Date('2026-07-18T06:45:00Z');
+  const gateSummer = evaluateFbAutoPostGate({
+    now: summerTime,
+    fbAutoPostEnabled: true,
+    fbAutoPostTime: '09:41',
+    fbTargetDay: 'today',
+    timeZone: 'Africa/Cairo',
+  });
+  assert.equal(gateSummer.shouldExecute, true);
+  assert.equal(gateSummer.cairoTimeHHmm, '09:45');
+  assert.equal(gateSummer.targetDayId, 'saturday');
+  assert.equal(gateSummer.targetDateStr, '2026-07-18');
+
+  // 2) Independence of fbTargetDay from reminder targetDay:
+  // On Saturday 2026-01-17, if reminder targetDay is 'today' (saturday) and fbTargetDay is 'tomorrow' (sunday),
+  // resolveTargetDayId resolves them independently.
+  const reminderResolved = resolveTargetDayId(oneMinAfter, 'today', 'Africa/Cairo');
+  const fbResolved = resolveTargetDayId(oneMinAfter, 'tomorrow', 'Africa/Cairo');
+  assert.equal(reminderResolved.dayId, 'saturday');
+  assert.equal(reminderResolved.targetDateStr, '2026-01-17');
+  assert.equal(fbResolved.dayId, 'sunday');
+  assert.equal(fbResolved.targetDateStr, '2026-01-18');
+
+  // 3) Deduplication by targetDateStr (lastFbPostTargetDate):
+  const gateAlreadyPosted = evaluateFbAutoPostGate({
+    now: oneMinAfter,
+    fbAutoPostEnabled: true,
+    fbAutoPostTime: '09:41',
+    fbTargetDay: 'tomorrow',
+    lastFbPostTargetDate: '2026-01-18',
+    timeZone: 'Africa/Cairo',
+  });
+  assert.equal(gateAlreadyPosted.shouldExecute, false);
+  assert.equal(gateAlreadyPosted.reason, 'already_posted_for_target_date');
+
+  // If lastFbPostTargetDate was for a previous date ('2026-01-17'), it SHOULD run for '2026-01-18'
+  const gatePrevPosted = evaluateFbAutoPostGate({
+    now: oneMinAfter,
+    fbAutoPostEnabled: true,
+    fbAutoPostTime: '09:41',
+    fbTargetDay: 'tomorrow',
+    lastFbPostTargetDate: '2026-01-17',
+    timeZone: 'Africa/Cairo',
+  });
+  assert.equal(gatePrevPosted.shouldExecute, true);
+
+  // 4) Lock check (fbPostLockUntil = now + 5 minutes):
+  const gateLocked = evaluateFbAutoPostGate({
+    now: oneMinAfter,
+    fbAutoPostEnabled: true,
+    fbAutoPostTime: '09:41',
+    fbTargetDay: 'tomorrow',
+    fbPostLockUntil: oneMinAfter.getTime() + 60_000,
+    timeZone: 'Africa/Cairo',
+  });
+  assert.equal(gateLocked.shouldExecute, false);
+  assert.equal(gateLocked.reason, 'locked');
+
+  // Expired lock allows execution
+  const gateExpiredLock = evaluateFbAutoPostGate({
+    now: oneMinAfter,
+    fbAutoPostEnabled: true,
+    fbAutoPostTime: '09:41',
+    fbTargetDay: 'tomorrow',
+    fbPostLockUntil: oneMinAfter.getTime() - 1000,
+    timeZone: 'Africa/Cairo',
+  });
+  assert.equal(gateExpiredLock.shouldExecute, true);
+
+  // 5) Retry & Max 4 attempts per target date:
+  const gateAttempt3 = evaluateFbAutoPostGate({
+    now: oneMinAfter,
+    fbAutoPostEnabled: true,
+    fbAutoPostTime: '09:41',
+    fbTargetDay: 'tomorrow',
+    fbPostAttempts: { date: '2026-01-18', count: 3 },
+    timeZone: 'Africa/Cairo',
+  });
+  assert.equal(gateAttempt3.shouldExecute, true);
+  assert.equal(gateAttempt3.currentAttemptsCount, 3);
+
+  const gateAttempt4 = evaluateFbAutoPostGate({
+    now: oneMinAfter,
+    fbAutoPostEnabled: true,
+    fbAutoPostTime: '09:41',
+    fbTargetDay: 'tomorrow',
+    fbPostAttempts: { date: '2026-01-18', count: 4 },
+    timeZone: 'Africa/Cairo',
+  });
+  assert.equal(gateAttempt4.shouldExecute, false);
+  assert.equal(gateAttempt4.reason, 'max_attempts_reached');
+
+  // If the 4 attempts were for an older target date ('2026-01-17'), attempts reset to 0 for '2026-01-18'
+  const gateOldAttempts = evaluateFbAutoPostGate({
+    now: oneMinAfter,
+    fbAutoPostEnabled: true,
+    fbAutoPostTime: '09:41',
+    fbTargetDay: 'tomorrow',
+    fbPostAttempts: { date: '2026-01-17', count: 4 },
+    timeZone: 'Africa/Cairo',
+  });
+  assert.equal(gateOldAttempts.shouldExecute, true);
+  assert.equal(gateOldAttempts.currentAttemptsCount, 0);
+
+  // 6) Live preview line & error sanitizer
+  const previewLine = buildLiveAutoPostPreviewLine({
+    now: new Date('2026-01-15T10:00:00Z'), // Thursday in Cairo
+    fbTargetDay: 'today',
+    fbAutoPostTime: '09:41',
+    timeZone: 'Africa/Cairo',
+  });
+  assert.equal(
+    previewLine,
+    'سينشر تلقائياً جدول (الخميس / اليوم) الساعة 09:41 بتوقيت القاهرة'
+  );
+
+  const sanitizedErr = sanitizeFbAutoPostError(
+    'Error with access_token=EAABsbCS1234567890SECRET'
+  );
+  assert.equal(sanitizedErr.includes('EAABsbCS1234567890SECRET'), false);
+  assert.ok(sanitizedErr.includes('[REDACTED]'));
+  assert.equal(addDaysToDateStr('2026-01-31', 1), '2026-02-01');
+});
+
+test('firestore.rules includes new reminder fields, server-only field protections, and posterMeta collection rules', () => {
+  const rulesPath = path.resolve(process.cwd(), 'firestore.rules');
+  const rulesContent = fs.readFileSync(rulesPath, 'utf8');
+
+  assert.ok(
+    rulesContent.includes("data.fbTargetDay in ['today', 'tomorrow']"),
+    'Expected fbTargetDay validation in firestore.rules'
+  );
+  assert.ok(
+    rulesContent.includes("data.fbFallbackMode in ['text', 'skip']"),
+    'Expected fbFallbackMode validation in firestore.rules'
+  );
+  assert.ok(
+    rulesContent.includes('data.fbSkipEmptyDay is bool'),
+    'Expected fbSkipEmptyDay validation in firestore.rules'
+  );
+  assert.ok(
+    rulesContent.includes("'lastFbPostTargetDate'") &&
+      rulesContent.includes("'lastFbPostStatus'") &&
+      rulesContent.includes("'fbPostLockUntil'") &&
+      rulesContent.includes("'lastCronRunAt'"),
+    'Expected server-only fields to be protected from client writes in firestore.rules'
+  );
+  assert.match(
+    rulesContent,
+    /match\s+\/posterMeta\/\{dayId\}\s*\{[\s\S]*?allow\s+get,\s*list:\s+if\s+isStaff\(\);/
+  );
+});
+
 
 
 

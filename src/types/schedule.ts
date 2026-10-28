@@ -141,6 +141,14 @@ export type FacebookPostMode =
   | 'photo_only'
   | 'text_only';
 
+export type FacebookFallbackMode = 'text' | 'skip';
+
+export type FacebookAutoPostStatus =
+  | 'success'
+  | 'success_text_fallback'
+  | 'skipped_no_clinics'
+  | 'failed';
+
 export interface PosterImageData {
   dayId: DayId;
   version: number;
@@ -149,23 +157,66 @@ export interface PosterImageData {
   updatedAt?: unknown;
 }
 
+export interface PosterMetaData {
+  dayId: DayId;
+  version: number;
+  updatedAt: string;
+  bytes: number;
+}
+
+export interface FbPostAttemptsRecord {
+  date: string;
+  count: number;
+}
+
+export type ReminderTargetDay = 'tomorrow' | 'today';
+
 export interface ReminderSettings {
   enabled: boolean;
   time: string;
   timezone: 'Africa/Cairo';
-  targetDay: 'tomorrow' | 'today';
+  targetDay: ReminderTargetDay;
   title: string;
   body: string;
   fbAutoPostEnabled?: boolean;
   fbAutoPostTime?: string;
   fbPostMode?: FacebookPostMode;
+  fbTargetDay?: ReminderTargetDay;
+  fbFallbackMode?: FacebookFallbackMode;
+  fbSkipEmptyDay?: boolean;
   lastSentDate?: string;
   lastFbPostDate?: string;
+  lastFbPostTargetDate?: string;
   lastFbPostWarning?: string;
+  lastFbPostStatus?: FacebookAutoPostStatus;
+  lastFbPostAt?: string;
+  lastFbPostId?: string;
+  lastFbPostError?: string;
+  fbPostAttempts?: FbPostAttemptsRecord;
+  fbPostLockUntil?: number;
+  lastCronRunAt?: string;
   updatedBy?: string;
   updatedByEmail?: string;
   updatedAt?: unknown;
 }
+
+export type ClientEditableReminderSettings = Omit<
+  ReminderSettings,
+  | 'lastSentDate'
+  | 'lastFbPostDate'
+  | 'lastFbPostTargetDate'
+  | 'lastFbPostWarning'
+  | 'lastFbPostStatus'
+  | 'lastFbPostAt'
+  | 'lastFbPostId'
+  | 'lastFbPostError'
+  | 'fbPostAttempts'
+  | 'fbPostLockUntil'
+  | 'lastCronRunAt'
+  | 'updatedBy'
+  | 'updatedByEmail'
+  | 'updatedAt'
+>;
 
 export interface FcmTokenRecord {
   token: string;
@@ -175,5 +226,6 @@ export interface FcmTokenRecord {
   createdAt?: unknown;
   updatedAt?: unknown;
 }
+
 
 

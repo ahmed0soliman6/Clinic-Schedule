@@ -1,18 +1,25 @@
-import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { doc, serverTimestamp, writeBatch } from 'firebase/firestore';
 import { db } from '../firebase';
-import { CenterSettings, DayId, PosterImageData, ScheduleRow } from '../types/schedule';
+import {
+  CenterSettings,
+  DayId,
+  PosterImageData,
+  PosterMetaData,
+  ScheduleRow,
+} from '../types/schedule';
 import { generatePosterJpeg1080x1350 } from './exportPoster';
 
 export interface SyncPosterResult {
   ok: boolean;
   sizeChars: number;
   qualityUsed: number;
+  meta?: PosterMetaData;
   error?: string;
 }
 
 /**
  * Generates an exact 1080x1350 JPEG poster from the current day's poster DOM node
- * and saves it to Firestore at `posterImages/{dayId}`.
+ * and saves it to Firestore at `posterImages/{dayId}` and `posterMeta/{dayId}` in a single batch.
  * Strictly checks that base64 size is < 900,000 characters to comply with Firestore limits and security rules.
  */
 export async function syncPosterImageToFirestore(params: {
@@ -51,21 +58,34 @@ export async function syncPosterImageToFirestore(params: {
       };
     }
 
+    const safeVersion = Math.max(1, Math.floor(version || 1));
+    const nowIso = new Date().toISOString();
+
     const docPayload: PosterImageData = {
       dayId,
-      version,
+      version: safeVersion,
       imageBase64: base64,
       mime,
       updatedAt: serverTimestamp(),
     };
 
-    const posterDocRef = doc(db, 'posterImages', dayId);
-    await setDoc(posterDocRef, docPayload);
+    const metaPayload: PosterMetaData = {
+      dayId,
+      version: safeVersion,
+      updatedAt: nowIso,
+      bytes: base64.length,
+    };
+
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'posterImages', dayId), docPayload);
+    batch.set(doc(db, 'posterMeta', dayId), metaPayload);
+    await batch.commit();
 
     return {
       ok: true,
       sizeChars: base64.length,
       qualityUsed,
+      meta: metaPayload,
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -77,3 +97,4 @@ export async function syncPosterImageToFirestore(params: {
     };
   }
 }
+

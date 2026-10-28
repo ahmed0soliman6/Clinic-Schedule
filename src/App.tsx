@@ -49,11 +49,14 @@ import {
   AuditAction,
   AuditLogEntry,
   CenterSettings,
+  ClientEditableReminderSettings,
   ConflictInfo,
   DailyScheduleData,
   DayId,
+  PosterMetaData,
   PublicDailyScheduleData,
   ReminderSettings,
+  ReminderTargetDay,
   SaveStatus,
   ScheduleRow,
   UserProfile,
@@ -92,7 +95,10 @@ import { SchedulePoster } from './components/SchedulePoster';
 import { ShareAndExportBar } from './components/ShareAndExportBar';
 import { syncPosterImageToFirestore } from './utils/posterImageSync';
 import { CenterSettingsModal } from './components/CenterSettingsModal';
-import { RemindersAndAutoPostModal } from './components/RemindersAndAutoPostModal';
+import {
+  RemindersAndAutoPostModal,
+  WeekPostersProgress,
+} from './components/RemindersAndAutoPostModal';
 import { UsersAndAuditModal } from './components/UsersAndAuditModal';
 import { ComplexBrandLogo } from './components/BrandLogos';
 import {
@@ -247,6 +253,24 @@ export default function App() {
   const [reminderSettings, setReminderSettings] = useState<ReminderSettings>({
     ...DEFAULT_REMINDER_SETTINGS,
   });
+  const reminderSettingsRef = useRef<ReminderSettings>({
+    ...DEFAULT_REMINDER_SETTINGS,
+  });
+  useEffect(() => {
+    reminderSettingsRef.current = reminderSettings;
+  }, [reminderSettings]);
+
+  const [posterMetaByDay, setPosterMetaByDay] = useState<
+    Partial<Record<DayId, PosterMetaData>>
+  >({});
+  const [posterMetaLoaded, setPosterMetaLoaded] = useState(false);
+  const [allStaffSchedulesLoaded, setAllStaffSchedulesLoaded] = useState(false);
+  const [bgRenderTask, setBgRenderTask] = useState<{
+    dayId: DayId;
+    dayLabel: string;
+    rows: ScheduleRow[];
+  } | null>(null);
+  const bgPosterRef = useRef<HTMLDivElement | null>(null);
   const [schedules, setSchedulesState] = useState<Record<DayId, DailyScheduleData>>(
     () => {
       const emptyMap = {} as Record<DayId, DailyScheduleData>;
@@ -816,6 +840,9 @@ export default function App() {
     }
 
     let unsubReminders: (() => void) | null = null;
+    let unsubPosterMeta: (() => void) | null = null;
+    let unsubAllSchedules: (() => void) | null = null;
+
     if (isStaffAuthenticated) {
       const remindersRef = doc(db, 'appConfig', 'reminders');
       unsubReminders = onSnapshot(
@@ -834,12 +861,98 @@ export default function App() {
           // Handled
         }
       );
+
+      const posterMetaColRef = collection(db, 'posterMeta');
+      unsubPosterMeta = onSnapshot(
+        posterMetaColRef,
+        (snap) => {
+          const map: Partial<Record<DayId, PosterMetaData>> = {};
+          snap.forEach((docSnap) => {
+            const data = docSnap.data() as PosterMetaData;
+            const dId = (data.dayId || docSnap.id) as DayId;
+            if (DAYS_LIST.some((d) => d.id === dId)) {
+              map[dId] = {
+                dayId: dId,
+                version: typeof data.version === 'number' ? data.version : 0,
+                updatedAt: data.updatedAt,
+                bytes: typeof data.bytes === 'number' ? data.bytes : 0,
+              };
+            }
+          });
+          setPosterMetaByDay(map);
+          setPosterMetaLoaded(true);
+        },
+        () => {
+          setPosterMetaLoaded(true);
+        }
+      );
+
+      const allSchedulesColRef = collection(db, 'schedules');
+      unsubAllSchedules = onSnapshot(
+        allSchedulesColRef,
+        (snap) => {
+          setSchedules((prev) => {
+            let changed = false;
+            const next = { ...prev };
+            snap.forEach((docSnap) => {
+              const dId = docSnap.id as DayId;
+              // Selected day is already managed by the dedicated per-day listener with conflict detection
+              if (dId === selectedDay) return;
+              if (!DAYS_LIST.some((d) => d.id === dId)) return;
+              if (isDaySavingOrPending(dId)) return;
+
+              const remoteDoc = docSnap.data() as DailyScheduleData;
+              const rawRows = Array.isArray(remoteDoc.draftRows)
+                ? remoteDoc.draftRows
+                : Array.isArray(remoteDoc.publishedRows)
+                ? remoteDoc.publishedRows
+                : [];
+              const cleanRows = filterNonEmptyRows(rawRows)
+                .slice(0, BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY)
+                .map((r, i) => sanitizeRowForFirestore(r, i));
+              const remoteVer =
+                typeof remoteDoc.version === 'number' &&
+                Number.isFinite(remoteDoc.version)
+                  ? remoteDoc.version
+                  : 1;
+
+              const currentDay = prev[dId];
+              if (!currentDay || currentDay.version !== remoteVer) {
+                changed = true;
+                localVersionRef.current[dId] = remoteVer;
+                const normalized: DailyScheduleData = {
+                  ...(currentDay || {}),
+                  ...remoteDoc,
+                  dayId: dId,
+                  version: remoteVer,
+                  draftRows: cleanRows,
+                  publishedRows: cleanRows,
+                  hasUnpublishedChanges: false,
+                  isPublic: true,
+                };
+                confirmedSchedulesRef.current = {
+                  ...confirmedSchedulesRef.current,
+                  [dId]: normalized,
+                };
+                next[dId] = normalized;
+              }
+            });
+            return changed ? next : prev;
+          });
+          setAllStaffSchedulesLoaded(true);
+        },
+        () => {
+          setAllStaffSchedulesLoaded(true);
+        }
+      );
     }
 
     return () => {
       unsubSettings();
       unsubSchedule();
       if (unsubReminders) unsubReminders();
+      if (unsubPosterMeta) unsubPosterMeta();
+      if (unsubAllSchedules) unsubAllSchedules();
     };
   }, [authReady, isLoaded, isStaffAuthenticated, selectedDay]);
 
@@ -1345,7 +1458,7 @@ export default function App() {
 
   const currentSchedule = schedules[selectedDay];
 
-  // Auto-sync 1080x1350 JPEG poster to Firestore posterImages/{dayId} after successful save
+  // Auto-sync 1080x1350 JPEG poster to Firestore posterImages/{dayId} + posterMeta/{dayId} after successful save
   // (when version changes) with 1.5s debounce, exclusively for logged-in staff and currently active day
   const currentDayVersion = currentSchedule?.version;
   useEffect(() => {
@@ -1382,6 +1495,100 @@ export default function App() {
     allowedDays,
     saveStatus,
     settings,
+  ]);
+
+  // Helper to render any day's poster offscreen and sync its JPEG + posterMeta to Firestore
+  const isBgSyncRunningRef = useRef(false);
+  const renderAndSyncSingleDayOffscreen = async (params: {
+    dayId: DayId;
+    dayLabel: string;
+    version: number;
+    rows: ScheduleRow[];
+  }): Promise<{ ok: boolean; error?: string }> => {
+    setBgRenderTask({
+      dayId: params.dayId,
+      dayLabel: params.dayLabel,
+      rows: params.rows,
+    });
+    // Wait for React to commit the offscreen SchedulePoster DOM and fonts/layout to settle
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    const domNode = bgPosterRef.current || exportPosterRef.current;
+    const res = await syncPosterImageToFirestore({
+      dayId: params.dayId,
+      version: params.version,
+      dayLabel: params.dayLabel,
+      rows: params.rows,
+      settings,
+      domNode,
+    });
+    return res;
+  };
+
+  // Self-healing background poster sync on staff login:
+  // Compares each editable day's schedule version with posterMeta/{dayId}.version
+  // and silently generates missing/outdated posters one by one with a short delay.
+  useEffect(() => {
+    if (
+      !firebaseUser ||
+      !activeRole ||
+      !posterMetaLoaded ||
+      !allStaffSchedulesLoaded
+    ) {
+      return;
+    }
+    if (isBgSyncRunningRef.current) return;
+
+    const staleDays = DAYS_LIST.filter((d) => {
+      if (!canUserEditDay(activeRole, allowedDays, d.id)) return false;
+      const schedVer = schedulesRef.current[d.id]?.version || 1;
+      const metaVer = posterMetaByDay[d.id]?.version;
+      return metaVer !== schedVer;
+    });
+
+    if (staleDays.length === 0) return;
+
+    let cancelled = false;
+    isBgSyncRunningRef.current = true;
+
+    const timer = setTimeout(async () => {
+      try {
+        for (const day of staleDays) {
+          if (cancelled) break;
+          const sched = schedulesRef.current[day.id];
+          if (!sched) continue;
+          const cleanRows = filterNonEmptyRows(
+            sched.draftRows || sched.publishedRows || []
+          );
+          await renderAndSyncSingleDayOffscreen({
+            dayId: day.id,
+            dayLabel: sched.dayLabel || day.label,
+            version: sched.version || 1,
+            rows: cleanRows,
+          });
+          if (cancelled) break;
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+      } catch {
+        // Non-blocking background self-heal
+      } finally {
+        isBgSyncRunningRef.current = false;
+        if (!cancelled) {
+          setBgRenderTask(null);
+        }
+      }
+    }, 2200);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      isBgSyncRunningRef.current = false;
+    };
+  }, [
+    firebaseUser,
+    activeRole,
+    allowedDays,
+    posterMetaLoaded,
+    allStaffSchedulesLoaded,
   ]);
 
   // Strictly require authenticated user login to edit
@@ -1591,17 +1798,73 @@ export default function App() {
     }
   };
 
+  const buildReminderFirestorePayload = (
+    base: ClientEditableReminderSettings,
+    uid: string,
+    email: string
+  ) => ({
+    enabled: Boolean(base.enabled),
+    time: base.time || DEFAULT_REMINDER_SETTINGS.time,
+    timezone: 'Africa/Cairo' as const,
+    targetDay:
+      base.targetDay === 'today' ? ('today' as const) : ('tomorrow' as const),
+    title: base.title || DEFAULT_REMINDER_SETTINGS.title,
+    body: base.body || DEFAULT_REMINDER_SETTINGS.body,
+    fbAutoPostEnabled: Boolean(base.fbAutoPostEnabled),
+    fbAutoPostTime: base.fbAutoPostTime || '20:00',
+    fbPostMode: base.fbPostMode || 'photo_with_caption',
+    fbTargetDay:
+      base.fbTargetDay === 'today' ? ('today' as const) : ('tomorrow' as const),
+    fbFallbackMode:
+      base.fbFallbackMode === 'skip' ? ('skip' as const) : ('text' as const),
+    fbSkipEmptyDay:
+      typeof base.fbSkipEmptyDay === 'boolean' ? base.fbSkipEmptyDay : true,
+    updatedBy: uid,
+    updatedByEmail: email,
+    updatedAt: serverTimestamp(),
+  });
+
   const handleSaveReminders = async (
-    updatedReminders: Omit<
-      ReminderSettings,
-      'lastSentDate' | 'lastFbPostDate' | 'lastFbPostWarning' | 'updatedBy' | 'updatedByEmail' | 'updatedAt'
-    >
-  ) => {
-    if (activeRole !== 'ADMIN') return;
+    updatedReminders: ClientEditableReminderSettings
+  ): Promise<{ ok: boolean; error?: string }> => {
+    if (activeRole !== 'ADMIN') {
+      return { ok: false, error: 'غير مصرح بحفظ إعدادات الإشعارات.' };
+    }
+
+    const previousState = reminderSettingsRef.current;
     setReminderSettings((prev) => ({
       ...prev,
       ...updatedReminders,
     }));
+
+    if (firebaseUser) {
+      try {
+        const reminderRef = doc(db, 'appConfig', 'reminders');
+        const existingSnap = await getDoc(reminderRef);
+        const reminderPayload = buildReminderFirestorePayload(
+          updatedReminders,
+          firebaseUser.uid,
+          firebaseUser.email || PRIMARY_ADMIN_EMAIL
+        );
+        if (existingSnap.exists()) {
+          await updateDoc(reminderRef, reminderPayload);
+        } else {
+          await setDoc(reminderRef, reminderPayload);
+        }
+      } catch (err) {
+        // Revert optimistic state on failure and show clear Arabic error message
+        setReminderSettings(previousState);
+        const errMsg =
+          'تعذر حفظ إعدادات الإشعارات والنشر التلقائي في قاعدة البيانات. تم التراجع عن التغيير.';
+        setAuthErrorBanner(errMsg);
+        try {
+          handleFirestoreError(err, OperationType.WRITE, 'appConfig/reminders');
+        } catch {
+          // Handled
+        }
+        return { ok: false, error: errMsg };
+      }
+    }
 
     await appendAuditLog(
       'UPDATE_SETTINGS',
@@ -1610,74 +1873,246 @@ export default function App() {
       'تحديث إعدادات الإشعار اليومي وتوقيت النشر التلقائي على فيسبوك'
     );
 
-    if (firebaseUser) {
-      try {
-        const reminderRef = doc(db, 'appConfig', 'reminders');
-        const existingSnap = await getDoc(reminderRef);
-        const reminderPayload = {
-          enabled: updatedReminders.enabled,
-          time: updatedReminders.time,
-          timezone: 'Africa/Cairo' as const,
-          targetDay: updatedReminders.targetDay,
-          title: updatedReminders.title,
-          body: updatedReminders.body,
-          fbAutoPostEnabled: Boolean(updatedReminders.fbAutoPostEnabled),
-          fbAutoPostTime: updatedReminders.fbAutoPostTime || '20:00',
-          fbPostMode: updatedReminders.fbPostMode || 'photo_with_caption',
-          updatedBy: firebaseUser.uid,
-          updatedByEmail: firebaseUser.email || PRIMARY_ADMIN_EMAIL,
-          updatedAt: serverTimestamp(),
-        };
-        if (existingSnap.exists()) {
-          await updateDoc(reminderRef, reminderPayload);
-        } else {
-          await setDoc(reminderRef, reminderPayload);
-        }
-      } catch (err) {
-        try {
-          handleFirestoreError(err, OperationType.WRITE, 'appConfig/reminders');
-        } catch {
-          // Handled
-        }
-      }
-    }
+    return { ok: true };
   };
 
-  const handleToggleFbAutoPost = async (nextEnabled: boolean) => {
+  const handleToggleFbAutoPost = async (
+    nextEnabled: boolean
+  ): Promise<{ ok: boolean; error?: string }> => {
+    const previousState = reminderSettingsRef.current;
     setReminderSettings((prev) => ({
       ...prev,
       fbAutoPostEnabled: nextEnabled,
     }));
 
-    if (!firebaseUser || activeRole !== 'ADMIN') return;
+    if (!firebaseUser || activeRole !== 'ADMIN') {
+      return { ok: true };
+    }
 
     try {
       const reminderRef = doc(db, 'appConfig', 'reminders');
       const existingSnap = await getDoc(reminderRef);
-      const reminderPayload = {
-        enabled: reminderSettings.enabled ?? DEFAULT_REMINDER_SETTINGS.enabled,
-        time: reminderSettings.time || DEFAULT_REMINDER_SETTINGS.time,
-        timezone: 'Africa/Cairo' as const,
-        targetDay:
-          reminderSettings.targetDay === 'today' ? ('today' as const) : ('tomorrow' as const),
-        title: reminderSettings.title || DEFAULT_REMINDER_SETTINGS.title,
-        body: reminderSettings.body || DEFAULT_REMINDER_SETTINGS.body,
-        fbAutoPostEnabled: nextEnabled,
-        updatedBy: firebaseUser.uid,
-        updatedByEmail: firebaseUser.email || PRIMARY_ADMIN_EMAIL,
-        updatedAt: serverTimestamp(),
-      };
+      const reminderPayload = buildReminderFirestorePayload(
+        {
+          ...previousState,
+          fbAutoPostEnabled: nextEnabled,
+        },
+        firebaseUser.uid,
+        firebaseUser.email || PRIMARY_ADMIN_EMAIL
+      );
       if (existingSnap.exists()) {
         await updateDoc(reminderRef, reminderPayload);
       } else {
         await setDoc(reminderRef, reminderPayload);
       }
+      return { ok: true };
     } catch (err) {
+      // Revert toggle to previous state on failure and display clear Arabic error
+      setReminderSettings(previousState);
+      const errMsg =
+        'تعذر تحديث حالة زر النشر التلقائي في قاعدة البيانات. تم إرجاع الزر لحالته السابقة.';
+      setAuthErrorBanner(errMsg);
       try {
         handleFirestoreError(err, OperationType.WRITE, 'appConfig/reminders');
       } catch {
         // Handled
       }
+      return { ok: false, error: errMsg };
+    }
+  };
+
+  const handleChangeFbTargetDay = async (
+    nextTargetDay: ReminderTargetDay
+  ): Promise<{ ok: boolean; error?: string }> => {
+    const previousState = reminderSettingsRef.current;
+    setReminderSettings((prev) => ({
+      ...prev,
+      fbTargetDay: nextTargetDay,
+    }));
+
+    if (!firebaseUser || activeRole !== 'ADMIN') {
+      return { ok: true };
+    }
+
+    try {
+      const reminderRef = doc(db, 'appConfig', 'reminders');
+      const existingSnap = await getDoc(reminderRef);
+      const reminderPayload = buildReminderFirestorePayload(
+        {
+          ...previousState,
+          fbTargetDay: nextTargetDay,
+        },
+        firebaseUser.uid,
+        firebaseUser.email || PRIMARY_ADMIN_EMAIL
+      );
+      if (existingSnap.exists()) {
+        await updateDoc(reminderRef, reminderPayload);
+      } else {
+        await setDoc(reminderRef, reminderPayload);
+      }
+      return { ok: true };
+    } catch (err) {
+      setReminderSettings(previousState);
+      const errMsg =
+        'تعذر تحديث يوم النشر التلقائي في قاعدة البيانات. تم إرجاع الاختيار لحالته السابقة.';
+      setAuthErrorBanner(errMsg);
+      try {
+        handleFirestoreError(err, OperationType.WRITE, 'appConfig/reminders');
+      } catch {
+        // Handled
+      }
+      return { ok: false, error: errMsg };
+    }
+  };
+
+  const handlePrepareAllWeekPosters = async (
+    onProgress: (progress: WeekPostersProgress) => void
+  ): Promise<void> => {
+    if (!firebaseUser || activeRole !== 'ADMIN') return;
+    isBgSyncRunningRef.current = true;
+
+    const results = {} as WeekPostersProgress['results'];
+    DAYS_LIST.forEach((d) => {
+      results[d.id] = { status: 'pending' };
+    });
+
+    let completed = 0;
+    const total = DAYS_LIST.length;
+    onProgress({ completed, total, results: { ...results } });
+
+    try {
+      for (const day of DAYS_LIST) {
+        results[day.id] = { status: 'running' };
+        onProgress({ completed, total, results: { ...results } });
+
+        try {
+          // Read latest schedule version directly from Firestore at click time
+          const snap = await getDoc(doc(db, 'schedules', day.id));
+          let version = schedulesRef.current[day.id]?.version || 1;
+          let dayLabel = schedulesRef.current[day.id]?.dayLabel || day.label;
+          let rows = filterNonEmptyRows(
+            schedulesRef.current[day.id]?.draftRows ||
+              schedulesRef.current[day.id]?.publishedRows ||
+              []
+          );
+
+          if (snap.exists()) {
+            const remoteData = snap.data() as DailyScheduleData;
+            version =
+              typeof remoteData.version === 'number' &&
+              Number.isFinite(remoteData.version)
+                ? remoteData.version
+                : 1;
+            dayLabel = remoteData.dayLabel || day.label;
+            rows = filterNonEmptyRows(
+              remoteData.draftRows || remoteData.publishedRows || []
+            );
+          }
+
+          const syncRes = await renderAndSyncSingleDayOffscreen({
+            dayId: day.id,
+            dayLabel,
+            version,
+            rows,
+          });
+
+          if (syncRes.ok) {
+            results[day.id] = { status: 'ok' };
+          } else {
+            results[day.id] = {
+              status: 'error',
+              message: syncRes.error || 'تعذر الحفظ',
+            };
+          }
+        } catch (err) {
+          results[day.id] = {
+            status: 'error',
+            message: err instanceof Error ? err.message : 'خطأ غير متوقع',
+          };
+        }
+
+        completed += 1;
+        onProgress({ completed, total, results: { ...results } });
+      }
+    } finally {
+      isBgSyncRunningRef.current = false;
+      setBgRenderTask(null);
+    }
+  };
+
+  const handleDryRunAutoPost = async (): Promise<Record<string, unknown>> => {
+    if (!firebaseUser || activeRole !== 'ADMIN') {
+      return { ok: false, error: 'غير مصرح بهذا الإجراء.' };
+    }
+    try {
+      const idToken = await firebaseUser.getIdToken();
+      const response = await fetch(
+        '/api/send-reminders?action=fb-auto&mode=dry',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${idToken}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        return {
+          ok: false,
+          error:
+            data.error ||
+            `تعذر تشغيل الفحص التجريبي (HTTP ${response.status}). يعمل على Vercel بعد نشر الكود.`,
+        };
+      }
+      return data;
+    } catch {
+      return {
+        ok: false,
+        error:
+          'تعذر الوصول إلى نقطة /api/send-reminders (تعمل على Vercel في بيئة الإنتاج).',
+      };
+    }
+  };
+
+  const handleRunAutoPostNow = async (
+    force = false
+  ): Promise<Record<string, unknown>> => {
+    if (!firebaseUser || activeRole !== 'ADMIN') {
+      return { ok: false, error: 'غير مصرح بهذا الإجراء.' };
+    }
+    try {
+      const idToken = await firebaseUser.getIdToken();
+      const response = await fetch(
+        `/api/send-reminders?action=fb-auto&mode=now${
+          force ? '&force=true' : ''
+        }`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${idToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ force }),
+        }
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok && !data.needsForceConfirm) {
+        return {
+          ok: false,
+          error:
+            data.error ||
+            data.message ||
+            `تعذر تشغيل النشر التلقائي الفوري (HTTP ${response.status}).`,
+        };
+      }
+      return data;
+    } catch {
+      return {
+        ok: false,
+        error:
+          'تعذر الوصول إلى نقطة /api/send-reminders (تعمل على Vercel في بيئة الإنتاج).',
+      };
     }
   };
 
@@ -2406,7 +2841,14 @@ export default function App() {
           showFacebookCard={showFacebookCard}
           onCloseFacebookCard={() => setShowFacebookCard(false)}
           fbAutoPostEnabled={Boolean(reminderSettings.fbAutoPostEnabled)}
+          fbAutoPostTime={reminderSettings.fbAutoPostTime || '20:00'}
+          fbTargetDay={
+            reminderSettings.fbTargetDay === 'today' ? 'today' : 'tomorrow'
+          }
           onToggleFbAutoPost={handleToggleFbAutoPost}
+          onChangeFbTargetDay={
+            activeRole === 'ADMIN' ? handleChangeFbTargetDay : undefined
+          }
           onPublishFacebookNow={handlePublishFacebookNow}
         />
 
@@ -2454,6 +2896,31 @@ export default function App() {
             isExporting={true}
           />
         </div>
+
+        {/* Offscreen Background Self-Healing / Week-Batch Poster Node */}
+        {bgRenderTask && (
+          <div
+            aria-hidden="true"
+            style={{
+              position: 'fixed',
+              left: '-9999px',
+              top: '1200px',
+              width: '780px',
+              pointerEvents: 'none',
+              zIndex: -60,
+            }}
+          >
+            <SchedulePoster
+              dayId={bgRenderTask.dayId}
+              dayLabel={bgRenderTask.dayLabel}
+              rows={bgRenderTask.rows}
+              settings={settings}
+              posterRef={bgPosterRef}
+              isEditable={false}
+              isExporting={true}
+            />
+          </div>
+        )}
       </main>
 
       {/* Clear Day Confirmation Modal stating the number of rows */}
@@ -2654,6 +3121,8 @@ export default function App() {
       {showRemindersModal && activeRole === 'ADMIN' && (
         <RemindersAndAutoPostModal
           reminderSettings={reminderSettings}
+          schedulesByDay={schedules}
+          posterMetaByDay={posterMetaByDay}
           onSave={handleSaveReminders}
           onSendTestReminder={handleSendTestReminder}
           onPublishFacebookNow={() =>
@@ -2663,6 +3132,9 @@ export default function App() {
               rows: displayedRows,
             })
           }
+          onPrepareAllWeekPosters={handlePrepareAllWeekPosters}
+          onDryRunAutoPost={handleDryRunAutoPost}
+          onRunAutoPostNow={handleRunAutoPostNow}
           onClose={() => setShowRemindersModal(false)}
         />
       )}

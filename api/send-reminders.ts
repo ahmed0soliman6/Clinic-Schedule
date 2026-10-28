@@ -1,26 +1,35 @@
 import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
-import { getFirestore } from 'firebase-admin/firestore';
+import { Firestore, getFirestore } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
 import type {
   CenterSettings,
   DailyScheduleData,
   DayId,
+  FacebookFallbackMode,
   FacebookPostMode,
   PublicDailyScheduleData,
   ReminderSettings,
   ScheduleRow,
   UserProfile,
 } from '../src/types/schedule.js';
-import { decideFacebookPublishPlan } from '../src/utils/facebookPostLogic.js';
+import {
+  decideFacebookPublishPlan,
+  inspectStoredPosterImageStatus,
+} from '../src/utils/facebookPostLogic.js';
 import {
   computeTokenDocId,
+  DEFAULT_CATCH_UP_WINDOW_MINUTES,
   DEFAULT_REMINDER_SETTINGS,
+  evaluateFbAutoPostGate,
+  FB_POST_LOCK_DURATION_MS,
   filterEligibleReminderTokens,
   formatReminderMessage,
   isWithinReminderWindow,
+  MAX_FB_POST_ATTEMPTS_PER_DATE,
   PUBLIC_SUBSCRIBER_EMAIL,
   resolveTargetDayId,
+  sanitizeFbAutoPostError,
   StoredTokenEntry,
 } from '../src/utils/reminderLogic.js';
 import {
@@ -430,6 +439,586 @@ function isInvalidTokenError(err: unknown): boolean {
   );
 }
 
+/**
+ * Shared execution engine for automatic daily Facebook Page publishing (used by both
+ * the scheduled cron job and the Admin "Run Auto-Post Now" action).
+ */
+async function executeAutomatedFacebookPublish(params: {
+  db: Firestore;
+  now: Date;
+  ignoreTimeWindow?: boolean;
+  forceRePost?: boolean;
+}): Promise<Record<string, unknown>> {
+  const { db, now, ignoreTimeWindow = false, forceRePost = false } = params;
+  const remindersRef = db.collection('appConfig').doc('reminders');
+
+  // Step 1: Transactionally check eligibility and acquire 5-minute lock (without setting lastFbPostTargetDate yet)
+  const lockOutcome = await db.runTransaction(async (tx) => {
+    const freshSnap = await tx.get(remindersRef);
+    const freshData = (freshSnap.data() || {}) as Partial<ReminderSettings>;
+    const mergedConfig: ReminderSettings = {
+      ...DEFAULT_REMINDER_SETTINGS,
+      ...freshData,
+      timezone: 'Africa/Cairo',
+    };
+
+    const gate = evaluateFbAutoPostGate({
+      now,
+      fbAutoPostEnabled: Boolean(mergedConfig.fbAutoPostEnabled),
+      fbAutoPostTime:
+        mergedConfig.fbAutoPostTime || mergedConfig.time || '20:00',
+      fbTargetDay:
+        mergedConfig.fbTargetDay === 'today' ? 'today' : 'tomorrow',
+      lastFbPostTargetDate: mergedConfig.lastFbPostTargetDate,
+      fbPostLockUntil: mergedConfig.fbPostLockUntil,
+      fbPostAttempts: mergedConfig.fbPostAttempts,
+      maxAttempts: MAX_FB_POST_ATTEMPTS_PER_DATE,
+      windowMinutes: DEFAULT_CATCH_UP_WINDOW_MINUTES,
+      timeZone: 'Africa/Cairo',
+      ignoreTimeWindow,
+      forceRePost,
+    });
+
+    if (!gate.shouldExecute) {
+      return {
+        acquired: false as const,
+        gate,
+        config: mergedConfig,
+      };
+    }
+
+    tx.set(
+      remindersRef,
+      {
+        fbPostLockUntil: now.getTime() + FB_POST_LOCK_DURATION_MS,
+      },
+      { merge: true }
+    );
+
+    return {
+      acquired: true as const,
+      gate,
+      config: mergedConfig,
+    };
+  });
+
+  const { acquired, gate, config } = lockOutcome;
+
+  if (!acquired) {
+    return {
+      ok: gate.reason === 'already_posted_for_target_date',
+      executed: false,
+      skipped: true,
+      reason: gate.reason,
+      dayId: gate.targetDayId,
+      dayLabel: gate.targetDayLabel,
+      targetDateStr: gate.targetDateStr,
+    };
+  }
+
+  const targetDayId = gate.targetDayId;
+  const targetDayLabel = gate.targetDayLabel;
+  const targetDateStr = gate.targetDateStr;
+  const nextAttemptCount = gate.currentAttemptsCount + 1;
+
+  try {
+    const [settingsSnap, schedSnap, pubSchedSnap, posterSnap] =
+      await Promise.all([
+        db.collection('settings').doc('center').get(),
+        db.collection('schedules').doc(targetDayId).get(),
+        db.collection('publicSchedules').doc(targetDayId).get(),
+        db.collection('posterImages').doc(targetDayId).get(),
+      ]);
+
+    const centerSettings: CenterSettings = settingsSnap.exists
+      ? {
+          ...FALLBACK_CENTER_SETTINGS,
+          ...(settingsSnap.data() as Partial<CenterSettings>),
+        }
+      : FALLBACK_CENTER_SETTINGS;
+
+    let targetRows: ScheduleRow[] = [];
+    let scheduleVersion = 1;
+    if (schedSnap.exists) {
+      const sData = schedSnap.data() as DailyScheduleData;
+      scheduleVersion = sData.version || 1;
+      targetRows = filterNonEmptyRows(
+        sData.draftRows || sData.publishedRows || []
+      );
+    } else if (pubSchedSnap.exists) {
+      const pData = pubSchedSnap.data() as PublicDailyScheduleData;
+      targetRows = filterNonEmptyRows(pData.publishedRows || []);
+    }
+
+    const skipEmptyDay =
+      typeof config.fbSkipEmptyDay === 'boolean' ? config.fbSkipEmptyDay : true;
+
+    // Deliverable 3: If fbSkipEmptyDay=true and day has no non-empty clinic rows, skip and mark targetDateStr completed
+    if (skipEmptyDay && targetRows.length === 0) {
+      const nowIso = new Date().toISOString();
+      const skipMsg = `تم تخطي النشر التلقائي لجدول يوم ${targetDayLabel} (${targetDateStr}) لعدم وجود عيادات مسجلة.`;
+      await remindersRef.set(
+        {
+          lastFbPostTargetDate: targetDateStr,
+          lastFbPostDate: gate.cairoDateStr,
+          lastFbPostStatus: 'skipped_no_clinics',
+          lastFbPostAt: nowIso,
+          lastFbPostId: '',
+          lastFbPostError: skipMsg,
+          fbPostAttempts: { date: targetDateStr, count: nextAttemptCount },
+          fbPostLockUntil: 0,
+        },
+        { merge: true }
+      );
+
+      return {
+        ok: true,
+        executed: false,
+        skipped: true,
+        status: 'skipped_no_clinics',
+        dayId: targetDayId,
+        dayLabel: targetDayLabel,
+        targetDateStr,
+        message: skipMsg,
+      };
+    }
+
+    let storedPosterImage: {
+      dayId: string;
+      version: number;
+      imageBase64: string;
+      mime: string;
+    } | null = null;
+
+    if (posterSnap.exists) {
+      const pData = posterSnap.data();
+      if (pData && typeof pData.imageBase64 === 'string') {
+        storedPosterImage = {
+          dayId: targetDayId,
+          version: Number(pData.version || 0),
+          imageBase64: pData.imageBase64,
+          mime: String(pData.mime || 'image/jpeg'),
+        };
+      }
+    }
+
+    const postMode: FacebookPostMode =
+      config.fbPostMode === 'photo_only' ||
+      config.fbPostMode === 'text_only' ||
+      config.fbPostMode === 'photo_with_caption'
+        ? config.fbPostMode
+        : 'photo_with_caption';
+
+    const fallbackMode: FacebookFallbackMode =
+      config.fbFallbackMode === 'skip' ? 'skip' : 'text';
+
+    const plan = decideFacebookPublishPlan({
+      mode: postMode,
+      fallbackMode,
+      scheduleVersion,
+      storedPosterImage,
+      dayLabel: targetDayLabel,
+      settings: centerSettings,
+      isManualTrigger: false,
+    });
+
+    if (plan.action === 'skip_retry' || plan.action === 'reject_error') {
+      const errMsg = sanitizeFbAutoPostError(
+        plan.action === 'skip_retry' ? plan.errorMessage : plan.errorMessage
+      );
+      await remindersRef.set(
+        {
+          lastFbPostStatus: 'failed',
+          lastFbPostAt: new Date().toISOString(),
+          lastFbPostError: errMsg,
+          fbPostAttempts: { date: targetDateStr, count: nextAttemptCount },
+          fbPostLockUntil: 0,
+        },
+        { merge: true }
+      );
+
+      return {
+        ok: false,
+        executed: false,
+        status: 'failed',
+        dayId: targetDayId,
+        dayLabel: targetDayLabel,
+        targetDateStr,
+        error: errMsg,
+        message: errMsg,
+      };
+    }
+
+    const cleanPageId = normalizeFacebookPageId(process.env.FB_PAGE_ID);
+    const cleanToken = normalizeEnvSecret(process.env.FB_PAGE_ACCESS_TOKEN);
+
+    let fbPublish: FacebookPostResult;
+
+    if (plan.action === 'post_photo') {
+      fbPublish = await publishPhotoToFacebookPage({
+        pageId: cleanPageId,
+        accessToken: cleanToken,
+        jpegBuffer: plan.jpegBuffer,
+        caption: plan.caption,
+        dayId: targetDayId,
+      });
+    } else {
+      const fbMessage = formatFacebookSchedulePost({
+        dayLabel: targetDayLabel,
+        rows: targetRows,
+        settings: centerSettings,
+      });
+
+      fbPublish = await publishFeedTextToFacebookPage({
+        pageId: cleanPageId,
+        accessToken: cleanToken,
+        message: fbMessage,
+      });
+    }
+
+    const nowIso = new Date().toISOString();
+
+    if (fbPublish.ok && fbPublish.post_id) {
+      const finalStatus =
+        plan.action === 'post_photo' ? 'success' : 'success_text_fallback';
+      const fallbackWarning =
+        plan.action === 'post_text_only'
+          ? sanitizeFbAutoPostError(plan.warning || plan.reason)
+          : '';
+
+      await remindersRef.set(
+        {
+          lastFbPostTargetDate: targetDateStr,
+          lastFbPostDate: gate.cairoDateStr,
+          lastFbPostStatus: finalStatus,
+          lastFbPostAt: nowIso,
+          lastFbPostId: fbPublish.post_id,
+          lastFbPostError: fallbackWarning,
+          lastFbPostWarning: fallbackWarning,
+          fbPostAttempts: { date: targetDateStr, count: nextAttemptCount },
+          fbPostLockUntil: 0,
+        },
+        { merge: true }
+      );
+
+      return {
+        ok: true,
+        executed: true,
+        status: finalStatus,
+        post_id: fbPublish.post_id,
+        dayId: targetDayId,
+        dayLabel: targetDayLabel,
+        targetDateStr,
+        isPhotoPost: plan.action === 'post_photo',
+        warning: fallbackWarning || undefined,
+        message:
+          plan.action === 'post_photo'
+            ? `✅ تم نشر صورة جدول يوم ${targetDayLabel} (${targetDateStr}) تلقائياً على فيسبوك! (post_id: ${fbPublish.post_id})`
+            : `✅ تم نشر جدول يوم ${targetDayLabel} (${targetDateStr}) كنص بديل على فيسبوك! (post_id: ${fbPublish.post_id})`,
+      };
+    }
+
+    const sanitizedErr = sanitizeFbAutoPostError(
+      fbPublish.error || 'فشل النشر التلقائي على فيسبوك.'
+    );
+
+    await remindersRef.set(
+      {
+        lastFbPostStatus: 'failed',
+        lastFbPostAt: nowIso,
+        lastFbPostError: sanitizedErr,
+        fbPostAttempts: { date: targetDateStr, count: nextAttemptCount },
+        fbPostLockUntil: 0,
+      },
+      { merge: true }
+    );
+
+    return {
+      ok: false,
+      executed: true,
+      status: 'failed',
+      dayId: targetDayId,
+      dayLabel: targetDayLabel,
+      targetDateStr,
+      error: sanitizedErr,
+      message: sanitizedErr,
+    };
+  } catch (err) {
+    const rawErr = err instanceof Error ? err.message : String(err);
+    const sanitizedErr = sanitizeFbAutoPostError(
+      `خطأ غير متوقع أثناء النشر التلقائي: ${rawErr}`
+    );
+    await remindersRef
+      .set(
+        {
+          lastFbPostStatus: 'failed',
+          lastFbPostAt: new Date().toISOString(),
+          lastFbPostError: sanitizedErr,
+          fbPostAttempts: { date: targetDateStr, count: nextAttemptCount },
+          fbPostLockUntil: 0,
+        },
+        { merge: true }
+      )
+      .catch(() => undefined);
+
+    return {
+      ok: false,
+      executed: false,
+      status: 'failed',
+      dayId: targetDayId,
+      dayLabel: targetDayLabel,
+      targetDateStr,
+      error: sanitizedErr,
+      message: sanitizedErr,
+    };
+  }
+}
+
+/**
+ * Handles Admin testing tools:
+ * - `POST /api/send-reminders?action=fb-auto&mode=dry`: Dry-run inspection without publishing.
+ * - `POST /api/send-reminders?action=fb-auto&mode=now`: Immediate execution of the real auto-post flow.
+ */
+async function handleFbAutoAdminAction(
+  req: VercelRequestLike,
+  res: VercelResponseLike
+) {
+  try {
+    const bearer = extractBearerToken(
+      req.headers.authorization || req.headers.Authorization
+    );
+
+    if (!bearer) {
+      res.status(401).json({
+        ok: false,
+        error: 'مطلوب تسجيل الدخول بحساب مدير المجمع (ADMIN).',
+      });
+      return;
+    }
+
+    const adminApp = getAdminApp();
+    const db = getFirestore(adminApp);
+    const adminAuth = getAuth(adminApp);
+
+    const decoded = await adminAuth.verifyIdToken(bearer);
+    const email = (decoded.email || '').trim().toLowerCase();
+    if (!email) {
+      res.status(403).json({
+        ok: false,
+        error: 'الحساب لا يحتوي على بريد إلكتروني معتمد.',
+      });
+      return;
+    }
+
+    let isAdminUser = email === PRIMARY_ADMIN_EMAIL;
+    if (!isAdminUser) {
+      const userSnap = await db
+        .collection('users')
+        .doc(emailToDocId(email))
+        .get();
+      if (userSnap.exists && userSnap.data()?.role === 'ADMIN') {
+        isAdminUser = true;
+      }
+    }
+
+    if (!isAdminUser) {
+      res.status(403).json({
+        ok: false,
+        error: 'أدوات فحص وتشغيل النشر التلقائي متاحة لمدير المجمع (ADMIN) فقط.',
+      });
+      return;
+    }
+
+    const payload = parseRequestBody(req.body);
+    const rawMode = req.query?.mode;
+    const queryMode = Array.isArray(rawMode) ? rawMode[0] : rawMode;
+    const mode =
+      queryMode === 'now' || payload.mode === 'now' ? 'now' : 'dry';
+    const force =
+      payload.force === true ||
+      req.query?.force === '1' ||
+      req.query?.force === 'true';
+
+    const now = new Date();
+    const remindersRef = db.collection('appConfig').doc('reminders');
+    const remindersSnap = await remindersRef.get();
+    const reminderConfig: ReminderSettings = remindersSnap.exists
+      ? {
+          ...DEFAULT_REMINDER_SETTINGS,
+          ...(remindersSnap.data() as Partial<ReminderSettings>),
+          timezone: 'Africa/Cairo',
+        }
+      : {
+          ...DEFAULT_REMINDER_SETTINGS,
+          timezone: 'Africa/Cairo',
+        };
+
+    const fbTargetDay =
+      reminderConfig.fbTargetDay === 'today' ? 'today' : 'tomorrow';
+    const targetMeta = resolveTargetDayId(now, fbTargetDay, 'Africa/Cairo');
+
+    if (mode === 'dry') {
+      const [settingsSnap, schedSnap, pubSchedSnap, posterSnap] =
+        await Promise.all([
+          db.collection('settings').doc('center').get(),
+          db.collection('schedules').doc(targetMeta.dayId).get(),
+          db.collection('publicSchedules').doc(targetMeta.dayId).get(),
+          db.collection('posterImages').doc(targetMeta.dayId).get(),
+        ]);
+
+      const centerSettings: CenterSettings = settingsSnap.exists
+        ? {
+            ...FALLBACK_CENTER_SETTINGS,
+            ...(settingsSnap.data() as Partial<CenterSettings>),
+          }
+        : FALLBACK_CENTER_SETTINGS;
+
+      let scheduleRows: ScheduleRow[] = [];
+      let scheduleVersion = 1;
+      if (schedSnap.exists) {
+        const sData = schedSnap.data() as DailyScheduleData;
+        scheduleVersion = sData.version || 1;
+        scheduleRows = filterNonEmptyRows(
+          sData.draftRows || sData.publishedRows || []
+        );
+      } else if (pubSchedSnap.exists) {
+        const pData = pubSchedSnap.data() as PublicDailyScheduleData;
+        scheduleRows = filterNonEmptyRows(pData.publishedRows || []);
+      }
+
+      let storedPosterImage: {
+        dayId: string;
+        version: number;
+        imageBase64: string;
+        mime: string;
+      } | null = null;
+
+      if (posterSnap.exists) {
+        const pData = posterSnap.data();
+        if (pData && typeof pData.imageBase64 === 'string') {
+          storedPosterImage = {
+            dayId: targetMeta.dayId,
+            version: Number(pData.version || 0),
+            imageBase64: pData.imageBase64,
+            mime: String(pData.mime || 'image/jpeg'),
+          };
+        }
+      }
+
+      const postMode: FacebookPostMode =
+        reminderConfig.fbPostMode === 'photo_only' ||
+        reminderConfig.fbPostMode === 'text_only' ||
+        reminderConfig.fbPostMode === 'photo_with_caption'
+          ? reminderConfig.fbPostMode
+          : 'photo_with_caption';
+
+      const fallbackMode: FacebookFallbackMode =
+        reminderConfig.fbFallbackMode === 'skip' ? 'skip' : 'text';
+
+      const skipEmptyDay =
+        typeof reminderConfig.fbSkipEmptyDay === 'boolean'
+          ? reminderConfig.fbSkipEmptyDay
+          : true;
+
+      const willSkipNoClinics = skipEmptyDay && scheduleRows.length === 0;
+      const imageInspection = inspectStoredPosterImageStatus(
+        scheduleVersion,
+        storedPosterImage
+      );
+
+      const plan = decideFacebookPublishPlan({
+        mode: postMode,
+        fallbackMode,
+        scheduleVersion,
+        storedPosterImage,
+        dayLabel: targetMeta.dayLabel,
+        settings: centerSettings,
+        isManualTrigger: false,
+      });
+
+      const plannedAction = willSkipNoClinics
+        ? 'skip_no_clinics'
+        : plan.action;
+
+      const imageStatusLabel =
+        imageInspection.status === 'up_to_date'
+          ? `محدّثة ✓ (إصدار ${imageInspection.posterVersion})`
+          : imageInspection.status === 'outdated'
+          ? `قديمة ⚠ (إصدار الصورة ${imageInspection.posterVersion} مقابل الجدول ${scheduleVersion})`
+          : imageInspection.status === 'missing'
+          ? 'غير موجودة ✗'
+          : 'تالفة/غير صالحة ✗';
+
+      const plannedActionLabel =
+        plannedAction === 'skip_no_clinics'
+          ? 'سيتم التخطي (لا توجد عيادات مسجلة)'
+          : plannedAction === 'post_photo'
+          ? postMode === 'photo_only'
+            ? 'سينشر صورة البوستر فقط (بدون كابشن)'
+            : 'سينشر صورة البوستر مع كابشن قصير'
+          : plannedAction === 'post_text_only'
+          ? 'سينشر نص الجدول (بديل نصي)'
+          : 'سيتوقف ولن ينشر حتى تُحدّث الصورة';
+
+      res.status(200).json({
+        ok: true,
+        dryRun: true,
+        targetDayId: targetMeta.dayId,
+        targetDayLabel: targetMeta.dayLabel,
+        targetDateStr: targetMeta.targetDateStr,
+        fbTargetDay,
+        fbPostMode: postMode,
+        fbFallbackMode: fallbackMode,
+        fbSkipEmptyDay: skipEmptyDay,
+        rowCount: scheduleRows.length,
+        willSkipNoClinics,
+        scheduleVersion,
+        posterVersion: imageInspection.posterVersion,
+        imageStatus: imageInspection.status,
+        imageStatusLabel,
+        plannedAction,
+        plannedActionLabel,
+        alreadyPostedForTargetDate:
+          reminderConfig.lastFbPostTargetDate === targetMeta.targetDateStr,
+        message: `معاينة النشر التلقائي: اليوم المستهدف «${targetMeta.dayLabel}» (${targetMeta.targetDateStr}) • عدد العيادات: ${scheduleRows.length} • حالة الصورة: ${imageStatusLabel} • القرار: ${plannedActionLabel}.`,
+      });
+      return;
+    }
+
+    // mode === 'now'
+    if (
+      !force &&
+      reminderConfig.lastFbPostTargetDate &&
+      reminderConfig.lastFbPostTargetDate.trim() === targetMeta.targetDateStr
+    ) {
+      res.status(200).json({
+        ok: false,
+        needsForceConfirm: true,
+        targetDayId: targetMeta.dayId,
+        targetDayLabel: targetMeta.dayLabel,
+        targetDateStr: targetMeta.targetDateStr,
+        message: `تم نشر جدول يوم ${targetMeta.dayLabel} (${targetMeta.targetDateStr}) مسبقاً. هل تريد تأكيد إعادة النشر الفوري؟`,
+      });
+      return;
+    }
+
+    const execResult = await executeAutomatedFacebookPublish({
+      db,
+      now,
+      ignoreTimeWindow: true,
+      forceRePost: force,
+    });
+
+    res.status(execResult.ok ? 200 : 400).json(execResult);
+  } catch (err) {
+    const rawMsg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({
+      ok: false,
+      error: sanitizeFbAutoPostError(`فشل تنفيذ طلب النشر التلقائي: ${rawMsg}`),
+    });
+  }
+}
+
 async function handleFacebookPostAction(
   req: VercelRequestLike,
   res: VercelResponseLike
@@ -597,7 +1186,7 @@ async function handleFacebookPostAction(
       isManualTrigger: !isCronAuthorized,
     });
 
-    if (plan.action === 'reject_error') {
+    if (plan.action === 'reject_error' || plan.action === 'skip_retry') {
       res.status(400).json({
         ok: false,
         success: false,
@@ -717,9 +1306,15 @@ export default async function handler(
   const rawAction = req.query?.action;
   const action = Array.isArray(rawAction) ? rawAction[0] : rawAction;
 
-  // Handle manual/direct Facebook Page post requests (`?action=facebook-post`) directly inside this function
+  // Handle manual/direct Facebook Page post requests (`?action=facebook-post`)
   if (action === 'facebook-post') {
     await handleFacebookPostAction(req, res);
+    return;
+  }
+
+  // Handle Admin Facebook Auto-Post dry-run & immediate trigger (`?action=fb-auto`)
+  if (action === 'fb-auto') {
+    await handleFbAutoAdminAction(req, res);
     return;
   }
 
@@ -859,6 +1454,14 @@ export default async function handler(
 
     const now = new Date();
     const remindersRef = db.collection('appConfig').doc('reminders');
+
+    // Deliverable 4: Record lastCronRunAt on every authorized scheduler invocation
+    if (!isTestMode) {
+      await remindersRef
+        .set({ lastCronRunAt: now.toISOString() }, { merge: true })
+        .catch(() => undefined);
+    }
+
     const remindersSnap = await remindersRef.get();
     const reminderConfig: ReminderSettings = remindersSnap.exists
       ? {
@@ -871,6 +1474,7 @@ export default async function handler(
           timezone: 'Africa/Cairo',
         };
 
+    // Staff reminder targetDay is strictly separate from fbTargetDay
     const targetDay = resolveTargetDayId(
       now,
       reminderConfig.targetDay === 'today' ? 'today' : 'tomorrow',
@@ -879,153 +1483,17 @@ export default async function handler(
 
     // -------------------------------------------------------------------------
     // Automatic Daily Facebook Page Post (when fbAutoPostEnabled === true)
-    // Always publishes tomorrow's clinic schedule once per day at the scheduled time
+    // Uses fbTargetDay, 180-minute catch-up window, 5-minute lock, and targetDate deduplication
     // -------------------------------------------------------------------------
     let facebookAutoPostResult: Record<string, unknown> | null = null;
 
     if (!isTestMode && reminderConfig.fbAutoPostEnabled) {
-      const fbWindowCheck = isWithinReminderWindow({
+      facebookAutoPostResult = await executeAutomatedFacebookPublish({
+        db,
         now,
-        scheduledTime: reminderConfig.fbAutoPostTime || reminderConfig.time,
-        lastSentDate: reminderConfig.lastFbPostDate,
-        timeZone: 'Africa/Cairo',
-        windowMinutes: 10,
+        ignoreTimeWindow: false,
+        forceRePost: false,
       });
-
-      if (fbWindowCheck.shouldSend) {
-        const fbClaimed = await db.runTransaction(async (tx) => {
-          const freshSnap = await tx.get(remindersRef);
-          const freshData = (freshSnap.data() || {}) as Partial<ReminderSettings>;
-          if (freshData.lastFbPostDate === fbWindowCheck.cairoDateStr) {
-            return false;
-          }
-          tx.set(
-            remindersRef,
-            {
-              ...DEFAULT_REMINDER_SETTINGS,
-              ...freshData,
-              lastFbPostDate: fbWindowCheck.cairoDateStr,
-            },
-            { merge: true }
-          );
-          return true;
-        });
-
-        if (fbClaimed) {
-          const tomorrowMeta = resolveTargetDayId(
-            now,
-            'tomorrow',
-            'Africa/Cairo'
-          );
-          const [settingsSnap, schedSnap, pubSchedSnap, posterSnap] = await Promise.all([
-            db.collection('settings').doc('center').get(),
-            db.collection('schedules').doc(tomorrowMeta.dayId).get(),
-            db.collection('publicSchedules').doc(tomorrowMeta.dayId).get(),
-            db.collection('posterImages').doc(tomorrowMeta.dayId).get(),
-          ]);
-
-          const centerSettings: CenterSettings = settingsSnap.exists
-            ? {
-                ...FALLBACK_CENTER_SETTINGS,
-                ...(settingsSnap.data() as Partial<CenterSettings>),
-              }
-            : FALLBACK_CENTER_SETTINGS;
-
-          let tomorrowRows: ScheduleRow[] = [];
-          let scheduleVersion = 1;
-          if (schedSnap.exists) {
-            const sData = schedSnap.data() as DailyScheduleData;
-            scheduleVersion = sData.version || 1;
-            tomorrowRows = filterNonEmptyRows(
-              sData.draftRows || sData.publishedRows || []
-            );
-          } else if (pubSchedSnap.exists) {
-            const pData = pubSchedSnap.data() as PublicDailyScheduleData;
-            tomorrowRows = filterNonEmptyRows(pData.publishedRows || []);
-          }
-
-          let storedPosterImage: {
-            dayId: string;
-            version: number;
-            imageBase64: string;
-            mime: string;
-          } | null = null;
-
-          if (posterSnap.exists) {
-            const pData = posterSnap.data();
-            if (pData && typeof pData.imageBase64 === 'string') {
-              storedPosterImage = {
-                dayId: tomorrowMeta.dayId,
-                version: Number(pData.version || 0),
-                imageBase64: pData.imageBase64,
-                mime: String(pData.mime || 'image/jpeg'),
-              };
-            }
-          }
-
-          const postMode: FacebookPostMode =
-            reminderConfig.fbPostMode === 'photo_only' ||
-            reminderConfig.fbPostMode === 'text_only' ||
-            reminderConfig.fbPostMode === 'photo_with_caption'
-              ? reminderConfig.fbPostMode
-              : 'photo_with_caption';
-
-          const plan = decideFacebookPublishPlan({
-            mode: postMode,
-            scheduleVersion,
-            storedPosterImage,
-            dayLabel: tomorrowMeta.dayLabel,
-            settings: centerSettings,
-            isManualTrigger: false,
-          });
-
-          const cleanPageId = normalizeFacebookPageId(process.env.FB_PAGE_ID);
-          const cleanToken = normalizeEnvSecret(process.env.FB_PAGE_ACCESS_TOKEN);
-
-          let fbPublish: FacebookPostResult;
-
-          if (plan.action === 'post_photo') {
-            fbPublish = await publishPhotoToFacebookPage({
-              pageId: cleanPageId,
-              accessToken: cleanToken,
-              jpegBuffer: plan.jpegBuffer,
-              caption: plan.caption,
-              dayId: tomorrowMeta.dayId,
-            });
-          } else {
-            const fbMessage = formatFacebookSchedulePost({
-              dayLabel: tomorrowMeta.dayLabel,
-              rows: tomorrowRows,
-              settings: centerSettings,
-            });
-
-            fbPublish = await publishFeedTextToFacebookPage({
-              pageId: cleanPageId,
-              accessToken: cleanToken,
-              message: fbMessage,
-            });
-
-            const fallbackWarning =
-              plan.action === 'post_text_only' ? plan.warning : undefined;
-            if (fallbackWarning) {
-              await remindersRef
-                .set({ lastFbPostWarning: fallbackWarning }, { merge: true })
-                .catch(() => {});
-            }
-          }
-
-          facebookAutoPostResult = {
-            ok: fbPublish.ok,
-            post_id: fbPublish.post_id,
-            dayId: tomorrowMeta.dayId,
-            dayLabel: tomorrowMeta.dayLabel,
-            isPhotoPost: plan.action === 'post_photo',
-            warning:
-              plan.action === 'post_text_only' ? plan.warning : undefined,
-            error: fbPublish.error,
-          };
-        }
-      }
     }
 
     if (!isTestMode) {
@@ -1040,12 +1508,13 @@ export default async function handler(
         return;
       }
 
+      // Catch-up window (up to 180 minutes, never crossing midnight 23:59)
       const windowCheck = isWithinReminderWindow({
         now,
         scheduledTime: reminderConfig.time,
         lastSentDate: reminderConfig.lastSentDate,
         timeZone: 'Africa/Cairo',
-        windowMinutes: 10,
+        windowMinutes: DEFAULT_CATCH_UP_WINDOW_MINUTES,
       });
 
       if (!windowCheck.shouldSend) {
@@ -1195,3 +1664,4 @@ export default async function handler(
     });
   }
 }
+

@@ -21,6 +21,7 @@ import {
   WHATSAPP_CHANNEL_SHORT_URL,
   buildDailySocialPostText,
 } from '../utils/scheduleLogic';
+import { buildLiveAutoPostPreviewLine } from '../utils/reminderLogic';
 
 interface ShareAndExportBarProps {
   dayId?: DayId;
@@ -32,7 +33,14 @@ interface ShareAndExportBarProps {
   showFacebookCard?: boolean;
   onCloseFacebookCard?: () => void;
   fbAutoPostEnabled?: boolean;
-  onToggleFbAutoPost?: (enabled: boolean) => Promise<void> | void;
+  fbAutoPostTime?: string;
+  fbTargetDay?: 'today' | 'tomorrow';
+  onToggleFbAutoPost?: (
+    enabled: boolean
+  ) => Promise<{ ok: boolean; error?: string } | void> | void;
+  onChangeFbTargetDay?: (
+    targetDay: 'today' | 'tomorrow'
+  ) => Promise<{ ok: boolean; error?: string } | void> | void;
   onPublishFacebookNow?: (params: {
     dayId?: DayId;
     dayLabel: string;
@@ -74,7 +82,10 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
   showFacebookCard = false,
   onCloseFacebookCard,
   fbAutoPostEnabled = false,
+  fbAutoPostTime = '20:00',
+  fbTargetDay = 'tomorrow',
   onToggleFbAutoPost,
+  onChangeFbTargetDay,
   onPublishFacebookNow,
 }) => {
   const [isExporting, setIsExporting] = useState(false);
@@ -309,6 +320,35 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
     }
   };
 
+  const handleToggleAutoPostClick = async () => {
+    if (!onToggleFbAutoPost) return;
+    setFbStatusBanner(null);
+    const res = await onToggleFbAutoPost(!fbAutoPostEnabled);
+    if (res && !res.ok && res.error) {
+      setFbStatusBanner({
+        ok: false,
+        message: res.error,
+      });
+    }
+  };
+
+  const handleTargetDaySelectChange = async (nextTarget: 'today' | 'tomorrow') => {
+    if (!onChangeFbTargetDay) return;
+    setFbStatusBanner(null);
+    const res = await onChangeFbTargetDay(nextTarget);
+    if (res && !res.ok && res.error) {
+      setFbStatusBanner({
+        ok: false,
+        message: res.error,
+      });
+    }
+  };
+
+  const liveAutoPostLine = buildLiveAutoPostPreviewLine({
+    fbTargetDay,
+    fbAutoPostTime,
+  });
+
   return (
     <div
       dir="rtl"
@@ -376,7 +416,7 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
       {showFacebookCard && canManageFacebook && onPublishFacebookNow && (
         <div
           data-testid="facebook-control-panel"
-          className="relative rounded-xl bg-blue-50/70 border border-blue-200 p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 transition-all"
+          className="relative rounded-xl bg-blue-50/70 border border-blue-200 p-3 flex flex-col gap-2.5 transition-all"
         >
           {onCloseFacebookCard && (
             <button
@@ -390,56 +430,78 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
             </button>
           )}
 
-          <div className="flex items-center justify-between sm:justify-start gap-3 pl-7 sm:pl-0">
-            <div className="flex items-center gap-2">
-              <Globe className="w-4 h-4 text-blue-700 shrink-0" />
-              <div>
-                <div className="text-xs font-extrabold text-slate-900">
-                  النشر التلقائي اليومي
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+            <div className="flex flex-wrap items-center justify-between sm:justify-start gap-3 pl-7 sm:pl-0">
+              <div className="flex items-center gap-2">
+                <Globe className="w-4 h-4 text-blue-700 shrink-0" />
+                <div>
+                  <div className="text-xs font-extrabold text-slate-900">
+                    النشر التلقائي اليومي على فيسبوك
+                  </div>
+                  <div
+                    data-testid="sharebar-live-autopost-line"
+                    className="text-[10px] font-bold text-blue-900"
+                  >
+                    {liveAutoPostLine}
+                  </div>
                 </div>
-                <div className="text-[10px] font-bold text-slate-600">
-                  نشر جدول عيادات اليوم التالي تلقائياً على فيسبوك
-                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                {onChangeFbTargetDay && (
+                  <select
+                    aria-label="جدول (اليوم/غداً) سيُنشر على فيسبوك"
+                    data-testid="sharebar-fb-target-day-select"
+                    value={fbTargetDay === 'today' ? 'today' : 'tomorrow'}
+                    onChange={(e) =>
+                      handleTargetDaySelectChange(
+                        e.target.value === 'today' ? 'today' : 'tomorrow'
+                      )
+                    }
+                    className="rounded-lg border border-blue-300 bg-white px-2 py-1 text-[11px] font-extrabold text-slate-900 focus:outline-none focus:border-blue-600"
+                  >
+                    <option value="tomorrow">جدول غداً سيُنشر على فيسبوك</option>
+                    <option value="today">جدول اليوم سيُنشر على فيسبوك</option>
+                  </select>
+                )}
+
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={fbAutoPostEnabled}
+                  aria-label="تفعيل أو تعطيل النشر التلقائي اليومي على فيسبوك"
+                  data-testid="fb-auto-post-toggle"
+                  onClick={handleToggleAutoPostClick}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                    fbAutoPostEnabled ? 'bg-blue-600' : 'bg-slate-300'
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                      fbAutoPostEnabled ? '-translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
               </div>
             </div>
 
             <button
               type="button"
-              role="switch"
-              aria-checked={fbAutoPostEnabled}
-              aria-label="تفعيل أو تعطيل النشر التلقائي اليومي على فيسبوك"
-              data-testid="fb-auto-post-toggle"
-              onClick={() =>
-                onToggleFbAutoPost && onToggleFbAutoPost(!fbAutoPostEnabled)
-              }
-              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                fbAutoPostEnabled ? 'bg-blue-600' : 'bg-slate-300'
-              }`}
+              disabled={fbPublishStage !== 'idle'}
+              onClick={handlePublishToFacebookClick}
+              data-testid="publish-facebook-now-btn"
+              className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-60 px-3.5 py-2 text-xs font-black text-white shadow-xs transition cursor-pointer shrink-0"
             >
-              <span
-                className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
-                  fbAutoPostEnabled ? '-translate-x-5' : 'translate-x-0'
-                }`}
-              />
+              <Send className="w-3.5 h-3.5 shrink-0" />
+              <span>
+                {fbPublishStage === 'preparing_image'
+                  ? 'جارٍ تجهيز الصورة...'
+                  : fbPublishStage === 'publishing'
+                  ? 'جارٍ النشر على فيسبوك...'
+                  : 'نشر جدول اليوم على فيسبوك الان'}
+              </span>
             </button>
           </div>
-
-          <button
-            type="button"
-            disabled={fbPublishStage !== 'idle'}
-            onClick={handlePublishToFacebookClick}
-            data-testid="publish-facebook-now-btn"
-            className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-60 px-3.5 py-2 text-xs font-black text-white shadow-xs transition cursor-pointer shrink-0"
-          >
-            <Send className="w-3.5 h-3.5 shrink-0" />
-            <span>
-              {fbPublishStage === 'preparing_image'
-                ? 'جارٍ تجهيز الصورة...'
-                : fbPublishStage === 'publishing'
-                ? 'جارٍ النشر على فيسبوك...'
-                : 'نشر جدول اليوم على فيسبوك الان'}
-            </span>
-          </button>
         </div>
       )}
 

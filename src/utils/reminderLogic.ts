@@ -1,4 +1,10 @@
-import type { DayId, ReminderSettings, UserProfile } from '../types/schedule.js';
+import type {
+  ClientEditableReminderSettings,
+  DayId,
+  FbPostAttemptsRecord,
+  ReminderSettings,
+  UserProfile,
+} from '../types/schedule.js';
 import {
   DAYS_LIST,
   PRIMARY_ADMIN_EMAIL,
@@ -6,11 +12,11 @@ import {
 } from './scheduleLogic.js';
 
 export const PUBLIC_SUBSCRIBER_EMAIL = 'public@subscriber.local';
+export const DEFAULT_CATCH_UP_WINDOW_MINUTES = 180;
+export const FB_POST_LOCK_DURATION_MS = 5 * 60 * 1000; // 5 minutes
+export const MAX_FB_POST_ATTEMPTS_PER_DATE = 4;
 
-export const DEFAULT_REMINDER_SETTINGS: Omit<
-  ReminderSettings,
-  'lastSentDate' | 'lastFbPostDate' | 'lastFbPostWarning' | 'updatedBy' | 'updatedByEmail' | 'updatedAt'
-> = {
+export const DEFAULT_REMINDER_SETTINGS: ClientEditableReminderSettings = {
   enabled: true,
   time: '19:00',
   timezone: 'Africa/Cairo',
@@ -20,6 +26,9 @@ export const DEFAULT_REMINDER_SETTINGS: Omit<
   fbAutoPostEnabled: false,
   fbAutoPostTime: '20:00',
   fbPostMode: 'photo_with_caption',
+  fbTargetDay: 'tomorrow',
+  fbFallbackMode: 'text',
+  fbSkipEmptyDay: true,
 };
 
 const WEEKDAY_ORDER: DayId[] = [
@@ -79,7 +88,23 @@ export async function computeTokenDocId(token: string): Promise<string> {
 }
 
 export function isValidTimeHHmm(time: string): boolean {
-  return /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(time.trim());
+  return /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test((time || '').trim());
+}
+
+/**
+ * Pure calendar date addition on YYYY-MM-DD strings (immune to DST hour shifts).
+ */
+export function addDaysToDateStr(dateStr: string, daysToAdd: number): string {
+  const parts = (dateStr || '').split('-').map((n) => parseInt(n, 10));
+  if (parts.length !== 3 || parts.some((n) => Number.isNaN(n))) {
+    return dateStr;
+  }
+  const [year, month, day] = parts;
+  const utcDate = new Date(Date.UTC(year, month - 1, day + daysToAdd));
+  const y = String(utcDate.getUTCFullYear()).padStart(4, '0');
+  const m = String(utcDate.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(utcDate.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
 }
 
 export interface CairoDateParts {
@@ -152,16 +177,22 @@ export interface ReminderWindowCheckResult {
     | 'invalid_time';
   cairoDateStr: string;
   cairoTimeHHmm: string;
+  scheduledMinutes?: number;
+  upperLimitMinutes?: number;
 }
 
 /**
- * Checks whether `now` falls within the 10-minute reminder window `[scheduledTime, scheduledTime + 10 min)`
- * in `Africa/Cairo` time, and ensures `lastSentDate` does not already match today's Cairo date.
+ * Checks whether `now` falls within the catch-up window
+ * `[scheduledTime, min(scheduledTime + windowMinutes, 23:59 of the same day))`
+ * in `Africa/Cairo` time (never crossing midnight), and ensures `lastSentDate`
+ * does not already match the expected deduplication date.
+ * Defaults to a 180-minute catch-up window to tolerate external cron delays.
  */
 export function isWithinReminderWindow(params: {
   now: Date;
   scheduledTime: string;
   lastSentDate?: string | null;
+  expectedTargetDate?: string | null;
   timeZone?: string;
   windowMinutes?: number;
 }): ReminderWindowCheckResult {
@@ -169,8 +200,9 @@ export function isWithinReminderWindow(params: {
     now,
     scheduledTime,
     lastSentDate,
+    expectedTargetDate,
     timeZone = 'Africa/Cairo',
-    windowMinutes = 10,
+    windowMinutes = DEFAULT_CATCH_UP_WINDOW_MINUTES,
   } = params;
 
   const cairo = getCairoDateParts(now, timeZone);
@@ -184,7 +216,8 @@ export function isWithinReminderWindow(params: {
     };
   }
 
-  if (lastSentDate && lastSentDate.trim() === cairo.dateStr) {
+  const dedupDate = (expectedTargetDate || cairo.dateStr).trim();
+  if (lastSentDate && lastSentDate.trim() === dedupDate) {
     return {
       shouldSend: false,
       reason: 'already_sent_today',
@@ -198,14 +231,23 @@ export function isWithinReminderWindow(params: {
     .split(':')
     .map((n) => parseInt(n, 10));
   const scheduledMinutes = schedH * 60 + schedM;
-  const diffMinutes = cairo.minutesOfDay - scheduledMinutes;
+  const midnightCapMinutes = 23 * 60 + 59; // 23:59 of the same day (1439)
+  const upperLimitMinutes = Math.min(
+    scheduledMinutes + windowMinutes,
+    midnightCapMinutes
+  );
 
-  if (diffMinutes >= 0 && diffMinutes < windowMinutes) {
+  if (
+    cairo.minutesOfDay >= scheduledMinutes &&
+    cairo.minutesOfDay < upperLimitMinutes
+  ) {
     return {
       shouldSend: true,
       reason: 'in_window',
       cairoDateStr: cairo.dateStr,
       cairoTimeHHmm: cairo.timeHHmm,
+      scheduledMinutes,
+      upperLimitMinutes,
     };
   }
 
@@ -214,28 +256,249 @@ export function isWithinReminderWindow(params: {
     reason: 'outside_window',
     cairoDateStr: cairo.dateStr,
     cairoTimeHHmm: cairo.timeHHmm,
+    scheduledMinutes,
+    upperLimitMinutes,
   };
 }
 
+export interface TargetDayResolution {
+  dayId: DayId;
+  dayLabel: string;
+  targetDateStr: string;
+  cairoDateStr: string;
+}
+
 /**
- * Resolves the target schedule day (`today` or `tomorrow`) in `Africa/Cairo` timezone.
+ * Resolves the target schedule day (`today` or `tomorrow`) and its exact calendar date (`YYYY-MM-DD`)
+ * in `Africa/Cairo` timezone.
  */
 export function resolveTargetDayId(
   now: Date,
   targetDay: 'today' | 'tomorrow',
   timeZone = 'Africa/Cairo'
-): { dayId: DayId; dayLabel: string } {
+): TargetDayResolution {
   const cairo = getCairoDateParts(now, timeZone);
   const currentIdx = WEEKDAY_ORDER.indexOf(cairo.weekday);
   const resolvedIdx =
     targetDay === 'tomorrow' ? (currentIdx + 1) % 7 : currentIdx;
   const dayId = WEEKDAY_ORDER[resolvedIdx] || 'saturday';
   const dayMeta = DAYS_LIST.find((d) => d.id === dayId) || DAYS_LIST[0];
+  const targetDateStr =
+    targetDay === 'tomorrow'
+      ? addDaysToDateStr(cairo.dateStr, 1)
+      : cairo.dateStr;
 
   return {
     dayId: dayMeta.id,
     dayLabel: dayMeta.label,
+    targetDateStr,
+    cairoDateStr: cairo.dateStr,
   };
+}
+
+export interface FbAutoPostCheckInput {
+  now: Date;
+  fbAutoPostEnabled?: boolean;
+  fbAutoPostTime?: string;
+  fbTargetDay?: 'today' | 'tomorrow';
+  lastFbPostTargetDate?: string | null;
+  fbPostLockUntil?: number | null;
+  fbPostAttempts?: FbPostAttemptsRecord | null;
+  maxAttempts?: number;
+  windowMinutes?: number;
+  timeZone?: string;
+  ignoreTimeWindow?: boolean;
+  forceRePost?: boolean;
+}
+
+export interface FbAutoPostCheckResult {
+  shouldExecute: boolean;
+  reason:
+    | 'eligible'
+    | 'disabled'
+    | 'invalid_time'
+    | 'outside_window'
+    | 'already_posted_for_target_date'
+    | 'locked'
+    | 'max_attempts_reached';
+  targetDayId: DayId;
+  targetDayLabel: string;
+  targetDateStr: string;
+  cairoDateStr: string;
+  cairoTimeHHmm: string;
+  currentAttemptsCount: number;
+}
+
+/**
+ * Pure decision function for Facebook automatic daily publishing:
+ * - Resolves target day from `fbTargetDay` (completely independent of reminder `targetDay`).
+ * - Deduplicates by `lastFbPostTargetDate` (target schedule's YYYY-MM-DD, not run date).
+ * - Checks 5-minute transaction lock (`fbPostLockUntil`) and max attempts per target date (`4`).
+ * - Uses the catch-up window `[fbAutoPostTime, min(fbAutoPostTime + 180m, 23:59))` unless `ignoreTimeWindow` is true.
+ */
+export function evaluateFbAutoPostGate(
+  input: FbAutoPostCheckInput
+): FbAutoPostCheckResult {
+  const {
+    now,
+    fbAutoPostEnabled = false,
+    fbAutoPostTime = '20:00',
+    fbTargetDay = 'tomorrow',
+    lastFbPostTargetDate,
+    fbPostLockUntil,
+    fbPostAttempts,
+    maxAttempts = MAX_FB_POST_ATTEMPTS_PER_DATE,
+    windowMinutes = DEFAULT_CATCH_UP_WINDOW_MINUTES,
+    timeZone = 'Africa/Cairo',
+    ignoreTimeWindow = false,
+    forceRePost = false,
+  } = input;
+
+  const cleanTargetMode = fbTargetDay === 'today' ? 'today' : 'tomorrow';
+  const targetMeta = resolveTargetDayId(now, cleanTargetMode, timeZone);
+  const cairo = getCairoDateParts(now, timeZone);
+
+  const currentAttemptsCount =
+    fbPostAttempts && fbPostAttempts.date === targetMeta.targetDateStr
+      ? Math.max(0, Math.floor(fbPostAttempts.count || 0))
+      : 0;
+
+  if (!ignoreTimeWindow && !fbAutoPostEnabled) {
+    return {
+      shouldExecute: false,
+      reason: 'disabled',
+      targetDayId: targetMeta.dayId,
+      targetDayLabel: targetMeta.dayLabel,
+      targetDateStr: targetMeta.targetDateStr,
+      cairoDateStr: cairo.dateStr,
+      cairoTimeHHmm: cairo.timeHHmm,
+      currentAttemptsCount,
+    };
+  }
+
+  if (
+    typeof fbPostLockUntil === 'number' &&
+    Number.isFinite(fbPostLockUntil) &&
+    fbPostLockUntil > now.getTime()
+  ) {
+    return {
+      shouldExecute: false,
+      reason: 'locked',
+      targetDayId: targetMeta.dayId,
+      targetDayLabel: targetMeta.dayLabel,
+      targetDateStr: targetMeta.targetDateStr,
+      cairoDateStr: cairo.dateStr,
+      cairoTimeHHmm: cairo.timeHHmm,
+      currentAttemptsCount,
+    };
+  }
+
+  if (
+    !forceRePost &&
+    lastFbPostTargetDate &&
+    lastFbPostTargetDate.trim() === targetMeta.targetDateStr
+  ) {
+    return {
+      shouldExecute: false,
+      reason: 'already_posted_for_target_date',
+      targetDayId: targetMeta.dayId,
+      targetDayLabel: targetMeta.dayLabel,
+      targetDateStr: targetMeta.targetDateStr,
+      cairoDateStr: cairo.dateStr,
+      cairoTimeHHmm: cairo.timeHHmm,
+      currentAttemptsCount,
+    };
+  }
+
+  if (!ignoreTimeWindow && currentAttemptsCount >= maxAttempts) {
+    return {
+      shouldExecute: false,
+      reason: 'max_attempts_reached',
+      targetDayId: targetMeta.dayId,
+      targetDayLabel: targetMeta.dayLabel,
+      targetDateStr: targetMeta.targetDateStr,
+      cairoDateStr: cairo.dateStr,
+      cairoTimeHHmm: cairo.timeHHmm,
+      currentAttemptsCount,
+    };
+  }
+
+  if (!ignoreTimeWindow) {
+    const windowCheck = isWithinReminderWindow({
+      now,
+      scheduledTime: fbAutoPostTime,
+      lastSentDate: forceRePost ? null : lastFbPostTargetDate,
+      expectedTargetDate: targetMeta.targetDateStr,
+      timeZone,
+      windowMinutes,
+    });
+
+    if (!windowCheck.shouldSend) {
+      const mappedReason =
+        windowCheck.reason === 'invalid_time'
+          ? 'invalid_time'
+          : windowCheck.reason === 'already_sent_today'
+          ? 'already_posted_for_target_date'
+          : 'outside_window';
+      return {
+        shouldExecute: false,
+        reason: mappedReason,
+        targetDayId: targetMeta.dayId,
+        targetDayLabel: targetMeta.dayLabel,
+        targetDateStr: targetMeta.targetDateStr,
+        cairoDateStr: cairo.dateStr,
+        cairoTimeHHmm: cairo.timeHHmm,
+        currentAttemptsCount,
+      };
+    }
+  }
+
+  return {
+    shouldExecute: true,
+    reason: 'eligible',
+    targetDayId: targetMeta.dayId,
+    targetDayLabel: targetMeta.dayLabel,
+    targetDateStr: targetMeta.targetDateStr,
+    cairoDateStr: cairo.dateStr,
+    cairoTimeHHmm: cairo.timeHHmm,
+    currentAttemptsCount,
+  };
+}
+
+/**
+ * Builds the live Arabic summary line showing which day and time will be auto-posted:
+ * e.g. "سينشر تلقائياً جدول (الخميس / غداً) الساعة 09:41 بتوقيت القاهرة"
+ */
+export function buildLiveAutoPostPreviewLine(params: {
+  now?: Date;
+  fbTargetDay?: 'today' | 'tomorrow';
+  fbAutoPostTime?: string;
+  timeZone?: string;
+}): string {
+  const now = params.now || new Date();
+  const mode = params.fbTargetDay === 'today' ? 'today' : 'tomorrow';
+  const relWord = mode === 'today' ? 'اليوم' : 'غداً';
+  const timeStr = (params.fbAutoPostTime || '20:00').trim() || '20:00';
+  const resolved = resolveTargetDayId(
+    now,
+    mode,
+    params.timeZone || 'Africa/Cairo'
+  );
+  return `سينشر تلقائياً جدول (${resolved.dayLabel} / ${relWord}) الساعة ${timeStr} بتوقيت القاهرة`;
+}
+
+/**
+ * Sanitizes any error string before storing in `appConfig/reminders.lastFbPostError`
+ * so no token, secret, or credential can ever leak into client-readable Firestore documents.
+ */
+export function sanitizeFbAutoPostError(raw?: string | null): string {
+  if (!raw) return '';
+  const redacted = String(raw)
+    .replace(/access_token=[^&\s]+/gi, 'access_token=[REDACTED]')
+    .replace(/Bearer\s+[A-Za-z0-9._\-]+/gi, 'Bearer [REDACTED]')
+    .replace(/EAA[A-Za-z0-9]+/g, '[REDACTED_TOKEN]')
+    .trim();
+  return redacted.slice(0, 240);
 }
 
 /**
@@ -336,24 +599,36 @@ export function filterEligibleReminderTokens(
 
 /**
  * Validates and sanitizes ReminderSettings before client-side save to `appConfig/reminders`.
- * Strips `lastSentDate` so client never writes or modifies it.
+ * Strips all server-managed fields so the client never writes or modifies them.
  */
 export function validateReminderSettings(input: Partial<ReminderSettings>): {
   valid: boolean;
   errors: string[];
-  sanitized: Omit<
-    ReminderSettings,
-    'lastSentDate' | 'lastFbPostDate' | 'lastFbPostWarning' | 'updatedBy' | 'updatedByEmail' | 'updatedAt'
-  >;
+  sanitized: ClientEditableReminderSettings;
 } {
   const errors: string[] = [];
   const enabled = Boolean(input.enabled);
   const fbAutoPostEnabled = Boolean(input.fbAutoPostEnabled);
-  const fbAutoPostTime = (input.fbAutoPostTime ?? input.time ?? DEFAULT_REMINDER_SETTINGS.fbAutoPostTime ?? '20:00').trim();
+  const fbAutoPostTime = (
+    input.fbAutoPostTime ??
+    input.time ??
+    DEFAULT_REMINDER_SETTINGS.fbAutoPostTime ??
+    '20:00'
+  ).trim();
   const fbPostMode =
     input.fbPostMode === 'photo_only' || input.fbPostMode === 'text_only'
       ? input.fbPostMode
       : 'photo_with_caption';
+  const fbTargetDay =
+    input.fbTargetDay === 'today' || input.fbTargetDay === 'tomorrow'
+      ? input.fbTargetDay
+      : 'tomorrow';
+  const fbFallbackMode =
+    input.fbFallbackMode === 'skip' || input.fbFallbackMode === 'text'
+      ? input.fbFallbackMode
+      : 'text';
+  const fbSkipEmptyDay =
+    typeof input.fbSkipEmptyDay === 'boolean' ? input.fbSkipEmptyDay : true;
   const time = (input.time ?? DEFAULT_REMINDER_SETTINGS.time).trim();
   const targetDay =
     input.targetDay === 'today' || input.targetDay === 'tomorrow'
@@ -388,6 +663,10 @@ export function validateReminderSettings(input: Partial<ReminderSettings>): {
       fbAutoPostEnabled,
       fbAutoPostTime,
       fbPostMode,
+      fbTargetDay,
+      fbFallbackMode,
+      fbSkipEmptyDay,
     },
   };
 }
+

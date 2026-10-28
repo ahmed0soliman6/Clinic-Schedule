@@ -464,6 +464,25 @@
           "description": "Daily scheduled automatic Facebook posting time in HH:mm format (Africa/Cairo)",
           "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$"
         },
+        "fbPostMode": {
+          "type": "string",
+          "description": "Facebook post mode",
+          "enum": ["photo_with_caption", "photo_only", "text_only"]
+        },
+        "fbTargetDay": {
+          "type": "string",
+          "description": "Target schedule day for Facebook auto-posting (separate from reminder targetDay)",
+          "enum": ["today", "tomorrow"]
+        },
+        "fbFallbackMode": {
+          "type": "string",
+          "description": "Fallback behavior when poster image is missing or outdated",
+          "enum": ["text", "skip"]
+        },
+        "fbSkipEmptyDay": {
+          "type": "boolean",
+          "description": "Whether to skip Facebook auto-posting when target day has zero clinics"
+        },
         "lastSentDate": {
           "type": "string",
           "description": "Server-managed YYYY-MM-DD date of last sent reminder"
@@ -471,6 +490,31 @@
         "lastFbPostDate": {
           "type": "string",
           "description": "Server-managed YYYY-MM-DD date of last automatic Facebook post"
+        },
+        "lastFbPostTargetDate": {
+          "type": "string",
+          "description": "Server-managed YYYY-MM-DD target schedule date of last successful automatic Facebook post"
+        },
+        "lastFbPostStatus": {
+          "type": "string",
+          "description": "Status of last automatic Facebook post attempt",
+          "enum": ["success", "success_text_fallback", "skipped_no_clinics", "failed"]
+        },
+        "lastFbPostAt": {
+          "type": "string",
+          "description": "ISO timestamp of last automatic Facebook post attempt"
+        },
+        "lastFbPostId": {
+          "type": "string",
+          "description": "Facebook post_id of last successful automatic post"
+        },
+        "lastFbPostError": {
+          "type": "string",
+          "description": "Sanitized Arabic error or warning message from last attempt"
+        },
+        "lastCronRunAt": {
+          "type": "string",
+          "description": "ISO timestamp of last authorized scheduler execution"
         }
       },
       "required": ["enabled", "time", "targetDay", "title", "body"]
@@ -506,6 +550,31 @@
         }
       },
       "required": ["dayId", "version", "imageBase64", "mime"]
+    },
+    "PosterMeta": {
+      "title": "PosterMeta",
+      "description": "Lightweight metadata for cached poster images to verify version freshness without downloading base64 data",
+      "type": "object",
+      "properties": {
+        "dayId": {
+          "type": "string",
+          "description": "Day identifier",
+          "enum": ["saturday", "sunday", "monday", "tuesday", "wednesday", "thursday", "friday"]
+        },
+        "version": {
+          "type": "number",
+          "description": "Version of the schedule matching the poster image"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp when poster was generated"
+        },
+        "bytes": {
+          "type": "number",
+          "description": "Base64 character length of the poster image"
+        }
+      },
+      "required": ["dayId", "version", "updatedAt", "bytes"]
     }
   },
   "firestore": {
@@ -536,6 +605,11 @@
     "/posterImages/{dayId}": {
       "schema": { "$ref": "#/entities/PosterImage" },
       "description": "Cached 1080x1350 JPEG poster images for Meta Graph API v21.0 publishing"
+    },
+    "/posterMeta/{dayId}": {
+      "schema": { "$ref": "#/entities/PosterMeta" },
+      "description": "Lightweight poster image metadata per day"
     }
   }
 }
+

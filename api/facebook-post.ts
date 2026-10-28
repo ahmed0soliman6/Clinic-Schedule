@@ -607,7 +607,7 @@ export default async function facebookPostHandler(
       postMode,
       isPhotoPost: false,
       postContent: formattedPostMessage,
-      warning: plan.warning,
+      warning: plan.action === 'post_text_only' ? plan.warning : undefined,
       message: `تم نشر جدول عيادات يوم ${dayLabel} (نص) بنجاح على صفحة فيسبوك! (معرف المنشور: ${feedResult.post_id})`,
     });
   } catch (err) {
