@@ -84,7 +84,7 @@ if (typeof window !== 'undefined') {
 
 let foregroundMessageListenerRegistered = false;
 
-function ensureForegroundMessageListenerOnce() {
+export function ensureForegroundMessageListenerOnce() {
   if (foregroundMessageListenerRegistered || typeof window === 'undefined') {
     return;
   }
@@ -104,12 +104,99 @@ function ensureForegroundMessageListenerOnce() {
           payload.notification?.body ||
           'يرجى مراجعة وتجهيز جدول العيادات ومشاركته.';
         const url = data.url || '/';
-        showLocalNotification(title, body, url);
+        const tag = data.tag || `clinic-schedule-fg-${Date.now()}`;
+        showLocalNotification(title, body, url, tag);
       });
     })
     .catch(() => {
       // Ignore in unsupported environments
     });
+}
+
+/**
+ * Quietly refreshes and syncs the current browser's FCM token to Firestore `fcmTokens`
+ * whenever `Notification.permission === 'granted'`, and ensures the foreground listener is active.
+ */
+export async function refreshAndSyncCurrentFcmToken(): Promise<string | null> {
+  if (
+    typeof window === 'undefined' ||
+    !('Notification' in window) ||
+    Notification.permission !== 'granted'
+  ) {
+    return null;
+  }
+
+  try {
+    ensureForegroundMessageListenerOnce();
+    const supported = await isMessagingSupported().catch(() => false);
+    if (!supported || !('serviceWorker' in navigator)) {
+      return null;
+    }
+
+    const swReg = await navigator.serviceWorker.ready;
+    const messaging = getMessaging(app);
+    const fcmToken = await getToken(messaging, {
+      vapidKey: import.meta.env.VITE_FIREBASE_VAPID_KEY || VAPID_PUBLIC_KEY,
+      serviceWorkerRegistration: swReg,
+    }).catch(() => '');
+
+    if (!fcmToken) {
+      return null;
+    }
+
+    const currentUser = auth.currentUser;
+    const docId = await computeTokenDocId(fcmToken);
+    const cleanEmail = currentUser?.email
+      ? currentUser.email.trim().toLowerCase()
+      : PUBLIC_SUBSCRIBER_EMAIL;
+    const cleanUid = currentUser?.uid || 'public';
+    const platform = (navigator.userAgent || 'web').slice(0, 120) || 'web';
+
+    let savedInFirestore = false;
+    try {
+      await setDoc(doc(db, 'fcmTokens', docId), {
+        token: fcmToken,
+        email: cleanEmail,
+        uid: cleanUid,
+        platform,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      savedInFirestore = true;
+    } catch {
+      // Fallback to server API below
+    }
+
+    if (!savedInFirestore) {
+      try {
+        await fetch('/api/send-reminders?action=subscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: fcmToken,
+            email: cleanEmail,
+            uid: cleanUid,
+            platform,
+          }),
+        });
+      } catch {
+        // Ignore network error in local preview
+      }
+    }
+
+    try {
+      localStorage.setItem(
+        FCM_TOKEN_STORAGE_KEY,
+        JSON.stringify({ token: fcmToken, docId, email: cleanEmail })
+      );
+    } catch {
+      // Ignore storage error
+    }
+
+    return fcmToken;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -361,7 +448,8 @@ export async function disablePushNotifications(): Promise<{
 export async function showLocalNotification(
   title: string,
   body: string,
-  url = '/'
+  url = '/',
+  tag?: string
 ): Promise<void> {
   if (
     typeof window === 'undefined' ||
@@ -371,18 +459,27 @@ export async function showLocalNotification(
     return;
   }
 
+  const effectiveTag = tag || `clinic-schedule-notify-${Date.now()}`;
+
   try {
     if ('serviceWorker' in navigator) {
       const reg = await navigator.serviceWorker.getRegistration();
       if (reg && 'showNotification' in reg) {
-        await reg.showNotification(title, {
+        const swOptions: NotificationOptions & {
+          renotify?: boolean;
+          vibrate?: number[];
+        } = {
           body,
           icon: '/pwa-192x192.png',
           badge: '/pwa-192x192.png',
           dir: 'rtl',
           lang: 'ar',
+          tag: effectiveTag,
+          renotify: true,
+          vibrate: [200, 100, 200],
           data: { url },
-        });
+        };
+        await reg.showNotification(title, swOptions);
         return;
       }
     }
@@ -391,6 +488,7 @@ export async function showLocalNotification(
       icon: '/pwa-192x192.png',
       dir: 'rtl',
       lang: 'ar',
+      tag: effectiveTag,
     });
   } catch {
     // Ignore notification display error
@@ -463,5 +561,7 @@ async function testConnection() {
 if (typeof window !== 'undefined') {
   setTimeout(() => {
     testConnection();
+    ensureForegroundMessageListenerOnce();
+    refreshAndSyncCurrentFcmToken().catch(() => undefined);
   }, 1000);
 }

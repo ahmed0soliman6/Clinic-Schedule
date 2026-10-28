@@ -459,6 +459,10 @@
           "type": "boolean",
           "description": "Whether daily automatic Facebook Page schedule publishing is enabled"
         },
+        "fbAutoStoryEnabled": {
+          "type": "boolean",
+          "description": "Whether publishing the schedule poster image to the Facebook Page Story (24h story) is enabled"
+        },
         "fbAutoPostTime": {
           "type": "string",
           "description": "Daily scheduled automatic Facebook posting time in HH:mm format (Africa/Cairo)",

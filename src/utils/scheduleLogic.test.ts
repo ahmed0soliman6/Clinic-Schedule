@@ -1021,6 +1021,28 @@ test('Daily Reminder Pure Logic: 10-minute Cairo window, lastSentDate duplicate 
   assert.equal(checkDuplicate.shouldSend, false);
   assert.equal(checkDuplicate.reason, 'already_sent_today');
 
+  // Duplicate send prevented when lastSentDate matches date@scheduledTime
+  const checkDuplicateSameTime = isWithinReminderWindow({
+    now: winterInWindow,
+    scheduledTime: '19:00',
+    lastSentDate: '2026-01-17@19:00',
+    timeZone: 'Africa/Cairo',
+    windowMinutes: 10,
+  });
+  assert.equal(checkDuplicateSameTime.shouldSend, false);
+  assert.equal(checkDuplicateSameTime.reason, 'already_sent_today');
+
+  // If Admin changed scheduledTime from 16:42 to 19:00 on the same day, the new time is allowed to fire
+  const checkRescheduledSameDay = isWithinReminderWindow({
+    now: winterInWindow,
+    scheduledTime: '19:00',
+    lastSentDate: '2026-01-17@16:42',
+    timeZone: 'Africa/Cairo',
+    windowMinutes: 10,
+  });
+  assert.equal(checkRescheduledSameDay.shouldSend, true);
+  assert.equal(checkRescheduledSameDay.reason, 'in_window');
+
   // Outside 10-minute window (17:10 UTC = 19:10 Cairo -> outside [19:00, 19:10))
   const winterOutside = new Date('2026-01-17T17:10:00Z');
   const checkOutside = isWithinReminderWindow({
@@ -1380,6 +1402,28 @@ test('Catch-up timing window, lock, targetDate deduplication, max 4 attempts, an
     'سينشر تلقائياً جدول (الخميس / اليوم) الساعة 09:41 بتوقيت القاهرة'
   );
 
+  const previewLineWithStory = buildLiveAutoPostPreviewLine({
+    now: new Date('2026-01-15T10:00:00Z'),
+    fbTargetDay: 'today',
+    fbAutoPostTime: '09:41',
+    fbAutoStoryEnabled: true,
+    timeZone: 'Africa/Cairo',
+  });
+  assert.equal(
+    previewLineWithStory,
+    'سينشر تلقائياً جدول (الخميس / اليوم) + ستوري الصفحة الساعة 09:41 بتوقيت القاهرة'
+  );
+
+  const validatedStory = validateReminderSettings({
+    enabled: true,
+    time: '18:00',
+    fbAutoPostEnabled: true,
+    fbAutoStoryEnabled: true,
+    fbAutoPostTime: '18:00',
+  });
+  assert.equal(validatedStory.valid, true);
+  assert.equal(validatedStory.sanitized.fbAutoStoryEnabled, true);
+
   const sanitizedErr = sanitizeFbAutoPostError(
     'Error with access_token=EAABsbCS1234567890SECRET'
   );
@@ -1395,6 +1439,10 @@ test('firestore.rules includes new reminder fields, server-only field protection
   assert.ok(
     rulesContent.includes("data.fbTargetDay in ['today', 'tomorrow']"),
     'Expected fbTargetDay validation in firestore.rules'
+  );
+  assert.ok(
+    rulesContent.includes('data.fbAutoStoryEnabled is bool'),
+    'Expected fbAutoStoryEnabled validation in firestore.rules'
   );
   assert.ok(
     rulesContent.includes("data.fbFallbackMode in ['text', 'skip']"),

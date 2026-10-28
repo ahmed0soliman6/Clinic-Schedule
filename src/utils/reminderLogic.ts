@@ -24,6 +24,7 @@ export const DEFAULT_REMINDER_SETTINGS: ClientEditableReminderSettings = {
   title: 'تذكير جدول العيادات — مجمع ميت عزون الطبي',
   body: 'يرجى مراجعة وتجهيز جدول عيادات {اليوم} ومشاركته.',
   fbAutoPostEnabled: false,
+  fbAutoStoryEnabled: false,
   fbAutoPostTime: '20:00',
   fbPostMode: 'photo_with_caption',
   fbTargetDay: 'tomorrow',
@@ -218,7 +219,13 @@ export function isWithinReminderWindow(params: {
   }
 
   const dedupDate = (expectedTargetDate || cairo.dateStr).trim();
-  if (lastSentDate && lastSentDate.trim() === dedupDate) {
+  const cleanScheduledTime = scheduledTime.trim();
+  const cleanLastSent = (lastSentDate || '').trim();
+  if (
+    cleanLastSent &&
+    (cleanLastSent === dedupDate ||
+      cleanLastSent === `${dedupDate}@${cleanScheduledTime}`)
+  ) {
     return {
       shouldSend: false,
       reason: 'already_sent_today',
@@ -474,6 +481,7 @@ export function buildLiveAutoPostPreviewLine(params: {
   now?: Date;
   fbTargetDay?: 'today' | 'tomorrow';
   fbAutoPostTime?: string;
+  fbAutoStoryEnabled?: boolean;
   timeZone?: string;
 }): string {
   const now = params.now || new Date();
@@ -485,7 +493,8 @@ export function buildLiveAutoPostPreviewLine(params: {
     mode,
     params.timeZone || 'Africa/Cairo'
   );
-  return `سينشر تلقائياً جدول (${resolved.dayLabel} / ${relWord}) الساعة ${timeStr} بتوقيت القاهرة`;
+  const storySuffix = params.fbAutoStoryEnabled ? ' + ستوري الصفحة' : '';
+  return `سينشر تلقائياً جدول (${resolved.dayLabel} / ${relWord})${storySuffix} الساعة ${timeStr} بتوقيت القاهرة`;
 }
 
 /**
@@ -610,6 +619,7 @@ export function validateReminderSettings(input: Partial<ReminderSettings>): {
   const errors: string[] = [];
   const enabled = Boolean(input.enabled);
   const fbAutoPostEnabled = Boolean(input.fbAutoPostEnabled);
+  const fbAutoStoryEnabled = Boolean(input.fbAutoStoryEnabled);
   const fbAutoPostTime = (
     input.fbAutoPostTime ??
     input.time ??
@@ -666,6 +676,7 @@ export function validateReminderSettings(input: Partial<ReminderSettings>): {
       title: title.slice(0, 160),
       body: body.slice(0, 500),
       fbAutoPostEnabled,
+      fbAutoStoryEnabled,
       fbAutoPostTime,
       fbPostMode,
       fbTargetDay,

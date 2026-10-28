@@ -86,15 +86,22 @@ try {
       'يرجى مراجعة وتجهيز جدول العيادات ومشاركته.';
     const url = data.url || '/';
 
-    return self.registration.showNotification(title, {
+    const swOptions: NotificationOptions & {
+      renotify?: boolean;
+      vibrate?: number[];
+    } = {
       body,
       icon: '/pwa-192x192.png',
       badge: '/pwa-192x192.png',
       dir: 'rtl',
       lang: 'ar',
-      tag: data.tag || 'clinic-schedule-daily-reminder',
+      tag: data.tag || `clinic-schedule-daily-reminder-${Date.now()}`,
+      renotify: true,
+      vibrate: [200, 100, 200],
       data: { url },
-    });
+    };
+
+    return self.registration.showNotification(title, swOptions);
   });
 } catch {
   // Ignore initialization errors in unsupported contexts

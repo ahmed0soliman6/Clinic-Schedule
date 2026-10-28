@@ -43,6 +43,8 @@ import {
   googleProvider,
   handleFirestoreError,
   OperationType,
+  refreshAndSyncCurrentFcmToken,
+  showLocalNotification,
   syncStoredFcmTokenWithUser,
 } from './firebase';
 import {
@@ -1841,6 +1843,7 @@ export default function App() {
     title: base.title || DEFAULT_REMINDER_SETTINGS.title,
     body: base.body || DEFAULT_REMINDER_SETTINGS.body,
     fbAutoPostEnabled: Boolean(base.fbAutoPostEnabled),
+    fbAutoStoryEnabled: Boolean(base.fbAutoStoryEnabled),
     fbAutoPostTime: base.fbAutoPostTime || '20:00',
     fbPostMode: base.fbPostMode || 'photo_with_caption',
     fbTargetDay:
@@ -1937,6 +1940,10 @@ export default function App() {
       return { ok: false, error: 'غير مصرح بحفظ إعدادات الإشعارات.' };
     }
 
+    const timeChanged =
+      (updatedReminders.time || '').trim() !==
+      (reminderSettingsRef.current.time || '').trim();
+
     const res = await persistPartialReminderConfig(
       {
         ...updatedReminders,
@@ -1950,6 +1957,26 @@ export default function App() {
 
     if (!res.ok) {
       return res;
+    }
+
+    if (timeChanged && firebaseUser) {
+      reminderSettingsRef.current = {
+        ...reminderSettingsRef.current,
+        lastSentDate: '',
+      };
+      setReminderSettings((prev) => ({ ...prev, lastSentDate: '' }));
+      firebaseUser
+        .getIdToken()
+        .then((idToken) =>
+          fetch('/api/send-reminders?action=reset-reminder-dedup', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${idToken}`,
+              'Content-Type': 'application/json',
+            },
+          })
+        )
+        .catch(() => undefined);
     }
 
     appendAuditLog(
@@ -1968,6 +1995,15 @@ export default function App() {
     return persistPartialReminderConfig(
       { fbAutoPostEnabled: nextEnabled },
       'تعذر تحديث حالة زر النشر التلقائي في قاعدة البيانات. تم إرجاع الزر لحالته السابقة.'
+    );
+  };
+
+  const handleToggleFbAutoStory = async (
+    nextEnabled: boolean
+  ): Promise<{ ok: boolean; error?: string }> => {
+    return persistPartialReminderConfig(
+      { fbAutoStoryEnabled: nextEnabled },
+      'تعذر تحديث حالة نشر الاستوري (Story) في قاعدة البيانات. تم إرجاع الزر لحالته السابقة.'
     );
   };
 
@@ -2323,6 +2359,9 @@ export default function App() {
       return { ok: false, message: 'غير مصرح بإرسال إشعار تجريبي.' };
     }
     try {
+      const currentToken = await refreshAndSyncCurrentFcmToken().catch(
+        () => null
+      );
       const idToken = await firebaseUser.getIdToken();
       const response = await fetch('/api/send-reminders?test=1', {
         method: 'POST',
@@ -2330,6 +2369,9 @@ export default function App() {
           Authorization: `Bearer ${idToken}`,
           'Content-Type': 'application/json',
         },
+        body: JSON.stringify({
+          currentToken: currentToken || undefined,
+        }),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -2339,6 +2381,14 @@ export default function App() {
             data.error ||
             `تعذر الإرسال (${response.status}). تأكد من إعداد متغيرات الخادم وتفعيل الإشعارات على جهازك.`,
         };
+      }
+      if (data.notification?.title && data.notification?.body) {
+        await showLocalNotification(
+          data.notification.title,
+          data.notification.body,
+          data.notification.url || '/',
+          data.notification.tag
+        );
       }
       return {
         ok: true,
@@ -2949,11 +2999,15 @@ export default function App() {
           }
           onCloseFacebookCard={() => handleSetShowFacebookCard(false)}
           fbAutoPostEnabled={Boolean(reminderSettings.fbAutoPostEnabled)}
+          fbAutoStoryEnabled={Boolean(reminderSettings.fbAutoStoryEnabled)}
           fbAutoPostTime={reminderSettings.fbAutoPostTime || '20:00'}
           fbTargetDay={
             reminderSettings.fbTargetDay === 'today' ? 'today' : 'tomorrow'
           }
           onToggleFbAutoPost={handleToggleFbAutoPost}
+          onToggleFbAutoStory={
+            activeRole === 'ADMIN' ? handleToggleFbAutoStory : undefined
+          }
           onChangeFbTargetDay={
             activeRole === 'ADMIN' ? handleChangeFbTargetDay : undefined
           }

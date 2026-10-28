@@ -137,6 +137,10 @@ function buildEditableDraftFromProps(
     fbAutoPostEnabled:
       reminderSettings?.fbAutoPostEnabled ??
       DEFAULT_REMINDER_SETTINGS.fbAutoPostEnabled,
+    fbAutoStoryEnabled:
+      typeof reminderSettings?.fbAutoStoryEnabled === 'boolean'
+        ? reminderSettings.fbAutoStoryEnabled
+        : DEFAULT_REMINDER_SETTINGS.fbAutoStoryEnabled ?? false,
     fbAutoPostTime:
       reminderSettings?.fbAutoPostTime ||
       DEFAULT_REMINDER_SETTINGS.fbAutoPostTime ||
@@ -238,6 +242,7 @@ export const RemindersAndAutoPostModal: React.FC<
     reminderSettings?.title,
     reminderSettings?.body,
     reminderSettings?.fbAutoPostEnabled,
+    reminderSettings?.fbAutoStoryEnabled,
     reminderSettings?.fbAutoPostTime,
     reminderSettings?.fbPostMode,
     reminderSettings?.fbTargetDay,
@@ -427,6 +432,7 @@ export const RemindersAndAutoPostModal: React.FC<
   const liveAutoPostLine = buildLiveAutoPostPreviewLine({
     fbTargetDay: reminderDraft.fbTargetDay || 'tomorrow',
     fbAutoPostTime: reminderDraft.fbAutoPostTime || '20:00',
+    fbAutoStoryEnabled: Boolean(reminderDraft.fbAutoStoryEnabled),
     timeZone: 'Africa/Cairo',
   });
 
@@ -787,7 +793,44 @@ export const RemindersAndAutoPostModal: React.FC<
                 </select>
               </div>
 
-              <div className="sm:col-span-2 pt-1">
+              <div className="sm:col-span-2 pt-1 space-y-2.5">
+                {/* Facebook Page Story Toggle */}
+                <div className="flex items-center justify-between gap-3 rounded-xl bg-white border border-blue-200 px-3 py-2.5 shadow-2xs">
+                  <div>
+                    <div className="text-xs font-extrabold text-slate-900">
+                      نشر البوستر في ستوري الصفحة أيضاً (Facebook Story)
+                    </div>
+                    <p className="text-[10px] font-bold text-slate-600 mt-0.5">
+                      عند التفعيل، تُنشر صورة بوستر الجدول تلقائياً في قصص الصفحة (Story لمدة 24 ساعة) بالتزامن مع منشور الصفحة، ويمكنك تشغيلها أو إيقافها في أي وقت.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={Boolean(reminderDraft.fbAutoStoryEnabled)}
+                    aria-label="تفعيل أو إيقاف نشر البوستر في ستوري صفحة فيسبوك"
+                    data-testid="modal-fb-auto-story-toggle"
+                    onClick={() =>
+                      updateDraft({
+                        fbAutoStoryEnabled: !reminderDraft.fbAutoStoryEnabled,
+                      })
+                    }
+                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                      reminderDraft.fbAutoStoryEnabled
+                        ? 'bg-indigo-600'
+                        : 'bg-slate-300'
+                    }`}
+                  >
+                    <span
+                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                        reminderDraft.fbAutoStoryEnabled
+                          ? '-translate-x-5'
+                          : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
+                </div>
+
                 <label className="inline-flex items-center gap-2 text-xs font-bold text-slate-800 cursor-pointer">
                   <input
                     type="checkbox"

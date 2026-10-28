@@ -273,6 +273,116 @@ async function publishPhotoToFacebookPage(params: {
   }
 }
 
+interface FacebookStoryResult {
+  ok: boolean;
+  story_id?: string;
+  photo_id?: string;
+  error?: string;
+}
+
+/**
+ * Publishes a 4:5 poster JPEG buffer to the Facebook Page's 24-hour Story via Meta Graph API v21.0:
+ * Step 1: Upload photo to `/{page-id}/photos` with `published=false` to obtain `photo_id`.
+ * Step 2: Publish `photo_id` to `/{page-id}/photo_stories`.
+ */
+async function publishPhotoStoryToFacebookPage(params: {
+  pageId: string;
+  accessToken: string;
+  jpegBuffer: Buffer;
+  dayId: string;
+}): Promise<FacebookStoryResult> {
+  const cleanPageId = normalizeFacebookPageId(params.pageId);
+  const cleanToken = normalizeEnvSecret(params.accessToken);
+
+  if (!cleanPageId || !cleanToken) {
+    return {
+      ok: false,
+      error: 'متغيرات فيسبوك (FB_PAGE_ID أو FB_PAGE_ACCESS_TOKEN) غير مضبوطة.',
+    };
+  }
+
+  try {
+    // Step 1: Upload unpublished photo
+    const uploadUrl = `https://graph.facebook.com/v21.0/${encodeURIComponent(
+      cleanPageId
+    )}/photos`;
+    const form = new FormData();
+    form.append(
+      'source',
+      new Blob([new Uint8Array(params.jpegBuffer)], { type: 'image/jpeg' }),
+      `story-schedule-${params.dayId}.jpg`
+    );
+    form.append('published', 'false');
+    form.append('access_token', cleanToken);
+
+    const uploadRes = await fetch(uploadUrl, {
+      method: 'POST',
+      body: form,
+    });
+
+    const uploadData = (await uploadRes.json().catch(() => ({}))) as {
+      id?: string;
+      error?: { message?: string; code?: number };
+    };
+
+    if (!uploadRes.ok || uploadData.error || !uploadData.id) {
+      const errMsg =
+        uploadData.error?.message || `HTTP ${uploadRes.status} أثناء رفع صورة الاستوري`;
+      return {
+        ok: false,
+        error: errMsg,
+      };
+    }
+
+    const photoId = String(uploadData.id).trim();
+
+    // Step 2: Publish photo_id to /{page-id}/photo_stories
+    const storyUrl = `https://graph.facebook.com/v21.0/${encodeURIComponent(
+      cleanPageId
+    )}/photo_stories`;
+
+    const storyRes = await fetch(storyUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        photo_id: photoId,
+        access_token: cleanToken,
+      }),
+    });
+
+    const storyData = (await storyRes.json().catch(() => ({}))) as {
+      success?: boolean;
+      post_id?: string;
+      id?: string;
+      error?: { message?: string; code?: number };
+    };
+
+    if (!storyRes.ok || storyData.error) {
+      const errMsg =
+        storyData.error?.message || `HTTP ${storyRes.status} أثناء نشر الاستوري`;
+      return {
+        ok: false,
+        photo_id: photoId,
+        error: errMsg,
+      };
+    }
+
+    return {
+      ok: true,
+      photo_id: photoId,
+      story_id: String(storyData.post_id || storyData.id || photoId).trim(),
+    };
+  } catch (err) {
+    const rawMsg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      error: rawMsg,
+    };
+  }
+}
+
 async function publishFeedTextToFacebookPage(params: {
   pageId: string;
   accessToken: string;
@@ -679,12 +789,31 @@ async function executeAutomatedFacebookPublish(params: {
     const nowIso = new Date().toISOString();
 
     if (fbPublish.ok && fbPublish.post_id) {
+      let storyResult: FacebookStoryResult | null = null;
+      if (plan.action === 'post_photo' && Boolean(config.fbAutoStoryEnabled)) {
+        storyResult = await publishPhotoStoryToFacebookPage({
+          pageId: cleanPageId,
+          accessToken: cleanToken,
+          jpegBuffer: plan.jpegBuffer,
+          dayId: targetDayId,
+        });
+      }
+
       const finalStatus =
         plan.action === 'post_photo' ? 'success' : 'success_text_fallback';
-      const fallbackWarning =
+      let fallbackWarning =
         plan.action === 'post_text_only'
           ? sanitizeFbAutoPostError(plan.warning || plan.reason)
           : '';
+
+      if (storyResult && !storyResult.ok && storyResult.error) {
+        const storyWarn = sanitizeFbAutoPostError(
+          `تم نشر المنشور الأساسي بنجاح، وتعذر نشر الاستوري: ${storyResult.error}`
+        );
+        fallbackWarning = fallbackWarning
+          ? `${fallbackWarning} | ${storyWarn}`
+          : storyWarn;
+      }
 
       await remindersRef.set(
         {
@@ -706,6 +835,8 @@ async function executeAutomatedFacebookPublish(params: {
         executed: true,
         status: finalStatus,
         post_id: fbPublish.post_id,
+        storyPublished: Boolean(storyResult?.ok),
+        story_id: storyResult?.story_id,
         dayId: targetDayId,
         dayLabel: targetDayLabel,
         targetDateStr,
@@ -713,7 +844,9 @@ async function executeAutomatedFacebookPublish(params: {
         warning: fallbackWarning || undefined,
         message:
           plan.action === 'post_photo'
-            ? `✅ تم نشر صورة جدول يوم ${targetDayLabel} (${targetDateStr}) تلقائياً على فيسبوك! (post_id: ${fbPublish.post_id})`
+            ? storyResult?.ok
+              ? `✅ تم نشر صورة جدول يوم ${targetDayLabel} (${targetDateStr}) تلقائياً على صفحة فيسبوك وفي الاستوري (Story)! (post_id: ${fbPublish.post_id})`
+              : `✅ تم نشر صورة جدول يوم ${targetDayLabel} (${targetDateStr}) تلقائياً على فيسبوك! (post_id: ${fbPublish.post_id})`
             : `✅ تم نشر جدول يوم ${targetDayLabel} (${targetDateStr}) كنص بديل على فيسبوك! (post_id: ${fbPublish.post_id})`,
       };
     }
@@ -949,13 +1082,19 @@ async function handleFbAutoAdminAction(
           ? 'غير موجودة ✗'
           : 'تالفة/غير صالحة ✗';
 
+      const storyEnabled = Boolean(reminderConfig.fbAutoStoryEnabled);
+      const storyNote =
+        plannedAction === 'post_photo' && storyEnabled
+          ? ' + نشر في ستوري الصفحة (Story)'
+          : '';
+
       const plannedActionLabel =
         plannedAction === 'skip_no_clinics'
           ? 'سيتم التخطي (لا توجد عيادات مسجلة)'
           : plannedAction === 'post_photo'
           ? postMode === 'photo_only'
-            ? 'سينشر صورة البوستر فقط (بدون كابشن)'
-            : 'سينشر صورة البوستر مع كابشن قصير'
+            ? `سينشر صورة البوستر فقط (بدون كابشن)${storyNote}`
+            : `سينشر صورة البوستر مع كابشن قصير${storyNote}`
           : plannedAction === 'post_text_only'
           ? 'سينشر نص الجدول (بديل نصي)'
           : 'سيتوقف ولن ينشر حتى تُحدّث الصورة';
@@ -968,10 +1107,13 @@ async function handleFbAutoAdminAction(
         targetDateStr: targetMeta.targetDateStr,
         fbTargetDay,
         fbPostMode: postMode,
+        fbAutoStoryEnabled: storyEnabled,
         fbFallbackMode: fallbackMode,
         fbSkipEmptyDay: skipEmptyDay,
         rowCount: scheduleRows.length,
+         nonEmptyRowsCount: scheduleRows.length,
         willSkipNoClinics,
+        wouldSkipEmpty: willSkipNoClinics,
         scheduleVersion,
         posterVersion: imageInspection.posterVersion,
         imageStatus: imageInspection.status,
@@ -1119,6 +1261,7 @@ async function handleFacebookPostAction(
       mime: string;
     } | null = null;
     let postMode: FacebookPostMode = 'photo_with_caption';
+    let fbAutoStoryEnabled = false;
 
     if (db) {
       const [
@@ -1151,6 +1294,7 @@ async function handleFacebookPostAction(
         ) {
           postMode = rData.fbPostMode;
         }
+        fbAutoStoryEnabled = Boolean(rData?.fbAutoStoryEnabled);
       }
 
       if (scheduleSnap.exists) {
@@ -1176,6 +1320,11 @@ async function handleFacebookPostAction(
         }
       }
     }
+
+    const shouldPublishStory =
+      typeof payload.includeStory === 'boolean'
+        ? payload.includeStory
+        : fbAutoStoryEnabled;
 
     const plan = decideFacebookPublishPlan({
       mode: postMode,
@@ -1234,15 +1383,32 @@ async function handleFacebookPostAction(
         return;
       }
 
+      let storyResult: FacebookStoryResult | null = null;
+      if (shouldPublishStory) {
+        storyResult = await publishPhotoStoryToFacebookPage({
+          pageId: cleanPageId,
+          accessToken: cleanToken,
+          jpegBuffer: plan.jpegBuffer,
+          dayId,
+        });
+      }
+
       res.status(200).json({
         ok: true,
         success: true,
         post_id: fbResult.post_id,
+        storyPublished: Boolean(storyResult?.ok),
+        story_id: storyResult?.story_id,
+        storyError: storyResult?.error,
         dayId,
         dayLabel,
         isPhotoPost: true,
         caption: plan.caption,
-        message: `تم نشر صورة بوستر جدول عيادات يوم ${dayLabel} بنجاح على صفحة فيسبوك! (معرف المنشور: ${fbResult.post_id})`,
+        message: storyResult?.ok
+          ? `تم نشر صورة بوستر جدول عيادات يوم ${dayLabel} بنجاح على صفحة فيسبوك وفي الاستوري (Story)! (معرف المنشور: ${fbResult.post_id})`
+          : storyResult && !storyResult.ok
+          ? `تم نشر صورة بوستر جدول عيادات يوم ${dayLabel} على صفحة فيسبوك (معرف المنشور: ${fbResult.post_id})، وتعذر نشر الاستوري: ${storyResult.error}`
+          : `تم نشر صورة بوستر جدول عيادات يوم ${dayLabel} بنجاح على صفحة فيسبوك! (معرف المنشور: ${fbResult.post_id})`,
       });
       return;
     }
@@ -1408,6 +1574,41 @@ export default async function handler(
       return;
     }
 
+    if (req.method === 'POST' && action === 'reset-reminder-dedup') {
+      const resetBearer = extractBearerToken(rawAuthHeader);
+      if (!resetBearer) {
+        res.status(401).json({ error: 'مطلوب ترويسة Authorization: Bearer.' });
+        return;
+      }
+      try {
+        const decoded = await adminAuth.verifyIdToken(resetBearer);
+        const email = (decoded.email || '').trim().toLowerCase();
+        let isAdminUser = email === PRIMARY_ADMIN_EMAIL;
+        if (!isAdminUser && email) {
+          const userSnap = await db
+            .collection('users')
+            .doc(emailToDocId(email))
+            .get();
+          if (userSnap.exists && userSnap.data()?.role === 'ADMIN') {
+            isAdminUser = true;
+          }
+        }
+        if (!isAdminUser) {
+          res.status(403).json({ error: 'غير مصرح.' });
+          return;
+        }
+        await db
+          .collection('appConfig')
+          .doc('reminders')
+          .set({ lastSentDate: '' }, { merge: true });
+        res.status(200).json({ ok: true });
+        return;
+      } catch {
+        res.status(401).json({ error: 'رمز المصادقة غير صالح.' });
+        return;
+      }
+    }
+
     const bearer = extractBearerToken(rawAuthHeader);
 
     if (!bearer) {
@@ -1444,6 +1645,31 @@ export default async function handler(
         return;
       }
       testAdminEmail = email;
+
+      // If the Admin client sent its current browser FCM token in the test request body, ensure it is stored in fcmTokens
+      const testBody = parseRequestBody(req.body);
+      const clientCurrentToken =
+        typeof testBody.currentToken === 'string'
+          ? testBody.currentToken.trim()
+          : '';
+      if (clientCurrentToken.length >= 10 && clientCurrentToken.length <= 4096) {
+        const docId = await computeTokenDocId(clientCurrentToken);
+        await db
+          .collection('fcmTokens')
+          .doc(docId)
+          .set(
+            {
+              token: clientCurrentToken,
+              email,
+              uid: decoded.uid || 'admin',
+              platform: 'web-admin-test',
+              updatedAt: new Date(),
+              createdAt: new Date(),
+            },
+            { merge: true }
+          )
+          .catch(() => undefined);
+      }
     } else {
       const cronSecret = normalizeEnvSecret(process.env.CRON_SECRET);
       const isValidCronSecret = Boolean(cronSecret && bearer === cronSecret);
@@ -1507,22 +1733,22 @@ export default async function handler(
     );
 
     // -------------------------------------------------------------------------
-    // Automatic Daily Facebook Page Post (when fbAutoPostEnabled === true)
-    // Uses fbTargetDay, 180-minute catch-up window, 5-minute lock, and targetDate deduplication
+    // Start Automatic Daily Facebook Page Post in parallel (non-blocking to FCM push)
+    // so push notifications are dispatched immediately without waiting on Graph API image uploads
     // -------------------------------------------------------------------------
-    let facebookAutoPostResult: Record<string, unknown> | null = null;
-
-    if (!isTestMode && reminderConfig.fbAutoPostEnabled) {
-      facebookAutoPostResult = await executeAutomatedFacebookPublish({
-        db,
-        now,
-        ignoreTimeWindow: false,
-        forceRePost: false,
-      });
-    }
+    const facebookAutoPostPromise: Promise<Record<string, unknown> | null> =
+      !isTestMode && reminderConfig.fbAutoPostEnabled
+        ? executeAutomatedFacebookPublish({
+            db,
+            now,
+            ignoreTimeWindow: false,
+            forceRePost: false,
+          })
+        : Promise.resolve(null);
 
     if (!isTestMode) {
       if (!reminderConfig.enabled) {
+        const facebookAutoPostResult = await facebookAutoPostPromise;
         res.status(200).json({
           ok: true,
           skipped: true,
@@ -1543,6 +1769,7 @@ export default async function handler(
       });
 
       if (!windowCheck.shouldSend) {
+        const facebookAutoPostResult = await facebookAutoPostPromise;
         res.status(200).json({
           ok: true,
           skipped: true,
@@ -1554,10 +1781,17 @@ export default async function handler(
         return;
       }
 
+      const dedupKey = `${windowCheck.cairoDateStr}@${(
+        reminderConfig.time || '19:00'
+      ).trim()}`;
+
       const claimed = await db.runTransaction(async (tx) => {
         const freshSnap = await tx.get(remindersRef);
         const freshData = (freshSnap.data() || {}) as Partial<ReminderSettings>;
-        if (freshData.lastSentDate === windowCheck.cairoDateStr) {
+        if (
+          freshData.lastSentDate === windowCheck.cairoDateStr ||
+          freshData.lastSentDate === dedupKey
+        ) {
           return false;
         }
         tx.set(
@@ -1565,7 +1799,7 @@ export default async function handler(
           {
             ...DEFAULT_REMINDER_SETTINGS,
             ...freshData,
-            lastSentDate: windowCheck.cairoDateStr,
+            lastSentDate: dedupKey,
           },
           { merge: true }
         );
@@ -1573,6 +1807,7 @@ export default async function handler(
       });
 
       if (!claimed) {
+        const facebookAutoPostResult = await facebookAutoPostPromise;
         res.status(200).json({
           ok: true,
           skipped: true,
@@ -1616,32 +1851,55 @@ export default async function handler(
       }
     });
 
+    const eligibleForTargetDay = filterEligibleReminderTokens(
+      allTokens,
+      registeredUsers,
+      targetDay.dayId
+    );
+
     const recipients = isTestMode
-      ? allTokens.filter(
-          (t) =>
-            t.email === testAdminEmail || t.email === PUBLIC_SUBSCRIBER_EMAIL
-        )
-      : filterEligibleReminderTokens(
-          allTokens,
-          registeredUsers,
-          targetDay.dayId
-        );
+      ? (() => {
+          const byToken = new Map<string, StoredTokenEntry>();
+          for (const t of eligibleForTargetDay) {
+            byToken.set(t.token, t);
+          }
+          for (const t of allTokens) {
+            if (
+              t.token &&
+              (t.email === testAdminEmail || t.email === PUBLIC_SUBSCRIBER_EMAIL)
+            ) {
+              byToken.set(t.token, t);
+            }
+          }
+          return Array.from(byToken.values());
+        })()
+      : eligibleForTargetDay;
+
+    const formatted = formatReminderMessage(reminderConfig, targetDay.dayLabel);
+    const targetUrl = `/?day=${targetDay.dayId}`;
+    const notificationTag = isTestMode
+      ? `clinic-schedule-test-${Date.now()}`
+      : `clinic-schedule-daily-reminder-${targetDay.cairoDateStr}`;
 
     if (recipients.length === 0) {
+      const facebookAutoPostResult = await facebookAutoPostPromise;
       res.status(200).json({
         ok: true,
         sentCount: 0,
         targetDay: targetDay.dayId,
         facebookAutoPost: facebookAutoPostResult,
+        notification: {
+          title: formatted.title,
+          body: formatted.body,
+          url: targetUrl,
+          tag: notificationTag,
+        },
         message: isTestMode
           ? 'لا يوجد جهاز مفعّل عليه الإشعارات حالياً. فعّل الإشعارات من زر الجرس بالواجهة أولاً.'
           : 'لا توجد أجهزة مؤهلة لإرسال الإشعار حالياً.',
       });
       return;
     }
-
-    const formatted = formatReminderMessage(reminderConfig, targetDay.dayLabel);
-    const targetUrl = `/?day=${targetDay.dayId}`;
 
     let sentCount = 0;
     let deletedExpiredCount = 0;
@@ -1656,7 +1914,16 @@ export default async function handler(
               body: formatted.body,
               url: targetUrl,
               dayId: targetDay.dayId,
-              tag: 'clinic-schedule-daily-reminder',
+              tag: notificationTag,
+            },
+            webpush: {
+              headers: {
+                Urgency: 'high',
+                TTL: '86400',
+              },
+              fcmOptions: {
+                link: targetUrl,
+              },
             },
           });
           sentCount += 1;
@@ -1673,6 +1940,8 @@ export default async function handler(
       })
     );
 
+    const facebookAutoPostResult = await facebookAutoPostPromise;
+
     res.status(200).json({
       ok: true,
       sentCount,
@@ -1680,6 +1949,12 @@ export default async function handler(
       targetDay: targetDay.dayId,
       url: targetUrl,
       facebookAutoPost: facebookAutoPostResult,
+      notification: {
+        title: formatted.title,
+        body: formatted.body,
+        url: targetUrl,
+        tag: notificationTag,
+      },
       message: `تم إرسال الإشعار بنجاح إلى ${sentCount} جهاز (${targetDay.dayLabel}).`,
     });
   } catch (err) {

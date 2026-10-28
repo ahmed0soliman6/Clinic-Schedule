@@ -33,9 +33,13 @@ interface ShareAndExportBarProps {
   showFacebookCard?: boolean;
   onCloseFacebookCard?: () => void;
   fbAutoPostEnabled?: boolean;
+  fbAutoStoryEnabled?: boolean;
   fbAutoPostTime?: string;
   fbTargetDay?: 'today' | 'tomorrow';
   onToggleFbAutoPost?: (
+    enabled: boolean
+  ) => Promise<{ ok: boolean; error?: string } | void> | void;
+  onToggleFbAutoStory?: (
     enabled: boolean
   ) => Promise<{ ok: boolean; error?: string } | void> | void;
   onChangeFbTargetDay?: (
@@ -85,9 +89,11 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
   showFacebookCard = false,
   onCloseFacebookCard,
   fbAutoPostEnabled = false,
+  fbAutoStoryEnabled = false,
   fbAutoPostTime = '20:00',
   fbTargetDay = 'tomorrow',
   onToggleFbAutoPost,
+  onToggleFbAutoStory,
   onChangeFbTargetDay,
   onChangeFbAutoPostTime,
   onPublishFacebookNow,
@@ -360,9 +366,22 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
     }
   };
 
+  const handleToggleAutoStoryClick = async () => {
+    if (!onToggleFbAutoStory) return;
+    setFbStatusBanner(null);
+    const res = await onToggleFbAutoStory(!fbAutoStoryEnabled);
+    if (res && !res.ok && res.error) {
+      setFbStatusBanner({
+        ok: false,
+        message: res.error,
+      });
+    }
+  };
+
   const liveAutoPostLine = buildLiveAutoPostPreviewLine({
     fbTargetDay,
     fbAutoPostTime,
+    fbAutoStoryEnabled,
   });
 
   return (
@@ -509,6 +528,28 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
                     }`}
                   />
                 </button>
+
+                {onToggleFbAutoStory && (
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={fbAutoStoryEnabled}
+                    aria-label="تفعيل أو إيقاف النشر في ستوري صفحة فيسبوك"
+                    data-testid="fb-auto-story-toggle"
+                    onClick={handleToggleAutoStoryClick}
+                    title="تشغيل أو إيقاف نشر صورة الجدول في ستوري الصفحة (Story) أيضاً"
+                    className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-extrabold transition cursor-pointer ${
+                      fbAutoStoryEnabled
+                        ? 'border-indigo-600 bg-indigo-600 text-white shadow-2xs'
+                        : 'border-blue-300 bg-white text-slate-700 hover:bg-blue-50'
+                    }`}
+                  >
+                    <span>+ ستوري (Story)</span>
+                    <span className="text-[10px] font-black">
+                      {fbAutoStoryEnabled ? 'مفعّل ✓' : 'متوقف'}
+                    </span>
+                  </button>
+                )}
               </div>
             </div>
 

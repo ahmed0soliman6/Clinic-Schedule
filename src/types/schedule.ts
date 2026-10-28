@@ -179,6 +179,7 @@ export interface ReminderSettings {
   title: string;
   body: string;
   fbAutoPostEnabled?: boolean;
+  fbAutoStoryEnabled?: boolean;
   fbAutoPostTime?: string;
   fbPostMode?: FacebookPostMode;
   fbTargetDay?: ReminderTargetDay;
