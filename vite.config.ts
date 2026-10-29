@@ -22,6 +22,8 @@ export default defineConfig(() => {
           'pwa-maskable-512x512.png',
           'logos/complex-logo.svg',
           'logos/association-logo.svg',
+          'logos/complex-logo.png',
+          'logos/association-logo.png',
         ],
         manifest: {
           id: '/',

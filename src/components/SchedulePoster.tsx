@@ -112,19 +112,19 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
       ? [...savedRows, { ...pendingNewRow, sortOrder: savedRows.length }]
       : savedRows;
   const rowCount = orderedRows.length;
-  const isCompactExport = isExporting && rowCount >= 7;
+  const isCompactExport = isExporting && rowCount >= 9;
 
   // Fully unified, bold, symmetrical font & icon configuration across all table boxes.
   // Enlarged prominently for social exports (WhatsApp / Facebook) so texts boldly fill the poster boxes.
   const getUnifiedFontConfig = (count: number) => {
-    if (count <= 3) return { main: 34, time: 28, icon: 46 };
-    if (count <= 5) return { main: 31, time: 26, icon: 42 };
-    if (count <= 7) return { main: 29, time: 25, icon: 38 };
-    if (count <= 9) return { main: 26, time: 22, icon: 34 };
-    if (count <= 12) return { main: 22, time: 19, icon: 28 };
-    if (count <= 15) return { main: 19, time: 16, icon: 24 };
-    if (count <= 20) return { main: 16, time: 14, icon: 20 };
-    return { main: 14, time: 12, icon: 16 };
+    if (count <= 3) return { main: 34, time: 28, icon: 54 };
+    if (count <= 5) return { main: 31, time: 26, icon: 50 };
+    if (count <= 7) return { main: 29, time: 25, icon: 46 };
+    if (count <= 9) return { main: 26, time: 22, icon: 42 };
+    if (count <= 12) return { main: 22, time: 19, icon: 34 };
+    if (count <= 15) return { main: 19, time: 16, icon: 29 };
+    if (count <= 20) return { main: 16, time: 14, icon: 24 };
+    return { main: 14, time: 12, icon: 20 };
   };
 
   const unifiedFontConfig = getUnifiedFontConfig(rowCount);
@@ -364,33 +364,35 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
         >
           {/* Right side in RTL: Transparent Medical Complex Logo (مجمع ميت عزون الطبي) — Enlarged to match Day Banner */}
           <div className="flex flex-col items-center justify-center text-center">
-            {settings.rightLogoUrl &&
-            (settings.rightLogoUrl.startsWith('http') ||
-              settings.rightLogoUrl.startsWith('data:')) ? (
-              <img
-                src={normalizeRightLogoUrl(settings.rightLogoUrl)}
-                alt={settings.complexName}
-                crossOrigin="anonymous"
-                className={`w-auto object-contain drop-shadow-xs ${
-                  isExporting
-                    ? isCompactExport
-                      ? 'h-32 sm:h-36 scale-105'
-                      : 'h-40 sm:h-44 scale-105'
-                    : 'h-28 sm:h-40 scale-105'
-                }`}
-              />
-            ) : (
-              <ComplexBrandLogo
-                className={`w-auto object-contain drop-shadow-xs ${
-                  isExporting
-                    ? isCompactExport
-                      ? 'h-32 sm:h-36 scale-105'
-                      : 'h-40 sm:h-44 scale-105'
-                    : 'h-28 sm:h-40 scale-105'
-                }`}
-                idSuffix={isExporting ? 'export-right' : 'view-right'}
-              />
-            )}
+            {(() => {
+              const normRightUrl = normalizeRightLogoUrl(settings.rightLogoUrl);
+              return normRightUrl.startsWith('http') ||
+                normRightUrl.startsWith('data:') ? (
+                <img
+                  src={normRightUrl}
+                  alt={settings.complexName}
+                  crossOrigin="anonymous"
+                  className={`w-auto object-contain drop-shadow-xs ${
+                    isExporting
+                      ? isCompactExport
+                        ? 'h-44 scale-105'
+                        : 'h-48 scale-110'
+                      : 'h-32 sm:h-44 scale-110'
+                  }`}
+                />
+              ) : (
+                <ComplexBrandLogo
+                  className={`w-auto object-contain drop-shadow-xs ${
+                    isExporting
+                      ? isCompactExport
+                        ? 'h-44 scale-105'
+                        : 'h-48 scale-110'
+                      : 'h-32 sm:h-44 scale-110'
+                  }`}
+                  idSuffix={isExporting ? 'export-right' : 'view-right'}
+                />
+              );
+            })()}
           </div>
 
           {/* Center: Day Banner with Calendar Icon Overlapping Top Edge, Cyan Accent Lines & Sparkles */}
@@ -480,33 +482,35 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
 
           {/* Left side in RTL: Community Development Association Logo (جمعية تنمية المجتمع المحلي بميت عزون) — Enlarged to match Right Complex Logo */}
           <div className="flex flex-col items-center justify-center text-center">
-            {settings.leftLogoUrl &&
-            (settings.leftLogoUrl.startsWith('http') ||
-              settings.leftLogoUrl.startsWith('data:')) ? (
-              <img
-                src={normalizeLeftLogoUrl(settings.leftLogoUrl)}
-                alt={settings.associationName}
-                crossOrigin="anonymous"
-                className={`w-auto object-contain drop-shadow-xs ${
-                  isExporting
-                    ? isCompactExport
-                      ? 'h-32 sm:h-36 scale-105'
-                      : 'h-40 sm:h-44 scale-105'
-                    : 'h-28 sm:h-40 scale-105'
-                }`}
-              />
-            ) : (
-              <AssociationBrandLogo
-                className={`w-auto object-contain drop-shadow-xs ${
-                  isExporting
-                    ? isCompactExport
-                      ? 'h-32 sm:h-36 scale-105'
-                      : 'h-40 sm:h-44 scale-105'
-                    : 'h-28 sm:h-40 scale-105'
-                }`}
-                idSuffix={isExporting ? 'export-left' : 'view-left'}
-              />
-            )}
+            {(() => {
+              const normLeftUrl = normalizeLeftLogoUrl(settings.leftLogoUrl);
+              return normLeftUrl.startsWith('http') ||
+                normLeftUrl.startsWith('data:') ? (
+                <img
+                  src={normLeftUrl}
+                  alt={settings.associationName}
+                  crossOrigin="anonymous"
+                  className={`w-auto object-contain drop-shadow-xs ${
+                    isExporting
+                      ? isCompactExport
+                        ? 'h-44 scale-105'
+                        : 'h-48 scale-110'
+                      : 'h-32 sm:h-44 scale-110'
+                  }`}
+                />
+              ) : (
+                <AssociationBrandLogo
+                  className={`w-auto object-contain drop-shadow-xs ${
+                    isExporting
+                      ? isCompactExport
+                        ? 'h-44 scale-105'
+                        : 'h-48 scale-110'
+                      : 'h-32 sm:h-44 scale-110'
+                  }`}
+                  idSuffix={isExporting ? 'export-left' : 'view-left'}
+                />
+              );
+            })()}
           </div>
         </div>
 
@@ -619,10 +623,10 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                           ? `اختيار نوع العيادة: ${row.clinicName || 'اختر العيادة'}`
                           : undefined
                       }
-                      className={`min-w-0 overflow-hidden bg-[#fdf8f3] flex items-center justify-between gap-1 relative ${
+                      className={`min-w-0 overflow-hidden bg-[#fdf8f3] flex items-center justify-between relative ${
                         isExporting
-                          ? 'px-2 py-0.5 h-full'
-                          : 'px-1 sm:px-2 py-1.5 sm:py-2 min-h-[42px] sm:min-h-[50px]'
+                          ? 'pr-1.5 pl-1 py-0.5 gap-0.5 h-full'
+                          : 'px-1 sm:px-2 py-1.5 sm:py-2 gap-1 min-h-[42px] sm:min-h-[50px]'
                       } ${
                         showControls
                           ? 'cursor-pointer hover:bg-amber-50/90 hover:ring-2 hover:ring-inset hover:ring-amber-400 transition'
@@ -634,13 +638,17 @@ export const SchedulePoster: React.FC<SchedulePosterProps> = ({
                       }`}
                     >
                       {row.clinicName ? (
-                        <div className="shrink-0 flex items-center justify-center">
+                        <div
+                          className={`shrink-0 flex items-center justify-center ${
+                            isExporting ? '-my-1 -ml-1' : '-my-0.5 -ml-0.5'
+                          }`}
+                        >
                           <ClinicMedicalIcon
                             icon={row.icon}
                             color={row.iconColor}
-                            size={isExporting ? exportIconSize : 18}
+                            size={isExporting ? exportIconSize : 22}
                             className={
-                              isExporting ? undefined : 'w-4 h-4 sm:w-5 sm:h-5'
+                              isExporting ? undefined : 'w-5 h-5 sm:w-6 sm:h-6'
                             }
                           />
                         </div>
