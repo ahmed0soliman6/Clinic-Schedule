@@ -233,59 +233,109 @@ async function publishPhotoToFacebookPage(params: {
     pageId
   )}/photos`;
 
-  const form = new FormData();
-  form.append(
-    'source',
-    new Blob([new Uint8Array(jpegBuffer)], { type: 'image/jpeg' }),
-    `schedule-${dayId}.jpg`
-  );
-  if (caption && caption.trim().length > 0) {
-    form.append('caption', caption.trim());
-  }
-  form.append('published', 'true');
-  form.append('access_token', accessToken);
+  const maxAttempts = 2;
+  let lastResult: { ok: boolean; post_id?: string; error?: string; statusCode?: number } = {
+    ok: false,
+    statusCode: 502,
+    error: 'فشل نشر صورة الجدول عبر Meta Graph API v21.0',
+  };
 
-  try {
-    const response = await fetch(graphUrl, {
-      method: 'POST',
-      body: form,
-    });
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const form = new FormData();
+    form.append(
+      'source',
+      new Blob([new Uint8Array(jpegBuffer)], { type: 'image/jpeg' }),
+      `schedule-${dayId}.jpg`
+    );
+    if (caption && caption.trim().length > 0) {
+      form.append('caption', caption.trim());
+    }
+    form.append('published', 'true');
+    form.append('access_token', accessToken);
 
-    const data = (await response.json().catch(() => ({}))) as {
-      id?: string;
-      post_id?: string;
-      error?: {
-        message?: string;
-        type?: string;
-        code?: number;
+    try {
+      const response = await fetch(graphUrl, {
+        method: 'POST',
+        body: form,
+      });
+
+      const data = (await response.json().catch(() => ({}))) as {
+        id?: string;
+        post_id?: string;
+        error?: {
+          message?: string;
+          type?: string;
+          code?: number;
+        };
       };
-    };
 
-    if (!response.ok || data.error) {
-      const fbErrorMsg =
-        data.error?.message || `HTTP ${response.status} من خادم فيسبوك`;
-      const fbErrorCode = data.error?.code ? ` (كود ${data.error.code})` : '';
-      return {
+      if (!response.ok || data.error) {
+        const fbErrorMsg =
+          data.error?.message || `HTTP ${response.status} من خادم فيسبوك`;
+        const fbErrorCode = data.error?.code ? ` (كود ${data.error.code})` : '';
+
+        if (
+          response.status === 401 ||
+          response.status === 403 ||
+          data.error?.code === 190
+        ) {
+          return {
+            ok: false,
+            statusCode: response.status || 401,
+            error: `⚠️ فشل التحقق من صفحة فيسبوك${fbErrorCode}: انتهت صلاحية مفتاح الصفحة (FB_PAGE_ACCESS_TOKEN) أو الصلاحيات غير كافية (${fbErrorMsg}). تحقق من Vercel Environment Variables.`,
+          };
+        }
+
+        if (
+          response.status === 400 &&
+          (data.error?.code === 100 || data.error?.code === 803)
+        ) {
+          return {
+            ok: false,
+            statusCode: 400,
+            error: `⚠️ معرف صفحة فيسبوك (FB_PAGE_ID) غير صحيح أو المعاملات غير مدعومة${fbErrorCode}: ${fbErrorMsg}`,
+          };
+        }
+
+        lastResult = {
+          ok: false,
+          statusCode: response.status || 502,
+          error: `فشل نشر صورة الجدول عبر Meta Graph API v21.0${fbErrorCode}: ${fbErrorMsg}`,
+        };
+
+        if ([400, 401, 403, 429].includes(response.status)) {
+          return lastResult;
+        }
+      } else {
+        const postId = String(data.post_id || data.id || '').trim();
+        if (!postId) {
+          return {
+            ok: false,
+            statusCode: 502,
+            error: 'لم يُرجع فيسبوك معرف المنشور (post_id). تحقق من صلاحيات تطبيق فيسبوك.',
+          };
+        }
+        return {
+          ok: true,
+          statusCode: 200,
+          post_id: postId,
+        };
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      lastResult = {
         ok: false,
-        statusCode: response.status || 502,
-        error: `فشل نشر صورة الجدول عبر Meta Graph API v21.0${fbErrorCode}: ${fbErrorMsg}`,
+        statusCode: 502,
+        error: `تعذر الاتصال بخدمة رفع الصور في Meta Graph API v21.0: ${msg}`,
       };
     }
 
-    const postId = String(data.post_id || data.id || '').trim();
-    return {
-      ok: true,
-      statusCode: 200,
-      post_id: postId,
-    };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return {
-      ok: false,
-      statusCode: 502,
-      error: `تعذر الاتصال بخدمة رفع الصور في Meta Graph API v21.0: ${msg}`,
-    };
+    if (attempt < maxAttempts - 1) {
+      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+    }
   }
+
+  return lastResult;
 }
 
 /**

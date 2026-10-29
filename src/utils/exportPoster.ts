@@ -584,6 +584,27 @@ export async function generatePosterJpeg1080x1350(
     }
   }
 
+  // Secondary safety net: if still >= 900,000 chars, scale down to 900x1125 (still 4:5)
+  if (finalBase64.length >= 900000) {
+    const compactCanvas = document.createElement('canvas');
+    compactCanvas.width = 900;
+    compactCanvas.height = 1125;
+    const compactCtx = compactCanvas.getContext('2d');
+    if (compactCtx) {
+      compactCtx.imageSmoothingEnabled = true;
+      compactCtx.imageSmoothingQuality = 'high';
+      compactCtx.drawImage(canvas, 0, 0, 900, 1125);
+      for (const q of [0.75, 0.60, 0.45]) {
+        finalQuality = q;
+        const dataUrl = compactCanvas.toDataURL('image/jpeg', q);
+        finalBase64 = dataUrl.replace(/^data:image\/jpeg;base64,/, '').trim();
+        if (finalBase64.length < 900000) {
+          break;
+        }
+      }
+    }
+  }
+
   return {
     base64: finalBase64,
     mime: 'image/jpeg',

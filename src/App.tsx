@@ -266,6 +266,7 @@ export default function App() {
     }
   );
   const reminderSettingsRef = useRef<ReminderSettings>(reminderSettings);
+  const inFlightReminderSaveCountRef = useRef<number>(0);
   useEffect(() => {
     reminderSettingsRef.current = reminderSettings;
     try {
@@ -868,6 +869,64 @@ export default function App() {
         (snap) => {
           if (snap.exists()) {
             const remoteReminders = snap.data() as ReminderSettings;
+            // If an admin save is currently in-flight, only merge server-controlled runtime status fields
+            // so a concurrent cron update (e.g., lastCronRunAt) never overwrites the admin's local edit.
+            if (inFlightReminderSaveCountRef.current > 0) {
+              const serverWrittenFields: Partial<ReminderSettings> = {
+                ...(remoteReminders.lastSentDate !== undefined
+                  ? { lastSentDate: remoteReminders.lastSentDate }
+                  : {}),
+                ...(remoteReminders.lastCronRunAt !== undefined
+                  ? { lastCronRunAt: remoteReminders.lastCronRunAt }
+                  : {}),
+                ...(remoteReminders.lastFbPostDate !== undefined
+                  ? { lastFbPostDate: remoteReminders.lastFbPostDate }
+                  : {}),
+                ...(remoteReminders.lastFbPostTargetDate !== undefined
+                  ? { lastFbPostTargetDate: remoteReminders.lastFbPostTargetDate }
+                  : {}),
+                ...(remoteReminders.lastFbPostStatus !== undefined
+                  ? { lastFbPostStatus: remoteReminders.lastFbPostStatus }
+                  : {}),
+                ...(remoteReminders.lastFbPostAt !== undefined
+                  ? { lastFbPostAt: remoteReminders.lastFbPostAt }
+                  : {}),
+                ...(remoteReminders.lastFbPostId !== undefined
+                  ? { lastFbPostId: remoteReminders.lastFbPostId }
+                  : {}),
+                ...(remoteReminders.lastFbPostError !== undefined
+                  ? { lastFbPostError: remoteReminders.lastFbPostError }
+                  : {}),
+                ...(remoteReminders.lastFbPostWarning !== undefined
+                  ? { lastFbPostWarning: remoteReminders.lastFbPostWarning }
+                  : {}),
+                ...(remoteReminders.fbPostAttempts !== undefined
+                  ? { fbPostAttempts: remoteReminders.fbPostAttempts }
+                  : {}),
+                ...(remoteReminders.fbPostLockUntil !== undefined
+                  ? { fbPostLockUntil: remoteReminders.fbPostLockUntil }
+                  : {}),
+                ...(remoteReminders.lastStoryPostAt !== undefined
+                  ? { lastStoryPostAt: remoteReminders.lastStoryPostAt }
+                  : {}),
+                ...(remoteReminders.lastStoryPostStatus !== undefined
+                  ? { lastStoryPostStatus: remoteReminders.lastStoryPostStatus }
+                  : {}),
+                ...(remoteReminders.lastStoryPostError !== undefined
+                  ? { lastStoryPostError: remoteReminders.lastStoryPostError }
+                  : {}),
+                ...(remoteReminders.lastStoryId !== undefined
+                  ? { lastStoryId: remoteReminders.lastStoryId }
+                  : {}),
+              };
+              setReminderSettings((prev) => ({
+                ...prev,
+                ...serverWrittenFields,
+                timezone: 'Africa/Cairo',
+              }));
+              return;
+            }
+
             if (typeof remoteReminders.showFacebookCard === 'boolean') {
               setShowFacebookCard(remoteReminders.showFacebookCard);
               try {
@@ -1878,15 +1937,11 @@ export default function App() {
       return { ok: true };
     }
 
+    inFlightReminderSaveCountRef.current += 1;
     try {
       const reminderRef = doc(db, 'appConfig', 'reminders');
-      const existingSnap = await getDoc(reminderRef);
-      const remoteExisting = existingSnap.exists()
-        ? (existingSnap.data() as Partial<ReminderSettings>)
-        : {};
       const mergedSource: Partial<ReminderSettings> = {
         ...DEFAULT_REMINDER_SETTINGS,
-        ...remoteExisting,
         ...previousState,
         ...patch,
       };
@@ -1895,11 +1950,7 @@ export default function App() {
         firebaseUser.uid,
         firebaseUser.email || PRIMARY_ADMIN_EMAIL
       );
-      if (existingSnap.exists()) {
-        await updateDoc(reminderRef, reminderPayload);
-      } else {
-        await setDoc(reminderRef, reminderPayload);
-      }
+      await setDoc(reminderRef, reminderPayload, { merge: true });
       return { ok: true };
     } catch (err) {
       reminderSettingsRef.current = previousState;
@@ -1911,6 +1962,11 @@ export default function App() {
         // Handled
       }
       return { ok: false, error: rollbackErrorMsg };
+    } finally {
+      inFlightReminderSaveCountRef.current = Math.max(
+        0,
+        inFlightReminderSaveCountRef.current - 1
+      );
     }
   };
 
