@@ -35,10 +35,12 @@ import {
 import {
   DAYS_LIST,
   DEFAULT_POST_TEMPLATE,
+  INSTAGRAM_OFFICIAL_URL,
   WHATSAPP_CHANNEL_SHORT_URL,
   buildDailySocialPostText,
   emailToDocId,
   filterNonEmptyRows,
+  normalizePostTemplateInstagramUrl,
   PRIMARY_ADMIN_EMAIL,
 } from '../src/utils/scheduleLogic.js';
 
@@ -157,7 +159,7 @@ function formatFacebookSchedulePost(params: {
   const rawTemplate =
     typeof settings.postTemplate === 'string' &&
     settings.postTemplate.trim().length > 0
-      ? settings.postTemplate.trim()
+      ? normalizePostTemplateInstagramUrl(settings.postTemplate.trim())
       : DEFAULT_POST_TEMPLATE;
 
   if (rawTemplate.includes('{العيادات}')) {
@@ -177,6 +179,7 @@ function formatFacebookSchedulePost(params: {
       .replace(/\{تسمية_الأسنان\}/g, dentalLabel)
       .replace(/\{رابط_الواتساب\}/g, waUrl)
       .replace(/\{قناة_الواتساب\}/g, WHATSAPP_CHANNEL_SHORT_URL)
+      .replace(/\{انستجرام\}/g, INSTAGRAM_OFFICIAL_URL)
       .replace(/\{العيادات\}/g, clinicsBlock);
   }
 
@@ -783,6 +786,7 @@ async function executeAutomatedFacebookPublish(params: {
       storedPosterImage,
       dayLabel: targetDayLabel,
       settings: centerSettings,
+      rows: targetRows,
       isManualTrigger: false,
     });
 
@@ -1120,6 +1124,7 @@ async function handleFbAutoAdminAction(
         storedPosterImage,
         dayLabel: targetMeta.dayLabel,
         settings: centerSettings,
+        rows: scheduleRows,
         isManualTrigger: false,
       });
 
@@ -1386,6 +1391,7 @@ async function handleFacebookPostAction(
       storedPosterImage,
       dayLabel,
       settings: centerSettings,
+      rows: scheduleRows,
       isManualTrigger: !isCronAuthorized,
     });
 

@@ -1,44 +1,28 @@
-import { CenterSettings, FacebookPostMode } from '../types/schedule.js';
-import { WHATSAPP_CHANNEL_SHORT_URL } from './scheduleLogic.js';
+import {
+  CenterSettings,
+  FacebookPostMode,
+  ScheduleRow,
+} from '../types/schedule.js';
+import {
+  INSTAGRAM_OFFICIAL_URL,
+  buildDailySocialPostText,
+} from './scheduleLogic.js';
 
-export const INSTAGRAM_PAGE_URL = 'https://www.instagram.com/mit.azzoun.medical';
+export const INSTAGRAM_PAGE_URL = INSTAGRAM_OFFICIAL_URL;
 
 export interface ShortFacebookCaptionParams {
   dayLabel: string;
   settings: CenterSettings;
+  rows?: ScheduleRow[];
 }
 
 /**
- * Builds a clean, short caption for Facebook photo posts.
- * It contains day title, address, contact numbers, and official channels,
- * and intentionally DOES NOT repeat the clinics list because the high-resolution
- * poster image already presents all clinics and doctors clearly.
+ * Builds the Facebook photo post caption directly from the user-editable
+ * "صندوق البوست" template (`settings.postTemplate`, falling back to `DEFAULT_POST_TEMPLATE`).
  */
 export function buildShortFacebookCaption(params: ShortFacebookCaptionParams): string {
-  const { dayLabel, settings } = params;
-  const cleanWa = (settings.whatsappPhone || '').replace(/\D/g, '');
-  const waIntl = cleanWa.startsWith('2') ? cleanWa : `2${cleanWa}`;
-  const waUrl = `https://wa.me/${waIntl}`;
-
-  const complexName = (settings.complexName || 'مجمع ميت عزون الطبي').trim();
-  const address = (settings.address || 'ميت عزون - بجوار المسجد الكبير').trim();
-  const waPhone = (settings.whatsappPhone || '01202027567').trim();
-  const landline = (settings.landlinePhone || '0502053187').trim();
-  const dentalPhone = (settings.dentalPhone || '01515674347').trim();
-  const dentalLabel = (settings.dentalLabel || 'عيادة الأسنان').trim();
-
-  return [
-    `جدول عيادات يوم ${dayLabel} — ${complexName}`,
-    `📍 ${address}`,
-    '',
-    '📞 للحجز والاستفسار:',
-    `• واتساب: ${waPhone} 👉 ${waUrl}`,
-    `• هاتف أرضي: ${landline}`,
-    `• ${dentalLabel}: ${dentalPhone}`,
-    '',
-    `📢 قناة الواتساب: ${WHATSAPP_CHANNEL_SHORT_URL}`,
-    `📷 إنستغرام: ${INSTAGRAM_PAGE_URL}`,
-  ].join('\n');
+  const { dayLabel, settings, rows } = params;
+  return buildDailySocialPostText(dayLabel, settings, rows);
 }
 
 export const MAX_PHOTO_BYTES = 3 * 1024 * 1024; // 3MB
@@ -133,6 +117,7 @@ export interface PostDecisionInput {
   } | null;
   dayLabel: string;
   settings: CenterSettings;
+  rows?: ScheduleRow[];
   isManualTrigger: boolean;
 }
 
@@ -181,6 +166,7 @@ export function decideFacebookPublishPlan(input: PostDecisionInput): PostDecisio
     storedPosterImage,
     dayLabel,
     settings,
+    rows,
     isManualTrigger,
   } = input;
 
@@ -278,7 +264,7 @@ export function decideFacebookPublishPlan(input: PostDecisionInput): PostDecisio
 
   const caption =
     mode === 'photo_with_caption'
-      ? buildShortFacebookCaption({ dayLabel, settings })
+      ? buildShortFacebookCaption({ dayLabel, settings, rows })
       : undefined;
 
   return {

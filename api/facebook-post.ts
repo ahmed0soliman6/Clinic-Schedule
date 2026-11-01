@@ -17,10 +17,12 @@ import { resolveTargetDayId } from '../src/utils/reminderLogic.js';
 import {
   DAYS_LIST,
   DEFAULT_POST_TEMPLATE,
+  INSTAGRAM_OFFICIAL_URL,
   WHATSAPP_CHANNEL_SHORT_URL,
   buildDailySocialPostText,
   emailToDocId,
   filterNonEmptyRows,
+  normalizePostTemplateInstagramUrl,
   PRIMARY_ADMIN_EMAIL,
 } from '../src/utils/scheduleLogic.js';
 
@@ -128,7 +130,7 @@ function formatFacebookScheduleFullText(params: {
   const rawTemplate =
     typeof settings.postTemplate === 'string' &&
     settings.postTemplate.trim().length > 0
-      ? settings.postTemplate.trim()
+      ? normalizePostTemplateInstagramUrl(settings.postTemplate.trim())
       : DEFAULT_POST_TEMPLATE;
 
   if (rawTemplate.includes('{العيادات}')) {
@@ -148,6 +150,7 @@ function formatFacebookScheduleFullText(params: {
       .replace(/\{تسمية_الأسنان\}/g, dentalLabel)
       .replace(/\{رابط_الواتساب\}/g, waUrl)
       .replace(/\{قناة_الواتساب\}/g, WHATSAPP_CHANNEL_SHORT_URL)
+      .replace(/\{انستجرام\}/g, INSTAGRAM_OFFICIAL_URL)
       .replace(/\{العيادات\}/g, clinicsBlock);
   }
 
@@ -561,6 +564,7 @@ export default async function facebookPostHandler(
       storedPosterImage,
       dayLabel,
       settings: centerSettings,
+      rows: scheduleRows,
       isManualTrigger: !isCronAuthorized,
     });
 

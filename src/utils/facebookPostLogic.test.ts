@@ -40,24 +40,39 @@ function createDummyJpegBuffer(byteLength = 128): Buffer {
 }
 
 describe('Facebook Post Pure Logic Tests', () => {
-  test('buildShortFacebookCaption includes contact info and links without repeating clinics', () => {
+  test('buildShortFacebookCaption uses DEFAULT_POST_TEMPLATE and custom settings.postTemplate with updated Instagram URL', () => {
     const caption = buildShortFacebookCaption({
       dayLabel: 'السبت',
       settings: MOCK_SETTINGS,
     });
 
     assert.ok(caption.includes('جدول عيادات يوم السبت'), 'Should contain day label');
-    assert.ok(caption.includes('مجمع ميت عزون الطبي'), 'Should contain complex name');
     assert.ok(caption.includes('01202027567'), 'Should contain whatsapp phone');
     assert.ok(caption.includes('https://wa.me/201202027567'), 'Should contain whatsapp link');
     assert.ok(caption.includes('0502053187'), 'Should contain landline phone');
     assert.ok(caption.includes('01515674347'), 'Should contain dental clinic phone');
     assert.ok(caption.includes('https://is.gd/cDsyaR'), 'Should contain whatsapp channel url');
-    assert.ok(caption.includes('https://www.instagram.com/mit.azzoun.medical'), 'Should contain instagram url');
+    assert.ok(caption.includes('https://www.instagram.com/mitazzoun.medical'), 'Should contain updated instagram url');
 
-    // Should NOT repeat the clinics list as text because the poster image contains it all
+    // Should NOT repeat the clinics list as text when {العيادات} is not in template
     assert.ok(!caption.includes('الجراحة العامة'), 'Must not contain specific clinic row text');
     assert.ok(!caption.includes('الباطنة'), 'Must not contain specific clinic row text');
+
+    // Custom postTemplate from "صندوق البوست" must be used directly in auto/manual Facebook posts
+    const customCaption = buildShortFacebookCaption({
+      dayLabel: 'الأحد',
+      settings: {
+        ...MOCK_SETTINGS,
+        postTemplate:
+          'جدول عيادات يوم {اليوم}\nواتس أب للتواصل 👈 {رابط_الواتساب}\nانستجرام\nhttps://www.instagram.com/mit.azzoun.medical:\nقناة الواتس آب https://is.gd/cDsyaR\n{الواتساب} {الأرضي}\n{العنوان}',
+      },
+    });
+    assert.ok(customCaption.includes('جدول عيادات يوم الأحد'));
+    assert.ok(customCaption.includes('https://www.instagram.com/mitazzoun.medical'));
+    assert.ok(!customCaption.includes('mit.azzoun.medical'));
+    assert.ok(!customCaption.includes('mitazzoun.medical:'));
+    assert.ok(customCaption.includes('01202027567 0502053187'));
+    assert.ok(customCaption.includes('ميت عزون - بجوار المسجد الكبير'));
   });
 
   test('validateJpegBuffer correctly verifies JPEG magic bytes (FF D8 FF)', () => {

@@ -83,6 +83,7 @@ import {
   deleteUserFromList,
   detectConcurrentConflict,
   emailToDocId,
+  normalizePostTemplateInstagramUrl,
   executeWithRetry,
   filterNonEmptyRows,
   formatFirestoreCommitError,
@@ -710,7 +711,17 @@ export default function App() {
       (snap) => {
         if (snap.exists()) {
           const remoteSettings = snap.data() as CenterSettings;
-          setSettings((prev) => ({ ...prev, ...remoteSettings }));
+          setSettings((prev) => ({
+            ...prev,
+            ...remoteSettings,
+            ...(typeof remoteSettings.postTemplate === 'string'
+              ? {
+                  postTemplate: normalizePostTemplateInstagramUrl(
+                    remoteSettings.postTemplate
+                  ),
+                }
+              : {}),
+          }));
         }
       },
       () => {
@@ -1859,7 +1870,17 @@ export default function App() {
 
   const handleSaveSettings = async (newSettings: CenterSettings) => {
     if (activeRole !== 'ADMIN') return;
-    setSettings(newSettings);
+    const normalizedSettings: CenterSettings = {
+      ...newSettings,
+      ...(typeof newSettings.postTemplate === 'string'
+        ? {
+            postTemplate: normalizePostTemplateInstagramUrl(
+              newSettings.postTemplate
+            ),
+          }
+        : {}),
+    };
+    setSettings(normalizedSettings);
 
     await appendAuditLog(
       'UPDATE_SETTINGS',
@@ -1871,7 +1892,7 @@ export default function App() {
     if (firebaseUser) {
       try {
         await setDoc(doc(db, 'settings', 'center'), {
-          ...newSettings,
+          ...normalizedSettings,
           updatedBy: firebaseUser.uid,
           updatedByEmail: firebaseUser.email || PRIMARY_ADMIN_EMAIL,
           updatedAt: serverTimestamp(),

@@ -298,7 +298,7 @@ test('RBAC permissions, empty new row creation, 4:5 export aspect ratio, and dai
   assert.ok(postText.includes('☎️ 0502053187 - 📲 01202027567'));
   assert.ok(postText.includes('عيادة الأسنان. 01515674347'));
   assert.ok(postText.includes('https://wa.me/201202027567'));
-  assert.ok(postText.includes('https://www.instagram.com/mit.azzoun.medical'));
+  assert.ok(postText.includes('https://www.instagram.com/mitazzoun.medical'));
   assert.ok(postText.includes('https://is.gd/cDsyaR'));
 
   // Verify custom postTemplate controlled from Settings with {اليوم}, {العيادات}, {الواتساب}, {العنوان}

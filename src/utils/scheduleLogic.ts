@@ -729,13 +729,28 @@ export function normalizeLeftLogoUrl(url?: string): string {
 export const WHATSAPP_CHANNEL_FULL_URL =
   'https://whatsapp.com/channel/0029VbBQQMDLdQegbOa0DQ2l';
 export const WHATSAPP_CHANNEL_SHORT_URL = 'https://is.gd/cDsyaR';
+export const INSTAGRAM_OFFICIAL_URL =
+  'https://www.instagram.com/mitazzoun.medical';
+
+export function normalizePostTemplateInstagramUrl(text?: string): string {
+  if (!text) return '';
+  return text
+    .replace(
+      /https?:\/\/(?:www\.)?instagram\.com\/mit\.azzoun\.medical:?/gi,
+      INSTAGRAM_OFFICIAL_URL
+    )
+    .replace(
+      /https?:\/\/(?:www\.)?instagram\.com\/mitazzoun\.medical:/gi,
+      INSTAGRAM_OFFICIAL_URL
+    );
+}
 
 export const DEFAULT_POST_TEMPLATE = [
   'جدول عيادات يوم {اليوم}',
   '☎️ {الأرضي} - 📲 {الواتساب}',
   '{تسمية_الأسنان}. {الأسنان}',
   'واتس أب للتواصل 👈 {رابط_الواتساب}',
-  'انستجرام https://www.instagram.com/mit.azzoun.medical',
+  `انستجرام ${INSTAGRAM_OFFICIAL_URL}`,
   `قناة الواتس آب ${WHATSAPP_CHANNEL_SHORT_URL}`,
 ].join('\n');
 
@@ -744,7 +759,7 @@ export function buildDailySocialPostText(
   settings: CenterSettings,
   rows?: ScheduleRow[]
 ): string {
-  const cleanWa = settings.whatsappPhone.replace(/\D/g, '');
+  const cleanWa = (settings.whatsappPhone || '').replace(/\D/g, '');
   const waIntl = cleanWa.startsWith('2') ? cleanWa : `2${cleanWa}`;
   const waUrl = `https://wa.me/${waIntl}`;
   const dentalLabel = (settings.dentalLabel || 'عيادة الأسنان').trim();
@@ -761,7 +776,7 @@ export function buildDailySocialPostText(
 
   const rawTemplate =
     typeof settings.postTemplate === 'string' && settings.postTemplate.trim().length > 0
-      ? settings.postTemplate
+      ? normalizePostTemplateInstagramUrl(settings.postTemplate)
       : DEFAULT_POST_TEMPLATE;
 
   return rawTemplate
@@ -775,6 +790,7 @@ export function buildDailySocialPostText(
     .replace(/\{تسمية_الأسنان\}/g, dentalLabel)
     .replace(/\{رابط_الواتساب\}/g, waUrl)
     .replace(/\{قناة_الواتساب\}/g, WHATSAPP_CHANNEL_SHORT_URL)
+    .replace(/\{انستجرام\}/g, INSTAGRAM_OFFICIAL_URL)
     .replace(/\{العيادات\}/g, clinicsText);
 }
 
