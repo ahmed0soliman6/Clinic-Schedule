@@ -191,7 +191,7 @@ export const ScheduleEditorPanel: React.FC<ScheduleEditorPanelProps> = ({
               {saveStatus === 'saved' && (
                 <span className="text-emerald-700 flex items-center gap-1" data-testid="save-status-indicator">
                   <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                  تم الحفظ تلقائيًا (مزامنة فورية)
+                  تم الحفظ وتحديث البوستر تلقائيًا ✓
                 </span>
               )}
               {saveStatus === 'unsaved' && (

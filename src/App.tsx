@@ -429,6 +429,7 @@ export default function App() {
     thursday: null,
     friday: null,
   });
+  const isPosterSyncingRef = useRef(false);
 
   const isDaySavingOrPending = (dayId: DayId): boolean => {
     return (
@@ -1376,9 +1377,19 @@ export default function App() {
         flushAllPendingDebouncedSaves();
       }
     };
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      const isAnyDayPending = DAYS_LIST.some((d) => isDaySavingOrPending(d.id));
+      if (isAnyDayPending || isPosterSyncingRef.current) {
+        flushAllPendingDebouncedSaves();
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
     window.addEventListener('pagehide', handlePageHide);
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
       window.removeEventListener('pagehide', handlePageHide);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
@@ -1558,7 +1569,7 @@ export default function App() {
   const currentSchedule = schedules[selectedDay];
 
   // Auto-sync 1080x1350 JPEG poster to Firestore posterImages/{dayId} + posterMeta/{dayId} after successful save
-  // (when version changes) with 1.5s debounce, exclusively for logged-in staff and currently active day
+  // (when version changes) with 200ms fast debounce, exclusively for logged-in staff and currently active day
   const currentDayVersion = currentSchedule?.version;
   useEffect(() => {
     if (!firebaseUser || !activeRole) return;
@@ -1566,6 +1577,7 @@ export default function App() {
     if (!canUserEditDay(activeRole, allowedDays, selectedDay)) return;
 
     const timer = setTimeout(async () => {
+      isPosterSyncingRef.current = true;
       try {
         const sched = schedulesRef.current[selectedDay];
         if (!sched) return;
@@ -1582,8 +1594,10 @@ export default function App() {
         });
       } catch {
         // Silently catch background poster generation errors
+      } finally {
+        isPosterSyncingRef.current = false;
       }
-    }, 1500);
+    }, 200);
 
     return () => clearTimeout(timer);
   }, [
