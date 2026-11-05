@@ -918,18 +918,6 @@ export default function App() {
                 ...(remoteReminders.fbPostLockUntil !== undefined
                   ? { fbPostLockUntil: remoteReminders.fbPostLockUntil }
                   : {}),
-                ...(remoteReminders.lastStoryPostAt !== undefined
-                  ? { lastStoryPostAt: remoteReminders.lastStoryPostAt }
-                  : {}),
-                ...(remoteReminders.lastStoryPostStatus !== undefined
-                  ? { lastStoryPostStatus: remoteReminders.lastStoryPostStatus }
-                  : {}),
-                ...(remoteReminders.lastStoryPostError !== undefined
-                  ? { lastStoryPostError: remoteReminders.lastStoryPostError }
-                  : {}),
-                ...(remoteReminders.lastStoryId !== undefined
-                  ? { lastStoryId: remoteReminders.lastStoryId }
-                  : {}),
               };
               setReminderSettings((prev) => ({
                 ...prev,
@@ -2340,6 +2328,52 @@ export default function App() {
     }
   };
 
+  const handleResetFbAttempts = async (): Promise<{
+    ok: boolean;
+    message?: string;
+    error?: string;
+  }> => {
+    if (!firebaseUser || activeRole !== 'ADMIN') {
+      return { ok: false, error: 'غير مصرح بهذا الإجراء (مطلوب حساب مدير).' };
+    }
+    try {
+      const idToken = await firebaseUser.getIdToken();
+      const response = await fetch(
+        '/api/send-reminders?action=fb-auto&mode=reset_attempts',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${idToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ mode: 'reset_attempts' }),
+        }
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        return {
+          ok: false,
+          error:
+            data.error ||
+            data.message ||
+            `تعذر تصفير عداد المحاولات (HTTP ${response.status}).`,
+        };
+      }
+      return {
+        ok: true,
+        message:
+          data.message ||
+          'تم تصفير عداد المحاولات بنجاح. المجدول مستعد لإعادة المحاولة فوراً.',
+      };
+    } catch {
+      return {
+        ok: false,
+        error:
+          'تعذر الوصول إلى نقطة /api/send-reminders (تعمل على Vercel في بيئة الإنتاج).',
+      };
+    }
+  };
+
   const handlePublishFacebookNow = async (params?: {
     dayId?: DayId;
     dayLabel?: string;
@@ -3391,6 +3425,7 @@ export default function App() {
           onPrepareAllWeekPosters={handlePrepareAllWeekPosters}
           onDryRunAutoPost={handleDryRunAutoPost}
           onRunAutoPostNow={handleRunAutoPostNow}
+          onResetFbAttempts={handleResetFbAttempts}
           onClose={() => setShowRemindersModal(false)}
         />
       )}

@@ -57,6 +57,7 @@ interface RemindersAndAutoPostModalProps {
   onRunAutoPostNow?: (
     force?: boolean
   ) => Promise<Record<string, unknown>>;
+  onResetFbAttempts?: () => Promise<{ ok: boolean; message?: string; error?: string }>;
   onClose: () => void;
 }
 
@@ -181,8 +182,39 @@ export const RemindersAndAutoPostModal: React.FC<
   onPrepareAllWeekPosters,
   onDryRunAutoPost,
   onRunAutoPostNow,
+  onResetFbAttempts,
   onClose,
 }) => {
+  const [resettingAttempts, setResettingAttempts] = useState(false);
+  const [resetAttemptsMsg, setResetAttemptsMsg] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
+
+  const handleResetAttemptsClick = async () => {
+    if (!onResetFbAttempts || resettingAttempts) return;
+    setResettingAttempts(true);
+    setResetAttemptsMsg(null);
+    try {
+      const res = await onResetFbAttempts();
+      if (res.ok) {
+        setResetAttemptsMsg({
+          ok: true,
+          text: res.message || 'تم تصفير عداد المحاولات بنجاح. المجدول مستعد لإعادة المحاولة.',
+        });
+      } else {
+        setResetAttemptsMsg({
+          ok: false,
+          text: res.error || 'تعذر تصفير العداد.',
+        });
+      }
+    } catch {
+      setResetAttemptsMsg({ ok: false, text: 'تعذر الاتصال بالخادم.' });
+    } finally {
+      setResettingAttempts(false);
+    }
+  };
+
   const [reminderDraft, setReminderDraft] =
     useState<ClientEditableReminderSettings>(() =>
       buildEditableDraftFromProps(reminderSettings)
@@ -925,12 +957,40 @@ export const RemindersAndAutoPostModal: React.FC<
 
               {reminderSettings?.fbPostAttempts &&
                 reminderSettings.fbPostAttempts.count > 0 && (
-                  <div className="text-[11px] font-bold text-slate-600">
-                    عدد المحاولات المسجلة لتاريخ{' '}
-                    <span className="font-extrabold">
-                      {reminderSettings.fbPostAttempts.date}
-                    </span>
-                    : {reminderSettings.fbPostAttempts.count} / 4
+                  <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-slate-50 border border-slate-200">
+                    <div className="text-[11px] font-bold text-slate-700">
+                      عدد المحاولات المسجلة لتاريخ{' '}
+                      <span className="font-extrabold text-slate-900">
+                        {reminderSettings.fbPostAttempts.date}
+                      </span>
+                      : <span className={reminderSettings.fbPostAttempts.count >= 4 ? 'text-rose-600 font-black' : 'text-slate-900 font-extrabold'}>{reminderSettings.fbPostAttempts.count} / 4</span>
+                      {reminderSettings.fbPostAttempts.count >= 4 && (
+                        <span className="text-[10px] text-rose-600 font-bold block sm:inline sm:mr-1">
+                          (استُنفدت المحاولات وتوقف المجدول مؤقتاً لهذا اليوم)
+                        </span>
+                      )}
+                    </div>
+                    {onResetFbAttempts && (
+                      <button
+                        type="button"
+                        onClick={handleResetAttemptsClick}
+                        disabled={resettingAttempts}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-extrabold text-amber-900 bg-amber-100 hover:bg-amber-200 rounded-lg transition-colors border border-amber-300 disabled:opacity-50"
+                        title="تصفير عداد المحاولات للسماح للمجدول الآلي بإعادة المحاولة فوراً"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${resettingAttempts ? 'animate-spin' : ''}`} />
+                        <span>تصفير العداد والمحاولة مجدداً</span>
+                      </button>
+                    )}
+                    {resetAttemptsMsg && (
+                      <div
+                        className={`w-full text-[10px] font-bold mt-1 ${
+                          resetAttemptsMsg.ok ? 'text-emerald-700' : 'text-rose-600'
+                        }`}
+                      >
+                        {resetAttemptsMsg.text}
+                      </div>
+                    )}
                   </div>
                 )}
             </div>

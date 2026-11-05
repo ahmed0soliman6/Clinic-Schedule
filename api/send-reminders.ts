@@ -1024,7 +1024,11 @@ async function handleFbAutoAdminAction(
     const rawMode = req.query?.mode;
     const queryMode = Array.isArray(rawMode) ? rawMode[0] : rawMode;
     const mode =
-      queryMode === 'now' || payload.mode === 'now' ? 'now' : 'dry';
+      queryMode === 'now' || payload.mode === 'now'
+        ? 'now'
+        : queryMode === 'reset_attempts' || payload.mode === 'reset_attempts'
+        ? 'reset_attempts'
+        : 'dry';
     const force =
       payload.force === true ||
       req.query?.force === '1' ||
@@ -1032,6 +1036,23 @@ async function handleFbAutoAdminAction(
 
     const now = new Date();
     const remindersRef = db.collection('appConfig').doc('reminders');
+
+    if (mode === 'reset_attempts') {
+      await remindersRef.set(
+        {
+          fbPostAttempts: { date: '', count: 0 },
+          fbPostLockUntil: 0,
+          lastFbPostError: null,
+        },
+        { merge: true }
+      );
+      res.status(200).json({
+        ok: true,
+        message: 'تم تصفير عداد محاولات النشر بنجاح. المجدول الآلي جاهز للمحاولة مجدداً.',
+      });
+      return;
+    }
+
     const remindersSnap = await remindersRef.get();
     const reminderConfig: ReminderSettings = remindersSnap.exists
       ? {
