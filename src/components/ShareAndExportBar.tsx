@@ -5,6 +5,7 @@ import {
   Download,
   Globe,
   MessageSquareText,
+  RefreshCw,
   Send,
   Share2,
   Smartphone,
@@ -54,6 +55,7 @@ interface ShareAndExportBarProps {
     rows: ScheduleRow[];
     onStageChange?: (stage: 'preparing_image' | 'publishing') => void;
   }) => Promise<{ ok: boolean; message: string; post_id?: string }>;
+  onRefreshSchedule?: () => Promise<{ ok: boolean; message: string }>;
 }
 
 function copyTextToClipboardSync(text: string): void {
@@ -97,8 +99,10 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
   onChangeFbTargetDay,
   onChangeFbAutoPostTime,
   onPublishFacebookNow,
+  onRefreshSchedule,
 }) => {
   const [isExporting, setIsExporting] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [cachedPoster, setCachedPoster] = useState<{
     dataUrl: string;
     file: File;
@@ -378,6 +382,31 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
     }
   };
 
+  const handleRefreshScheduleClick = async () => {
+    if (isRefreshing) return;
+    setIsRefreshing(true);
+    setStatusBanner(null);
+    try {
+      if (onRefreshSchedule) {
+        const res = await onRefreshSchedule();
+        setStatusBanner(res.message);
+      } else {
+        const assets = await preparePosterExportAssets(
+          dayLabel,
+          rows,
+          settings,
+          posterRef.current
+        );
+        setCachedPoster({ ...assets, dayLabel });
+        setStatusBanner(`✅ تم تحديث جدول يوم ${dayLabel} بنجاح!`);
+      }
+    } catch {
+      setStatusBanner('حدث خطأ أثناء تحديث الجدول من السحابة. حاول مرة أخرى.');
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
   const liveAutoPostLine = buildLiveAutoPostPreviewLine({
     fbTargetDay,
     fbAutoPostTime,
@@ -389,10 +418,10 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
       dir="rtl"
       className="mx-auto w-full max-w-[780px] rounded-2xl bg-white p-2.5 sm:p-3.5 shadow-sm border border-purple-100 space-y-2.5"
     >
-      {/* 4 Action Buttons in ONE Single Row: مشاركة | مشاركة+بوست (مكبّر) | بوست | أيقونة التنزيل (مصغّر) */}
+      {/* Action Buttons in ONE Single Row: مشاركة | مشاركة+بوست (مكبّر) | بوست | تحديث الجدول | أيقونة التنزيل */}
       <div
         data-testid="share-buttons-grid"
-        className="grid grid-cols-[1fr_1.35fr_1fr_auto] gap-1.5 sm:gap-2.5 items-center"
+        className="grid grid-cols-[1fr_1.3fr_0.9fr_auto_auto] gap-1 sm:gap-2 items-center"
       >
         {/* Button 1: مشاركة (صورة فقط بدون بوست) */}
         <button
@@ -412,9 +441,9 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
           onClick={handleNativeMobileShareWithPost}
           data-testid="share-native-btn"
           title="مشاركة ملف الصورة مع البوست مباشرة عبر تطبيقات الهاتف"
-          className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-2 sm:px-3.5 py-2.5 text-xs sm:text-sm md:text-base font-black text-white whitespace-nowrap shadow-md hover:bg-indigo-700 transition cursor-pointer"
+          className="w-full inline-flex items-center justify-center gap-1 sm:gap-1.5 rounded-xl bg-indigo-600 px-1.5 sm:px-3.5 py-2.5 text-xs sm:text-sm md:text-base font-black text-white whitespace-nowrap shadow-md hover:bg-indigo-700 transition cursor-pointer"
         >
-          <Smartphone className="w-4.5 h-4.5 sm:w-5 sm:h-5 shrink-0" />
+          <Smartphone className="w-4 h-4 sm:w-5 sm:h-5 shrink-0" />
           <span>مشاركة+بوست</span>
         </button>
 
@@ -424,7 +453,7 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
           onClick={() => setShowPostBox((prev) => !prev)}
           data-testid="toggle-post-caption-btn"
           title={`عرض ونسخ النص الترويجي لبوست يوم ${dayLabel}`}
-          className={`w-full inline-flex items-center justify-center gap-1 sm:gap-1.5 rounded-xl border-2 px-1 sm:px-3 py-2.5 text-[11px] sm:text-xs md:text-sm font-black whitespace-nowrap shadow-xs transition cursor-pointer ${
+          className={`w-full inline-flex items-center justify-center gap-1 sm:gap-1.5 rounded-xl border-2 px-1 sm:px-2.5 py-2.5 text-[11px] sm:text-xs md:text-sm font-black whitespace-nowrap shadow-xs transition cursor-pointer ${
             showPostBox
               ? 'border-purple-600 bg-purple-100 text-purple-950'
               : 'border-purple-300 bg-purple-50 text-purple-950 hover:bg-purple-100'
@@ -434,14 +463,31 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
           <span>بوست</span>
         </button>
 
-        {/* Button 4: تنزيل صورة الجدول (أيقونة تنزيل مصغّرة بدون كلمة حفظ) */}
+        {/* Button 4: تحديث الجدول ومزامنة الصورة (ظاهر لجميع المستخدمين) */}
+        <button
+          type="button"
+          onClick={handleRefreshScheduleClick}
+          disabled={isRefreshing}
+          data-testid="refresh-schedule-btn"
+          title="تحديث الجدول من السحابة ومزامنة صورة البوستر فوراً"
+          className="inline-flex items-center justify-center gap-1 sm:gap-1.5 rounded-xl bg-emerald-600 px-2 sm:px-3 py-2.5 text-[11px] sm:text-xs md:text-sm font-black text-white whitespace-nowrap shadow-xs hover:bg-emerald-700 disabled:opacity-60 transition cursor-pointer"
+        >
+          <RefreshCw
+            className={`w-4 h-4 sm:w-4.5 sm:h-4.5 shrink-0 ${
+              isRefreshing ? 'animate-spin' : ''
+            }`}
+          />
+          <span>{isRefreshing ? 'جارٍ التحديث...' : 'تحديث الجدول'}</span>
+        </button>
+
+        {/* Button 5: تنزيل صورة الجدول (أيقونة تنزيل مصغّرة بدون كلمة حفظ) */}
         <button
           type="button"
           onClick={handleDownload4x5Png}
           disabled={isExporting}
           data-testid="export-png-btn"
           title="تنزيل صورة الجدول PNG بأبعاد 4:5 ثابتة"
-          className="inline-flex items-center justify-center rounded-xl bg-purple-700 px-2.5 sm:px-3.5 py-2.5 text-white shadow-xs hover:bg-purple-800 disabled:opacity-60 transition cursor-pointer"
+          className="inline-flex items-center justify-center rounded-xl bg-purple-700 px-2 sm:px-3 py-2.5 text-white shadow-xs hover:bg-purple-800 disabled:opacity-60 transition cursor-pointer"
         >
           <Download className="w-4.5 h-4.5 sm:w-5 sm:h-5 shrink-0" />
         </button>

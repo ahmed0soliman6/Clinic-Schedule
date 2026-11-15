@@ -1,5 +1,5 @@
 import { doc, serverTimestamp, writeBatch } from 'firebase/firestore';
-import { db } from '../firebase';
+import { auth, db } from '../firebase';
 import {
   CenterSettings,
   DayId,
@@ -21,6 +21,7 @@ export interface SyncPosterResult {
  * Generates an exact 1080x1350 JPEG poster from the current day's poster DOM node
  * and saves it to Firestore at `posterImages/{dayId}` and `posterMeta/{dayId}` in a single batch.
  * Strictly checks that base64 size is < 900,000 characters to comply with Firestore limits and security rules.
+ * Also non-blockingly resets any stale server-side auto-post attempts/error lock so the scheduler can publish immediately.
  */
 export async function syncPosterImageToFirestore(params: {
   dayId: DayId;
@@ -80,6 +81,23 @@ export async function syncPosterImageToFirestore(params: {
     batch.set(doc(db, 'posterImages', dayId), docPayload);
     batch.set(doc(db, 'posterMeta', dayId), metaPayload);
     await batch.commit();
+
+    // Non-blocking: Clear any stale Facebook auto-post error/attempt lock when a fresh poster is synced
+    if (auth.currentUser) {
+      auth.currentUser
+        .getIdToken()
+        .then((idToken) =>
+          fetch('/api/send-reminders?action=fb-auto&mode=reset_attempts', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${idToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ mode: 'reset_attempts', dayId, version: safeVersion }),
+          })
+        )
+        .catch(() => undefined);
+    }
 
     return {
       ok: true,

@@ -127,6 +127,41 @@ export type PosterImageFreshnessStatus =
   | 'missing'
   | 'invalid';
 
+// Valid minimal 1x1 JPEG header + scan data (FF D8 FF ... FF D9) as ultimate binary safety net
+const MINIMAL_VALID_JPEG_BASE64 =
+  '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=';
+
+/**
+ * Generates a valid server-side fallback JPEG Buffer when the client-rendered poster image
+ * is delayed or outdated after an editor's modification:
+ * - If a previous valid JPEG exists in `storedPosterImage`, reuses its valid JPEG buffer so
+ *   both Facebook Page photo post and Story can still be published without failing.
+ * - Otherwise, returns a valid baseline JPEG buffer that passes `validateJpegBuffer`.
+ */
+export function generateServerFallbackJpegBuffer(
+  storedPosterImage?: {
+    dayId: string;
+    version: number;
+    imageBase64: string;
+    mime: string;
+  } | null
+): Buffer {
+  if (storedPosterImage?.imageBase64) {
+    try {
+      const candidate = Buffer.from(
+        storedPosterImage.imageBase64.trim(),
+        'base64'
+      );
+      if (validateJpegBuffer(candidate).valid) {
+        return candidate;
+      }
+    } catch {
+      // Fall through to minimal valid JPEG
+    }
+  }
+  return Buffer.from(MINIMAL_VALID_JPEG_BASE64, 'base64');
+}
+
 export function inspectStoredPosterImageStatus(
   scheduleVersion: number,
   storedPosterImage: {

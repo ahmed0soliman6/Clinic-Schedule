@@ -159,6 +159,10 @@ export default function App() {
       ? initialDayParam
       : 'saturday'
   );
+  const selectedDayRef = useRef<DayId>(selectedDay);
+  useEffect(() => {
+    selectedDayRef.current = selectedDay;
+  }, [selectedDay]);
 
   // Sync selectedDay when ?day=<dayId> changes via popstate or Service Worker notificationclick
   useEffect(() => {
@@ -244,6 +248,10 @@ export default function App() {
   }, [usersList]);
 
   const [settings, setSettings] = useState<CenterSettings>(FALLBACK_SETTINGS);
+  const settingsRef = useRef<CenterSettings>(settings);
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
   const [defaultSettings, setDefaultSettings] =
     useState<CenterSettings>(FALLBACK_SETTINGS);
   const [reminderSettings, setReminderSettings] = useState<ReminderSettings>(
@@ -984,12 +992,23 @@ export default function App() {
             const next = { ...prev };
             snap.forEach((docSnap) => {
               const dId = docSnap.id as DayId;
-              // Selected day is already managed by the dedicated per-day listener with conflict detection
-              if (dId === selectedDay) return;
               if (!DAYS_LIST.some((d) => d.id === dId)) return;
               if (isDaySavingOrPending(dId)) return;
 
               const remoteDoc = docSnap.data() as DailyScheduleData;
+              const remoteVer =
+                typeof remoteDoc.version === 'number' &&
+                Number.isFinite(remoteDoc.version)
+                  ? remoteDoc.version
+                  : 1;
+
+              const currentDay = prev[dId];
+              // Selected day has its own conflict-aware listener, but if selectedDay is still at initial version 1
+              // and remote has a higher version, hydrate it so self-healing has the real version immediately
+              if (dId === selectedDay && currentDay && currentDay.version >= remoteVer) {
+                return;
+              }
+
               const rawRows = Array.isArray(remoteDoc.draftRows)
                 ? remoteDoc.draftRows
                 : Array.isArray(remoteDoc.publishedRows)
@@ -998,13 +1017,7 @@ export default function App() {
               const cleanRows = filterNonEmptyRows(rawRows)
                 .slice(0, BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY)
                 .map((r, i) => sanitizeRowForFirestore(r, i));
-              const remoteVer =
-                typeof remoteDoc.version === 'number' &&
-                Number.isFinite(remoteDoc.version)
-                  ? remoteDoc.version
-                  : 1;
 
-              const currentDay = prev[dId];
               if (!currentDay || currentDay.version !== remoteVer) {
                 changed = true;
                 localVersionRef.current[dId] = remoteVer;
@@ -1257,6 +1270,26 @@ export default function App() {
               [targetDayId]: confirmedDay,
             }));
           }
+
+          // Immediately synchronize the poster image for targetDayId with the exact committed finalVersion
+          // so even if the editor modified another day (copy row/day) or switches tabs, posterImages/{targetDayId}
+          // matches schedules/{targetDayId}.version immediately!
+          isPosterSyncingRef.current = true;
+          syncPosterImageToFirestore({
+            dayId: targetDayId,
+            version: finalVersion,
+            dayLabel: dayMeta.label,
+            rows: sanitizedRows,
+            settings: settingsRef.current,
+            domNode:
+              targetDayId === selectedDayRef.current
+                ? exportPosterRef.current || posterRef.current
+                : null,
+          })
+            .catch(() => undefined)
+            .finally(() => {
+              isPosterSyncingRef.current = false;
+            });
 
           if (auditMeta) {
             pendingAuditMetaRef.current[targetDayId] = null;
@@ -1625,8 +1658,8 @@ export default function App() {
     return res;
   };
 
-  // Self-healing background poster sync on staff login:
-  // Compares each editable day's schedule version with posterMeta/{dayId}.version
+  // Self-healing background poster sync on staff login or whenever schedules/posterMeta change:
+  // Compares each day's schedule version with posterMeta/{dayId}.version
   // and silently generates missing/outdated posters one by one with a short delay.
   useEffect(() => {
     if (
@@ -1640,8 +1673,7 @@ export default function App() {
     if (isBgSyncRunningRef.current) return;
 
     const staleDays = DAYS_LIST.filter((d) => {
-      if (!canUserEditDay(activeRole, allowedDays, d.id)) return false;
-      const schedVer = schedulesRef.current[d.id]?.version || 1;
+      const schedVer = schedules[d.id]?.version || 1;
       const metaVer = posterMetaByDay[d.id]?.version;
       return metaVer !== schedVer;
     });
@@ -1667,7 +1699,7 @@ export default function App() {
             rows: cleanRows,
           });
           if (cancelled) break;
-          await new Promise((resolve) => setTimeout(resolve, 500));
+          await new Promise((resolve) => setTimeout(resolve, 400));
         }
       } catch {
         // Non-blocking background self-heal
@@ -1677,7 +1709,7 @@ export default function App() {
           setBgRenderTask(null);
         }
       }
-    }, 2200);
+    }, 1200);
 
     return () => {
       cancelled = true;
@@ -1690,7 +1722,199 @@ export default function App() {
     allowedDays,
     posterMetaLoaded,
     allStaffSchedulesLoaded,
+    schedules,
+    posterMetaByDay,
   ]);
+
+  /**
+   * Universal "تحديث الجدول" (Refresh Schedule & Sync Poster) handler visible to all users:
+   * - Flushes any pending local debounced edits first.
+   * - Fetches the latest schedule & settings from Firestore for the current day (and all days for staff).
+   * - For logged-in Staff (Editors & Admins): synchronizes the current day's poster image (plus any outdated day)
+   *   with Firestore `posterImages/{dayId}` and `posterMeta/{dayId}` and resets any stale Facebook auto-post attempt lock.
+   */
+  const handleRefreshScheduleAndSync = async (): Promise<{
+    ok: boolean;
+    message: string;
+  }> => {
+    try {
+      flushAllPendingDebouncedSaves();
+
+      // 1. Fetch latest center settings
+      const settingsSnap = await getDoc(doc(db, 'settings', 'center'));
+      let latestSettings = settingsRef.current;
+      if (settingsSnap.exists()) {
+        const remoteSettings = settingsSnap.data() as CenterSettings;
+        latestSettings = {
+          ...settingsRef.current,
+          ...remoteSettings,
+          ...(typeof remoteSettings.postTemplate === 'string'
+            ? {
+                postTemplate: normalizePostTemplateInstagramUrl(
+                  remoteSettings.postTemplate
+                ),
+              }
+            : {}),
+        };
+        setSettings(latestSettings);
+      }
+
+      const dayMeta =
+        DAYS_LIST.find((d) => d.id === selectedDay) || DAYS_LIST[0];
+
+      // 2. If visitor (not logged in as staff), fetch publicSchedules/{selectedDay}
+      if (!firebaseUser || !activeRole) {
+        const pubSnap = await getDoc(doc(db, 'publicSchedules', selectedDay));
+        if (pubSnap.exists()) {
+          const pubData = pubSnap.data() as PublicDailyScheduleData & {
+            version?: number;
+          };
+          const cleanRows = filterNonEmptyRows(pubData.publishedRows || [])
+            .slice(0, BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY)
+            .map((r, i) => sanitizeRowForFirestore(r, i));
+          const remoteVer =
+            typeof pubData.version === 'number' &&
+            Number.isFinite(pubData.version)
+              ? pubData.version
+              : 1;
+          setSchedules((prev) => ({
+            ...prev,
+            [selectedDay]: {
+              ...prev[selectedDay],
+              dayId: selectedDay,
+              dayLabel: dayMeta.label,
+              version: remoteVer,
+              draftRows: cleanRows,
+              publishedRows: cleanRows,
+              hasUnpublishedChanges: false,
+              isPublic: true,
+            },
+          }));
+        }
+        return {
+          ok: true,
+          message: `✅ تم تحديث جدول يوم ${dayMeta.label} بأحدث البيانات من السحابة!`,
+        };
+      }
+
+      // 3. Logged-in Staff (Editor or Admin): Fetch latest schedules across all 7 days + posterMeta
+      const [allSchedSnap, allMetaSnap] = await Promise.all([
+        getDocs(collection(db, 'schedules')),
+        getDocs(collection(db, 'posterMeta')),
+      ]);
+
+      const freshSchedules: Record<DayId, DailyScheduleData> = {
+        ...schedulesRef.current,
+      };
+      allSchedSnap.forEach((docSnap) => {
+        const dId = docSnap.id as DayId;
+        if (!DAYS_LIST.some((d) => d.id === dId)) return;
+        const remoteDoc = docSnap.data() as DailyScheduleData;
+        const rawRows = Array.isArray(remoteDoc.draftRows)
+          ? remoteDoc.draftRows
+          : Array.isArray(remoteDoc.publishedRows)
+          ? remoteDoc.publishedRows
+          : [];
+        const cleanRows = filterNonEmptyRows(rawRows)
+          .slice(0, BLUEPRINT_LIMITS.MAX_ROWS_PER_DAY)
+          .map((r, i) => sanitizeRowForFirestore(r, i));
+        const remoteVer =
+          typeof remoteDoc.version === 'number' &&
+          Number.isFinite(remoteDoc.version)
+            ? remoteDoc.version
+            : 1;
+
+        localVersionRef.current[dId] = remoteVer;
+        freshSchedules[dId] = {
+          ...(freshSchedules[dId] || {}),
+          ...remoteDoc,
+          dayId: dId,
+          version: remoteVer,
+          draftRows: cleanRows,
+          publishedRows: cleanRows,
+          hasUnpublishedChanges: false,
+          isPublic: true,
+        };
+      });
+
+      confirmedSchedulesRef.current = freshSchedules;
+      setSchedules(freshSchedules);
+
+      const freshMeta: Partial<Record<DayId, PosterMetaData>> = {};
+      allMetaSnap.forEach((docSnap) => {
+        const data = docSnap.data() as PosterMetaData;
+        const dId = (data.dayId || docSnap.id) as DayId;
+        if (DAYS_LIST.some((d) => d.id === dId)) {
+          freshMeta[dId] = {
+            dayId: dId,
+            version: typeof data.version === 'number' ? data.version : 0,
+            updatedAt: data.updatedAt,
+            bytes: typeof data.bytes === 'number' ? data.bytes : 0,
+          };
+        }
+      });
+      setPosterMetaByDay(freshMeta);
+
+      // 4. Synchronize current day's poster image immediately
+      const currentDaySched = freshSchedules[selectedDay];
+      const currentRows = filterNonEmptyRows(
+        currentDaySched?.draftRows || currentDaySched?.publishedRows || []
+      );
+      const currentVer = currentDaySched?.version || 1;
+
+      const syncCurrent = await syncPosterImageToFirestore({
+        dayId: selectedDay,
+        version: currentVer,
+        dayLabel: currentDaySched?.dayLabel || dayMeta.label,
+        rows: currentRows,
+        settings: latestSettings,
+        domNode: exportPosterRef.current || posterRef.current,
+      });
+
+      // Also sync any other day whose poster version is behind its schedule version
+      const otherStaleDays = DAYS_LIST.filter((d) => {
+        if (d.id === selectedDay) return false;
+        const sVer = freshSchedules[d.id]?.version || 1;
+        const mVer = freshMeta[d.id]?.version;
+        return mVer !== sVer;
+      });
+
+      for (const staleDay of otherStaleDays) {
+        const stSched = freshSchedules[staleDay.id];
+        if (!stSched) continue;
+        const stRows = filterNonEmptyRows(
+          stSched.draftRows || stSched.publishedRows || []
+        );
+        await syncPosterImageToFirestore({
+          dayId: staleDay.id,
+          version: stSched.version || 1,
+          dayLabel: stSched.dayLabel || staleDay.label,
+          rows: stRows,
+          settings: latestSettings,
+          domNode: null,
+        });
+      }
+
+      if (!syncCurrent.ok) {
+        return {
+          ok: false,
+          message:
+            syncCurrent.error ||
+            `تم جلب أحدث جدول ليوم ${dayMeta.label}، لكن تعذر تحديث صورة البوستر في السحابة.`,
+        };
+      }
+
+      return {
+        ok: true,
+        message: `✅ تم تحديث جدول يوم ${dayMeta.label} ومزامنة صورة البوستر (إصدار v${currentVer}) للنشر التلقائي بنجاح!`,
+      };
+    } catch {
+      return {
+        ok: false,
+        message: 'حدث خطأ أثناء تحديث الجدول من السحابة. يرجى المحاولة مرة أخرى.',
+      };
+    }
+  };
 
   // Strictly require authenticated user login to edit
   const userCanEditSelectedDay =
@@ -3140,6 +3364,7 @@ export default function App() {
             activeRole === 'ADMIN' ? handleChangeFbAutoPostTime : undefined
           }
           onPublishFacebookNow={handlePublishFacebookNow}
+          onRefreshSchedule={handleRefreshScheduleAndSync}
         />
 
         {/* Main Workspace: Interactive Poster Table */}

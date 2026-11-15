@@ -350,7 +350,7 @@ service cloud.firestore {
 
     match /posterImages/{dayId} {
       allow get, list: if isStaff();
-      allow create, update: if isSignedIn() && isValidId(dayId) && isEditorForDay(dayId) &&
+      allow create, update: if isSignedIn() && isValidId(dayId) && isStaff() &&
         incoming().dayId == dayId &&
         incoming().version is int && incoming().version >= 1 &&
         incoming().imageBase64 is string && incoming().imageBase64.size() < 900000 &&
@@ -360,7 +360,7 @@ service cloud.firestore {
 
     match /posterMeta/{dayId} {
       allow get, list: if isStaff();
-      allow create, update: if isSignedIn() && isValidId(dayId) && isEditorForDay(dayId) &&
+      allow create, update: if isSignedIn() && isValidId(dayId) && isStaff() &&
         incoming().dayId == dayId &&
         incoming().version is int && incoming().version >= 1 &&
         incoming().bytes is int && incoming().bytes >= 1 && incoming().bytes < 900000 &&

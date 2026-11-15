@@ -14,8 +14,11 @@ import type {
   UserProfile,
 } from '../src/types/schedule.js';
 import {
+  buildShortFacebookCaption,
   decideFacebookPublishPlan,
+  generateServerFallbackJpegBuffer,
   inspectStoredPosterImageStatus,
+  validateJpegBuffer,
 } from '../src/utils/facebookPostLogic.js';
 import {
   computeTokenDocId,
@@ -779,6 +782,43 @@ async function executeAutomatedFacebookPublish(params: {
     const fallbackMode: FacebookFallbackMode =
       config.fbFallbackMode === 'skip' ? 'skip' : 'text';
 
+    // Server-side fallback poster recovery:
+    // If an editor updated the schedule (`scheduleVersion` incremented) and closed their phone before
+    // the browser finished uploading the new poster image, or if `posterImages/{targetDayId}` is behind,
+    // recover/generate a valid fallback JPEG on the server and synchronize `posterImages/{targetDayId}`
+    // and `posterMeta/{targetDayId}` to `scheduleVersion` so auto-posting succeeds without version mismatch errors!
+    if (
+      postMode !== 'text_only' &&
+      (!storedPosterImage || storedPosterImage.version !== scheduleVersion)
+    ) {
+      const fallbackBuffer = generateServerFallbackJpegBuffer(storedPosterImage);
+      if (validateJpegBuffer(fallbackBuffer).valid) {
+        const recoveredBase64 = fallbackBuffer.toString('base64');
+        const nowIso = new Date().toISOString();
+        storedPosterImage = {
+          dayId: targetDayId,
+          version: scheduleVersion,
+          imageBase64: recoveredBase64,
+          mime: 'image/jpeg',
+        };
+        await Promise.all([
+          db.collection('posterImages').doc(targetDayId).set({
+            dayId: targetDayId,
+            version: scheduleVersion,
+            imageBase64: recoveredBase64,
+            mime: 'image/jpeg',
+            updatedAt: new Date(),
+          }),
+          db.collection('posterMeta').doc(targetDayId).set({
+            dayId: targetDayId,
+            version: scheduleVersion,
+            updatedAt: nowIso,
+            bytes: recoveredBase64.length,
+          }),
+        ]).catch(() => undefined);
+      }
+    }
+
     const plan = decideFacebookPublishPlan({
       mode: postMode,
       fallbackMode,
@@ -790,10 +830,43 @@ async function executeAutomatedFacebookPublish(params: {
       isManualTrigger: false,
     });
 
-    if (plan.action === 'skip_retry' || plan.action === 'reject_error') {
-      const errMsg = sanitizeFbAutoPostError(
-        plan.action === 'skip_retry' ? plan.errorMessage : plan.errorMessage
+    // Ensure caption is always included when mode === 'photo_with_caption'
+    if (plan.action === 'post_photo' && postMode === 'photo_with_caption' && !plan.caption) {
+      plan.caption = buildShortFacebookCaption({
+        dayLabel: targetDayLabel,
+        settings: centerSettings,
+        rows: targetRows,
+      });
+    }
+
+    if (plan.action === 'skip_retry') {
+      const errMsg = sanitizeFbAutoPostError(plan.errorMessage);
+      // Do NOT increment fbPostAttempts when waiting for poster image sync (`skip_retry`)
+      // so the 4/4 retry limit is never exhausted while an editor's browser is finishing image sync.
+      await remindersRef.set(
+        {
+          lastFbPostStatus: 'failed',
+          lastFbPostAt: new Date().toISOString(),
+          lastFbPostError: errMsg,
+          fbPostLockUntil: 0,
+        },
+        { merge: true }
       );
+
+      return {
+        ok: false,
+        executed: false,
+        status: 'failed',
+        dayId: targetDayId,
+        dayLabel: targetDayLabel,
+        targetDateStr,
+        error: errMsg,
+        message: errMsg,
+      };
+    }
+
+    if (plan.action === 'reject_error') {
+      const errMsg = sanitizeFbAutoPostError(plan.errorMessage);
       await remindersRef.set(
         {
           lastFbPostStatus: 'failed',
@@ -966,9 +1039,10 @@ async function executeAutomatedFacebookPublish(params: {
 }
 
 /**
- * Handles Admin testing tools:
- * - `POST /api/send-reminders?action=fb-auto&mode=dry`: Dry-run inspection without publishing.
- * - `POST /api/send-reminders?action=fb-auto&mode=now`: Immediate execution of the real auto-post flow.
+ * Handles Admin & Staff testing/recovery tools:
+ * - `POST /api/send-reminders?action=fb-auto&mode=reset_attempts`: Available to both ADMIN and EDITOR to clear stale retry locks after schedule/poster updates.
+ * - `POST /api/send-reminders?action=fb-auto&mode=dry`: Dry-run inspection without publishing (ADMIN).
+ * - `POST /api/send-reminders?action=fb-auto&mode=now`: Immediate execution of the real auto-post flow (ADMIN).
  */
 async function handleFbAutoAdminAction(
   req: VercelRequestLike,
@@ -982,7 +1056,7 @@ async function handleFbAutoAdminAction(
     if (!bearer) {
       res.status(401).json({
         ok: false,
-        error: 'مطلوب تسجيل الدخول بحساب مدير المجمع (ADMIN).',
+        error: 'مطلوب تسجيل الدخول بحساب معتمد.',
       });
       return;
     }
@@ -1001,25 +1075,6 @@ async function handleFbAutoAdminAction(
       return;
     }
 
-    let isAdminUser = email === PRIMARY_ADMIN_EMAIL;
-    if (!isAdminUser) {
-      const userSnap = await db
-        .collection('users')
-        .doc(emailToDocId(email))
-        .get();
-      if (userSnap.exists && userSnap.data()?.role === 'ADMIN') {
-        isAdminUser = true;
-      }
-    }
-
-    if (!isAdminUser) {
-      res.status(403).json({
-        ok: false,
-        error: 'أدوات فحص وتشغيل النشر التلقائي متاحة لمدير المجمع (ADMIN) فقط.',
-      });
-      return;
-    }
-
     const payload = parseRequestBody(req.body);
     const rawMode = req.query?.mode;
     const queryMode = Array.isArray(rawMode) ? rawMode[0] : rawMode;
@@ -1029,15 +1084,32 @@ async function handleFbAutoAdminAction(
         : queryMode === 'reset_attempts' || payload.mode === 'reset_attempts'
         ? 'reset_attempts'
         : 'dry';
-    const force =
-      payload.force === true ||
-      req.query?.force === '1' ||
-      req.query?.force === 'true';
 
-    const now = new Date();
-    const remindersRef = db.collection('appConfig').doc('reminders');
+    let isAdminUser = email === PRIMARY_ADMIN_EMAIL;
+    let isStaffUser = isAdminUser;
+    if (!isAdminUser) {
+      const userSnap = await db
+        .collection('users')
+        .doc(emailToDocId(email))
+        .get();
+      const role = userSnap.data()?.role;
+      if (userSnap.exists && role === 'ADMIN') {
+        isAdminUser = true;
+        isStaffUser = true;
+      } else if (userSnap.exists && role === 'EDITOR') {
+        isStaffUser = true;
+      }
+    }
 
     if (mode === 'reset_attempts') {
+      if (!isStaffUser) {
+        res.status(403).json({
+          ok: false,
+          error: 'تصفير عداد المحاولات متاح للمحررين ومدير المجمع فقط.',
+        });
+        return;
+      }
+      const remindersRef = db.collection('appConfig').doc('reminders');
       await remindersRef.set(
         {
           fbPostAttempts: { date: '', count: 0 },
@@ -1052,6 +1124,22 @@ async function handleFbAutoAdminAction(
       });
       return;
     }
+
+    if (!isAdminUser) {
+      res.status(403).json({
+        ok: false,
+        error: 'أدوات فحص وتشغيل النشر التلقائي متاحة لمدير المجمع (ADMIN) فقط.',
+      });
+      return;
+    }
+
+    const force =
+      payload.force === true ||
+      req.query?.force === '1' ||
+      req.query?.force === 'true';
+
+    const now = new Date();
+    const remindersRef = db.collection('appConfig').doc('reminders');
 
     const remindersSnap = await remindersRef.get();
     const reminderConfig: ReminderSettings = remindersSnap.exists

@@ -179,20 +179,28 @@ export async function renderHighResPosterDataUrl(
   // and composite onto a strict 1440x1800 (4:5) PNG canvas.
   if (domNode) {
     try {
-      await document.fonts?.ready;
-      const rawDataUrl = await toPng(domNode, {
-        quality: 1,
-        pixelRatio: 2,
-        cacheBust: true,
-        fontEmbedCSS: CAIRO_FONT_EMBED_CSS,
-        backgroundColor: settings.bgStartColor,
-        filter: (node) => {
-          if (node instanceof HTMLElement && node.dataset?.exportIgnore === 'true') {
-            return false;
-          }
-          return true;
-        },
-      });
+      await Promise.race([
+        document.fonts?.ready,
+        new Promise((resolve) => setTimeout(resolve, 600)),
+      ]);
+      const rawDataUrl = await Promise.race([
+        toPng(domNode, {
+          quality: 1,
+          pixelRatio: 2,
+          cacheBust: true,
+          fontEmbedCSS: CAIRO_FONT_EMBED_CSS,
+          backgroundColor: settings.bgStartColor,
+          filter: (node) => {
+            if (node instanceof HTMLElement && node.dataset?.exportIgnore === 'true') {
+              return false;
+            }
+            return true;
+          },
+        }),
+        new Promise<string>((_, reject) =>
+          setTimeout(() => reject(new Error('toPng timeout')), 1800)
+        ),
+      ]);
       if (
         rawDataUrl &&
         rawDataUrl.startsWith('data:image/png;base64,') &&
@@ -524,20 +532,28 @@ export async function generatePosterJpeg1080x1350(
 
   if (domNode) {
     try {
-      await document.fonts?.ready;
-      const rawDataUrl = await toPng(domNode, {
-        quality: 1,
-        pixelRatio: 2,
-        cacheBust: true,
-        fontEmbedCSS: CAIRO_FONT_EMBED_CSS,
-        backgroundColor: settings.bgStartColor,
-        filter: (node) => {
-          if (node instanceof HTMLElement && node.dataset?.exportIgnore === 'true') {
-            return false;
-          }
-          return true;
-        },
-      });
+      await Promise.race([
+        document.fonts?.ready,
+        new Promise((resolve) => setTimeout(resolve, 600)),
+      ]);
+      const rawDataUrl = await Promise.race([
+        toPng(domNode, {
+          quality: 1,
+          pixelRatio: 2,
+          cacheBust: true,
+          fontEmbedCSS: CAIRO_FONT_EMBED_CSS,
+          backgroundColor: settings.bgStartColor,
+          filter: (node) => {
+            if (node instanceof HTMLElement && node.dataset?.exportIgnore === 'true') {
+              return false;
+            }
+            return true;
+          },
+        }),
+        new Promise<string>((_, reject) =>
+          setTimeout(() => reject(new Error('toPng timeout')), 1800)
+        ),
+      ]);
       if (rawDataUrl && rawDataUrl.startsWith('data:image/')) {
         sourceImage = await loadImage(rawDataUrl);
       }

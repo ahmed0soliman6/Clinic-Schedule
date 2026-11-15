@@ -1463,9 +1463,13 @@ test('firestore.rules includes new reminder fields, server-only field protection
     rulesContent,
     /match\s+\/posterMeta\/\{dayId\}\s*\{[\s\S]*?allow\s+get,\s*list:\s+if\s+isStaff\(\);/
   );
+  assert.match(
+    rulesContent,
+    /match\s+\/posterImages\/\{dayId\}\s*\{[\s\S]*?allow\s+create,\s*update:\s+if\s+isSignedIn\(\)\s+&&\s+isValidId\(dayId\)\s+&&\s+isStaff\(\)/
+  );
+  assert.match(
+    rulesContent,
+    /match\s+\/posterMeta\/\{dayId\}\s*\{[\s\S]*?allow\s+create,\s*update:\s+if\s+isSignedIn\(\)\s+&&\s+isValidId\(dayId\)\s+&&\s+isStaff\(\)/
+  );
 });
-
-
-
-
 
