@@ -1272,24 +1272,38 @@ export default function App() {
           }
 
           // Immediately synchronize the poster image for targetDayId with the exact committed finalVersion
-          // so even if the editor modified another day (copy row/day) or switches tabs, posterImages/{targetDayId}
-          // matches schedules/{targetDayId}.version immediately!
+          // ALWAYS capturing the real <SchedulePoster> DOM (never domNode: null) so all medical icons,
+          // calendar badge, sparkles, header icons, and footer icons are preserved identically!
           isPosterSyncingRef.current = true;
-          syncPosterImageToFirestore({
-            dayId: targetDayId,
-            version: finalVersion,
-            dayLabel: dayMeta.label,
-            rows: sanitizedRows,
-            settings: settingsRef.current,
-            domNode:
-              targetDayId === selectedDayRef.current
-                ? exportPosterRef.current || posterRef.current
-                : null,
-          })
-            .catch(() => undefined)
-            .finally(() => {
+          (async () => {
+            try {
+              if (targetDayId === selectedDayRef.current) {
+                // Allow React one brief frame to render the updated rows into exportPosterRef before capture
+                await new Promise((resolve) => setTimeout(resolve, 150));
+                await syncPosterImageToFirestore({
+                  dayId: targetDayId,
+                  version: finalVersion,
+                  dayLabel: dayMeta.label,
+                  rows: sanitizedRows,
+                  settings: settingsRef.current,
+                  domNode: exportPosterRef.current || posterRef.current,
+                });
+              } else {
+                await renderAndSyncSingleDayOffscreen({
+                  dayId: targetDayId,
+                  dayLabel: dayMeta.label,
+                  version: finalVersion,
+                  rows: sanitizedRows,
+                  overrideSettings: settingsRef.current,
+                });
+                setBgRenderTask(null);
+              }
+            } catch {
+              // Non-blocking background sync
+            } finally {
               isPosterSyncingRef.current = false;
-            });
+            }
+          })();
 
           if (auditMeta) {
             pendingAuditMetaRef.current[targetDayId] = null;
@@ -1638,21 +1652,22 @@ export default function App() {
     dayLabel: string;
     version: number;
     rows: ScheduleRow[];
+    overrideSettings?: CenterSettings;
   }): Promise<{ ok: boolean; error?: string }> => {
     setBgRenderTask({
       dayId: params.dayId,
       dayLabel: params.dayLabel,
       rows: params.rows,
     });
-    // Wait for React to commit the offscreen SchedulePoster DOM and fonts/layout to settle
-    await new Promise((resolve) => setTimeout(resolve, 350));
+    // Wait for React to commit the offscreen SchedulePoster DOM and SVG icons/fonts/layout to settle
+    await new Promise((resolve) => setTimeout(resolve, 450));
     const domNode = bgPosterRef.current || exportPosterRef.current;
     const res = await syncPosterImageToFirestore({
       dayId: params.dayId,
       version: params.version,
       dayLabel: params.dayLabel,
       rows: params.rows,
-      settings,
+      settings: params.overrideSettings || settingsRef.current,
       domNode,
     });
     return res;
@@ -1855,7 +1870,8 @@ export default function App() {
       });
       setPosterMetaByDay(freshMeta);
 
-      // 4. Synchronize current day's poster image immediately
+      // 4. Synchronize current day's poster image immediately (wait briefly for React to paint latest rows)
+      await new Promise((resolve) => setTimeout(resolve, 180));
       const currentDaySched = freshSchedules[selectedDay];
       const currentRows = filterNonEmptyRows(
         currentDaySched?.draftRows || currentDaySched?.publishedRows || []
@@ -1872,6 +1888,7 @@ export default function App() {
       });
 
       // Also sync any other day whose poster version is behind its schedule version
+      // using the real offscreen <SchedulePoster> DOM so every clinic icon, badge, and footer icon is included!
       const otherStaleDays = DAYS_LIST.filter((d) => {
         if (d.id === selectedDay) return false;
         const sVer = freshSchedules[d.id]?.version || 1;
@@ -1879,20 +1896,27 @@ export default function App() {
         return mVer !== sVer;
       });
 
-      for (const staleDay of otherStaleDays) {
-        const stSched = freshSchedules[staleDay.id];
-        if (!stSched) continue;
-        const stRows = filterNonEmptyRows(
-          stSched.draftRows || stSched.publishedRows || []
-        );
-        await syncPosterImageToFirestore({
-          dayId: staleDay.id,
-          version: stSched.version || 1,
-          dayLabel: stSched.dayLabel || staleDay.label,
-          rows: stRows,
-          settings: latestSettings,
-          domNode: null,
-        });
+      if (otherStaleDays.length > 0) {
+        isBgSyncRunningRef.current = true;
+        try {
+          for (const staleDay of otherStaleDays) {
+            const stSched = freshSchedules[staleDay.id];
+            if (!stSched) continue;
+            const stRows = filterNonEmptyRows(
+              stSched.draftRows || stSched.publishedRows || []
+            );
+            await renderAndSyncSingleDayOffscreen({
+              dayId: staleDay.id,
+              dayLabel: stSched.dayLabel || staleDay.label,
+              version: stSched.version || 1,
+              rows: stRows,
+              overrideSettings: latestSettings,
+            });
+          }
+        } finally {
+          isBgSyncRunningRef.current = false;
+          setBgRenderTask(null);
+        }
       }
 
       if (!syncCurrent.ok) {

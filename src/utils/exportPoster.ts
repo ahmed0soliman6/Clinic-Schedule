@@ -181,7 +181,7 @@ export async function renderHighResPosterDataUrl(
     try {
       await Promise.race([
         document.fonts?.ready,
-        new Promise((resolve) => setTimeout(resolve, 600)),
+        new Promise((resolve) => setTimeout(resolve, 2000)),
       ]);
       const rawDataUrl = await Promise.race([
         toPng(domNode, {
@@ -198,7 +198,7 @@ export async function renderHighResPosterDataUrl(
           },
         }),
         new Promise<string>((_, reject) =>
-          setTimeout(() => reject(new Error('toPng timeout')), 1800)
+          setTimeout(() => reject(new Error('toPng timeout')), 12000)
         ),
       ]);
       if (
@@ -534,7 +534,7 @@ export async function generatePosterJpeg1080x1350(
     try {
       await Promise.race([
         document.fonts?.ready,
-        new Promise((resolve) => setTimeout(resolve, 600)),
+        new Promise((resolve) => setTimeout(resolve, 2000)),
       ]);
       const rawDataUrl = await Promise.race([
         toPng(domNode, {
@@ -551,7 +551,7 @@ export async function generatePosterJpeg1080x1350(
           },
         }),
         new Promise<string>((_, reject) =>
-          setTimeout(() => reject(new Error('toPng timeout')), 1800)
+          setTimeout(() => reject(new Error('toPng timeout')), 12000)
         ),
       ]);
       if (rawDataUrl && rawDataUrl.startsWith('data:image/')) {

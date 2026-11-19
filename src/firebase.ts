@@ -4,8 +4,10 @@ import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 import {
   deleteDoc,
   doc,
+  Firestore,
   getDocFromServer,
   getFirestore,
+  initializeFirestore,
   serverTimestamp,
   setDoc,
 } from 'firebase/firestore';
@@ -58,13 +60,31 @@ export const resolvedDatabaseId =
   firebaseAppletConfig.firestoreDatabaseId ||
   '(default)';
 
-// Primary provisioned Firestore database: connects to (default) shown in console
-export const db =
-  resolvedDatabaseId &&
+const useNamedDatabase =
+  Boolean(resolvedDatabaseId) &&
   resolvedDatabaseId !== '(default)' &&
-  resolvedDatabaseId !== 'default'
-    ? getFirestore(app, resolvedDatabaseId)
-    : getFirestore(app);
+  resolvedDatabaseId !== 'default';
+
+function createFirestoreInstance(): Firestore {
+  try {
+    return useNamedDatabase
+      ? initializeFirestore(
+          app,
+          { experimentalAutoDetectLongPolling: true },
+          resolvedDatabaseId
+        )
+      : initializeFirestore(app, {
+          experimentalAutoDetectLongPolling: true,
+        });
+  } catch {
+    return useNamedDatabase
+      ? getFirestore(app, resolvedDatabaseId)
+      : getFirestore(app);
+  }
+}
+
+// Primary provisioned Firestore database with auto-detected long-polling for resilient connections
+export const db = createFirestoreInstance();
 
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();

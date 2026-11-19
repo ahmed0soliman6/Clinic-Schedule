@@ -418,10 +418,10 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
       dir="rtl"
       className="mx-auto w-full max-w-[780px] rounded-2xl bg-white p-2.5 sm:p-3.5 shadow-sm border border-purple-100 space-y-2.5"
     >
-      {/* Action Buttons in ONE Single Row: مشاركة | مشاركة+بوست (مكبّر) | بوست | تحديث الجدول | أيقونة التنزيل */}
+      {/* Action Buttons in ONE Single Row: مشاركة | مشاركة+بوست | بوست | تحديث الجدول | أيقونة التنزيل */}
       <div
         data-testid="share-buttons-grid"
-        className="grid grid-cols-[1fr_1.3fr_0.9fr_auto_auto] gap-1 sm:gap-2 items-center"
+        className="grid grid-cols-[minmax(0,0.9fr)_minmax(0,1.25fr)_minmax(0,0.75fr)_auto_auto] gap-1 sm:gap-2 items-center"
       >
         {/* Button 1: مشاركة (صورة فقط بدون بوست) */}
         <button
@@ -429,9 +429,9 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
           onClick={handleNativeShareImageOnly}
           data-testid="share-image-only-btn"
           title="مشاركة صورة الجدول فقط بدون نص البوست"
-          className="w-full inline-flex items-center justify-center gap-1 sm:gap-1.5 rounded-xl bg-sky-600 px-1 sm:px-3 py-2.5 text-[11px] sm:text-xs md:text-sm font-black text-white whitespace-nowrap shadow-xs hover:bg-sky-700 transition cursor-pointer"
+          className="w-full min-w-0 inline-flex items-center justify-center gap-1 sm:gap-1.5 rounded-xl bg-sky-600 px-1 sm:px-3 py-2.5 text-[11px] sm:text-xs md:text-sm font-black text-white whitespace-nowrap shadow-xs hover:bg-sky-700 transition cursor-pointer"
         >
-          <Share2 className="w-4 h-4 sm:w-4.5 sm:h-4.5 shrink-0" />
+          <Share2 className="w-3.5 h-3.5 sm:w-4.5 sm:h-4.5 shrink-0" />
           <span>مشاركة</span>
         </button>
 
@@ -441,9 +441,9 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
           onClick={handleNativeMobileShareWithPost}
           data-testid="share-native-btn"
           title="مشاركة ملف الصورة مع البوست مباشرة عبر تطبيقات الهاتف"
-          className="w-full inline-flex items-center justify-center gap-1 sm:gap-1.5 rounded-xl bg-indigo-600 px-1.5 sm:px-3.5 py-2.5 text-xs sm:text-sm md:text-base font-black text-white whitespace-nowrap shadow-md hover:bg-indigo-700 transition cursor-pointer"
+          className="w-full min-w-0 inline-flex items-center justify-center gap-1 sm:gap-1.5 rounded-xl bg-indigo-600 px-1.5 sm:px-3.5 py-2.5 text-[11px] sm:text-sm md:text-base font-black text-white whitespace-nowrap shadow-md hover:bg-indigo-700 transition cursor-pointer"
         >
-          <Smartphone className="w-4 h-4 sm:w-5 sm:h-5 shrink-0" />
+          <Smartphone className="w-3.5 h-3.5 sm:w-5 sm:h-5 shrink-0" />
           <span>مشاركة+بوست</span>
         </button>
 
@@ -453,13 +453,13 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
           onClick={() => setShowPostBox((prev) => !prev)}
           data-testid="toggle-post-caption-btn"
           title={`عرض ونسخ النص الترويجي لبوست يوم ${dayLabel}`}
-          className={`w-full inline-flex items-center justify-center gap-1 sm:gap-1.5 rounded-xl border-2 px-1 sm:px-2.5 py-2.5 text-[11px] sm:text-xs md:text-sm font-black whitespace-nowrap shadow-xs transition cursor-pointer ${
+          className={`w-full min-w-0 inline-flex items-center justify-center gap-1 sm:gap-1.5 rounded-xl border-2 px-1 sm:px-2.5 py-2.5 text-[11px] sm:text-xs md:text-sm font-black whitespace-nowrap shadow-xs transition cursor-pointer ${
             showPostBox
               ? 'border-purple-600 bg-purple-100 text-purple-950'
               : 'border-purple-300 bg-purple-50 text-purple-950 hover:bg-purple-100'
           }`}
         >
-          <MessageSquareText className="w-4 h-4 sm:w-4.5 sm:h-4.5 text-purple-700 shrink-0" />
+          <MessageSquareText className="w-3.5 h-3.5 sm:w-4.5 sm:h-4.5 text-purple-700 shrink-0" />
           <span>بوست</span>
         </button>
 
@@ -473,11 +473,14 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
           className="inline-flex items-center justify-center gap-1 sm:gap-1.5 rounded-xl bg-emerald-600 px-2 sm:px-3 py-2.5 text-[11px] sm:text-xs md:text-sm font-black text-white whitespace-nowrap shadow-xs hover:bg-emerald-700 disabled:opacity-60 transition cursor-pointer"
         >
           <RefreshCw
-            className={`w-4 h-4 sm:w-4.5 sm:h-4.5 shrink-0 ${
+            className={`w-3.5 h-3.5 sm:w-4.5 sm:h-4.5 shrink-0 ${
               isRefreshing ? 'animate-spin' : ''
             }`}
           />
-          <span>{isRefreshing ? 'جارٍ التحديث...' : 'تحديث الجدول'}</span>
+          <span className="sm:hidden">{isRefreshing ? 'تحديث...' : 'تحديث'}</span>
+          <span className="hidden sm:inline">
+            {isRefreshing ? 'جارٍ التحديث...' : 'تحديث الجدول'}
+          </span>
         </button>
 
         {/* Button 5: تنزيل صورة الجدول (أيقونة تنزيل مصغّرة بدون كلمة حفظ) */}
@@ -489,7 +492,7 @@ export const ShareAndExportBar: React.FC<ShareAndExportBarProps> = ({
           title="تنزيل صورة الجدول PNG بأبعاد 4:5 ثابتة"
           className="inline-flex items-center justify-center rounded-xl bg-purple-700 px-2 sm:px-3 py-2.5 text-white shadow-xs hover:bg-purple-800 disabled:opacity-60 transition cursor-pointer"
         >
-          <Download className="w-4.5 h-4.5 sm:w-5 sm:h-5 shrink-0" />
+          <Download className="w-4 h-4 sm:w-5 sm:h-5 shrink-0" />
         </button>
       </div>
 
